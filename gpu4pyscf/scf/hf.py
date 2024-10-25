@@ -47,6 +47,13 @@ def get_jk(mol, dm, hermi=1, vhfopt=None, with_j=True, with_k=True, omega=None,
            verbose=None):
     '''Compute J, K matrices with CPU-GPU hybrid algorithm
     '''
+
+    world_size = 1
+    rank = 0
+    if hasattr(mol, 'comm'):
+        world_size = mol.comm.world.size
+        rank = mol.comm.world.rank
+
     log = logger.new_logger(mol, verbose)
     cput0 = log.init_timer()
     if hermi != 1:
