@@ -24,7 +24,7 @@ from pyscf import lib, __config__
 from pyscf.scf import dhf
 from pyscf.df import df_jk, addons
 from gpu4pyscf.lib import logger
-from gpu4pyscf.lib.cupy_helper import contract, take_last2d, transpose_sum, load_library, get_avail_mem
+from gpu4pyscf.lib.cupy_helper import contract, take_last2d, transpose_sum, load_library, get_avail_mem, empty_mapped
 from gpu4pyscf.dft import rks, uks, numint
 from gpu4pyscf.scf import hf, uhf
 from gpu4pyscf.df import df, int3c2e
@@ -52,11 +52,11 @@ def init_workflow(mf, dm0=None):
             rsh_df.build(omega=omega)
         return
 
+    mf.h1e = cupy.asarray(mf.get_hcore(mf.mol))
+    mf.s1e = cupy.asarray(mf.get_ovlp(mf.mol))
     # pre-compute h1e and s1e and cderi for async workflow
     with lib.call_in_background(build_df) as build:
         build()
-        mf.s1e = cupy.asarray(mf.get_ovlp(mf.mol))
-        mf.h1e = cupy.asarray(mf.get_hcore(mf.mol))
         # for DFT object
         if hasattr(mf, '_numint'):
             ni = mf._numint
@@ -242,7 +242,7 @@ class _DFHF:
         obj = self.undo_df().to_cpu().density_fit()
         return utils.to_cpu(self, obj)
 
-def get_jk(dfobj, dms_tag, hermi=1, with_j=True, with_k=True, direct_scf_tol=1e-14, omega=None):
+def get_jk(dfobj, dms_tag, hermi=0, with_j=True, with_k=True, direct_scf_tol=1e-14, omega=None):
     '''
     get jk with density fitting
     outputs and input are on the same device
@@ -268,31 +268,37 @@ def get_jk(dfobj, dms_tag, hermi=1, with_j=True, with_k=True, direct_scf_tol=1e-
 
     assert nao == dfobj.nao
     vj = vk = None
-    ao_idx = dfobj.intopt.ao_idx
-    dms = take_last2d(dms, ao_idx)
+    intopt = dfobj.intopt
+    dms = intopt.sort_orbitals(dms, axis=[1,2])
     dms_shape = dms.shape
-    rows = dfobj.intopt.cderi_row
-    cols = dfobj.intopt.cderi_col
-    
+    rows = intopt.cderi_row
+    cols = intopt.cderi_col
+
     if with_j:
         dm_sparse = dms[:,rows,cols]
-        dm_sparse[:, dfobj.intopt.cderi_diag] *= .5
+        if hermi == 0:
+            dm_sparse += dms[:,cols,rows]
+        else:
+            dm_sparse *= 2
+        dm_sparse[:, intopt.cderi_diag] *= .5
 
     if with_k:
         vk = cupy.zeros_like(dms)
-    
+
     # SCF K matrix with occ
     if getattr(dms_tag, 'mo_coeff', None) is not None:
+        assert hermi == 1
         mo_occ = dms_tag.mo_occ
         mo_coeff = dms_tag.mo_coeff
         nmo = mo_occ.shape[-1]
         mo_coeff = mo_coeff.reshape(-1,nao,nmo)
         mo_occ   = mo_occ.reshape(-1,nmo)
+        mo_coeff = intopt.sort_orbitals(mo_coeff, axis=[1])
         nocc = 0
         occ_coeff = [0]*nset
         for i in range(nset):
             occ_idx = mo_occ[i] > 0
-            occ_coeff[i] = mo_coeff[i][:,occ_idx][ao_idx] * mo_occ[i][occ_idx]**0.5
+            occ_coeff[i] = mo_coeff[i][:,occ_idx] * mo_occ[i][occ_idx]**0.5
             nocc += mo_occ[i].sum()
         blksize = dfobj.get_blksize(extra=nao*nocc)
         if with_j:
@@ -300,7 +306,7 @@ def get_jk(dfobj, dms_tag, hermi=1, with_j=True, with_k=True, direct_scf_tol=1e-
         for cderi, cderi_sparse in dfobj.loop(blksize=blksize, unpack=with_k):
             # leading dimension is 1
             if with_j:
-                rhoj = 2.0*dm_sparse.dot(cderi_sparse)
+                rhoj = dm_sparse.dot(cderi_sparse)
                 vj_packed += cupy.dot(rhoj, cderi_sparse.T)
             cderi_sparse = rhoj = None
             for i in range(nset):
@@ -316,18 +322,18 @@ def get_jk(dfobj, dms_tag, hermi=1, with_j=True, with_k=True, direct_scf_tol=1e-
             vj[:,rows,cols] = vj_packed
             vj[:,cols,rows] = vj_packed
 
-    # CP-HF K matrix
     elif hasattr(dms_tag, 'mo1'):
+        # K matrix in CP-HF or TDDFT
         occ_coeffs = dms_tag.occ_coeff
         mo1s = dms_tag.mo1
-        mo_occ = dms_tag.mo_occ
-        if not isinstance(occ_coeffs, list):
-            occ_coeffs = [occ_coeffs * 2.0] # For restricted
-        if not isinstance(mo1s, list):
+        if not isinstance(occ_coeffs, (tuple, list)):
+            # *2 for double occupancy in RHF/RKS
+            occ_coeffs = [occ_coeffs * 2.0]
+        if not isinstance(mo1s, (tuple, list)):
             mo1s = [mo1s]
 
-        occ_coeffs = [occ_coeff[ao_idx] for occ_coeff in occ_coeffs]
-        mo1s = [mo1[:,ao_idx] for mo1 in mo1s]
+        occ_coeffs = [intopt.sort_orbitals(occ_coeff, axis=[0]) for occ_coeff in occ_coeffs]
+        mo1s = [intopt.sort_orbitals(mo1, axis=[1]) for mo1 in mo1s]
 
         if with_j:
             vj_sparse = cupy.zeros_like(dm_sparse)
@@ -336,7 +342,7 @@ def get_jk(dfobj, dms_tag, hermi=1, with_j=True, with_k=True, direct_scf_tol=1e-
         blksize = dfobj.get_blksize(extra=2*nao*nocc)
         for cderi, cderi_sparse in dfobj.loop(blksize=blksize, unpack=with_k):
             if with_j:
-                rhoj = 2.0*dm_sparse.dot(cderi_sparse)
+                rhoj = dm_sparse.dot(cderi_sparse)
                 vj_sparse += cupy.dot(rhoj, cderi_sparse.T)
                 rhoj = None
             cderi_sparse = None
@@ -356,7 +362,7 @@ def get_jk(dfobj, dms_tag, hermi=1, with_j=True, with_k=True, direct_scf_tol=1e-
             vj = cupy.zeros(dms_shape)
             vj[:,rows,cols] = vj_sparse
             vj[:,cols,rows] = vj_sparse
-        if with_k:
+        if with_k and hermi:
             transpose_sum(vk)
         vj_sparse = None
     # general K matrix with density matrix
@@ -366,25 +372,24 @@ def get_jk(dfobj, dms_tag, hermi=1, with_j=True, with_k=True, direct_scf_tol=1e-
         blksize = dfobj.get_blksize()
         for cderi, cderi_sparse in dfobj.loop(blksize=blksize, unpack=with_k):
             if with_j:
-                rhoj = 2.0*dm_sparse.dot(cderi_sparse)
+                rhoj = dm_sparse.dot(cderi_sparse)
                 vj_sparse += cupy.dot(rhoj, cderi_sparse.T)
             if with_k:
                 for k in range(nset):
                     rhok = contract('Lij,jk->Lki', cderi, dms[k]).reshape([-1,nao])
-                    #vk[k] += contract('Lki,Lkj->ij', cderi, rhok)
-                    vk[k] += cupy.dot(cderi.reshape([-1,nao]).T, rhok)
+                    #vk[k] += contract('Lki,Lkj->ij', rhok, cderi)
+                    vk[k] += cupy.dot(rhok.T, cderi.reshape([-1,nao]))
         if with_j:
             vj = cupy.zeros(dms_shape)
             vj[:,rows,cols] = vj_sparse
             vj[:,cols,rows] = vj_sparse
         rhok = None
 
-    rev_ao_idx = dfobj.intopt.rev_ao_idx
     if with_j:
-        vj = take_last2d(vj, rev_ao_idx)
+        vj = intopt.unsort_orbitals(vj, axis=[1,2])
         vj = vj.reshape(out_shape)
     if with_k:
-        vk = take_last2d(vk, rev_ao_idx)
+        vk = intopt.unsort_orbitals(vk, axis=[1,2])
         vk = vk.reshape(out_shape)
     t1 = log.timer_debug1('vj and vk', *t1)
     if out_cupy:

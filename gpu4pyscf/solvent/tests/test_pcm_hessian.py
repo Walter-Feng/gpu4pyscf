@@ -18,6 +18,7 @@ import numpy as np
 import pyscf
 import pytest
 from pyscf import gto
+from gpu4pyscf.solvent import pcm
 from gpu4pyscf import scf, dft
 from packaging import version
 
@@ -85,6 +86,7 @@ def _check_hessian(mf, h, ix=0, iy=0):
     print(f'Norm of H({ix},{iy}) diff, {np.linalg.norm(h[ix,:,iy,:] - h_fd)}')
     assert(np.linalg.norm(h[ix,:,iy,:] - h_fd) < tol)
 
+@unittest.skipIf(pcm.libsolvent is None, "solvent extension not compiled")
 class KnownValues(unittest.TestCase):
     def test_hess_cpcm(self):
         print('testing C-PCM Hessian with DF-RKS')
@@ -126,9 +128,19 @@ class KnownValues(unittest.TestCase):
         hess_gpu = hessobj.kernel()
         assert np.linalg.norm(hess_cpu - hess_gpu) < 1e-8
         '''
+        mol = gto.Mole()
+        mol.atom = '''
+O       0.0000000000    -0.0000000000     0.1174000000
+H      -0.7570000000    -0.0000000000    -0.4696000000
+H       0.7570000000     0.0000000000    -0.4696000000
+    '''
+        mol.basis = 'sto-3g'
+        mol.output = '/dev/null'
+        mol.build(verbose=0)
         mf = pyscf.dft.RKS(mol, xc='b3lyp').density_fit().PCM()
         mf.conv_tol = 1e-12
         mf.conv_tol_cpscf = 1e-7
+        mf.grids.atom_grid = (50,194)
         mf.kernel()
         hessobj = mf.Hessian()
         hess_cpu = hessobj.kernel()
@@ -146,9 +158,19 @@ class KnownValues(unittest.TestCase):
         e_cpu = mf.kernel()
         assert abs(e_cpu - e_gpu) < 1e-8
         '''
+        mol = gto.Mole()
+        mol.atom = '''
+O       0.0000000000    -0.0000000000     0.1174000000
+H      -0.7570000000    -0.0000000000    -0.4696000000
+H       0.7570000000     0.0000000000    -0.4696000000
+    '''
+        mol.basis = 'sto-3g'
+        mol.output = '/dev/null'
+        mol.build(verbose=0)
         mf = dft.RKS(mol, xc='b3lyp').density_fit().PCM()
         mf.conv_tol = 1e-12
         mf.conv_tol_cpscf = 1e-7
+        mf.grids.atom_grid = (50,194)
         mf.kernel()
         hessobj = mf.Hessian()
         hess_gpu = hessobj.kernel()
