@@ -31,11 +31,19 @@ def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=
 
     density_matrices_at_kpts = cupy.asarray(dm_at_kpts)
     formatted_density_matrices = _format_dms(density_matrices_at_kpts, kpts)
-    n_channels, n_k_points = formatted_density_matrices.shape[:2]
+    n_channels, n_k_points, n_ao = formatted_density_matrices.shape[:3]
+
+    data_type = df_object.ao_on_grid[-1].dtype
 
     # Maybe the ao_on_grid of shape (n_channels, n_ao, n_grid_points) cannot be saved.
-    density_in_real_space = cupy.einsum('ikpq, knp, knq->in', formatted_density_matrices, df_object.ao_on_grid.conj(),
-                                        df_object.ao_on_grid)
+    density_in_real_space = cupy.zeros((n_channels, df_object.n_grid_points), dtype=data_type)
+
+    for i in range(n_channels):
+        for k in range(n_k_points):
+            density_in_real_space[i] += cupy.einsum('pq, np, nq -> n', formatted_density_matrices[i, k],
+                                                    df_object.ao_on_grid[k].conj(),
+                                                    df_object.ao_on_grid[k], optimize=True)
+
     density_in_real_space = density_in_real_space.reshape(-1, *mesh)
     density_in_g_space = cupy.fft.fftn(density_in_real_space, axes=(1, 2, 3))
     coulomb = cupy.asarray(tools.get_coulG(cell, mesh=mesh)).reshape(*mesh)
@@ -43,16 +51,16 @@ def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=
     coulomb_weighted_density_in_real_space = cupy.fft.ifftn(coulomb_weighted_density, axes=(1, 2, 3)).reshape(
         n_channels, -1)
 
-    if hermi == 1 or is_zero(kpts):
-        coulomb_in_real_space = coulomb_weighted_density_in_real_space.real
-
     weight = cell.vol / df_object.n_grid_points / n_k_points
     coulomb_weighted_density_in_real_space *= weight
 
     # needs to modify if kpts_band is specified. Does anyone really use custom kpts_band by the way?
-    vj_at_kpts_on_gpu = cupy.einsum('knp, in, knq -> ikpq', df_object.ao_on_grid.conj(),
-                                    coulomb_weighted_density_in_real_space,
-                                    df_object.ao_on_grid)
+    vj_at_kpts_on_gpu = cupy.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
+    for i in range(n_channels):
+        for k in range(n_k_points):
+            vj_at_kpts_on_gpu[i, k] = cupy.einsum('np, n, nq -> pq', df_object.ao_on_grid[k].conj(),
+                                                  coulomb_weighted_density_in_real_space[i],
+                                                  df_object.ao_on_grid[k], optimize=True)
 
     return _format_jks(vj_at_kpts_on_gpu, dm_at_kpts, kpts_band, kpts)
 
@@ -89,13 +97,14 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
     density_matrices_at_kpts = cupy.asarray(dm_kpts)
     formatted_density_matrices = _format_dms(density_matrices_at_kpts, kpts)
     n_channels, n_k_points, n_ao = formatted_density_matrices.shape[:3]
+    data_type = df_object.ao_on_grid[-1].dtype
 
     weight = 1. / n_k_points * (cell.vol / df_object.n_grid_points)
 
-    vk = cupy.zeros((n_channels, n_k_points, n_ao, n_ao), df_object.ao_on_grid.dtype)
+    vk = cupy.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
 
     for k2_index, k2, ao_at_k2 in zip(range(n_k_points), kpts, df_object.ao_on_grid):
-        density_dot_ao_at_k2 = cupy.ndarray((n_channels, n_ao, df_object.n_grid_points), df_object.ao_on_grid.dtype)
+        density_dot_ao_at_k2 = cupy.ndarray((n_channels, n_ao, df_object.n_grid_points), dtype=data_type)
         for i in range(n_channels):
             density_dot_ao_at_k2[i] = formatted_density_matrices[i, k2_index] @ ao_at_k2.conj().T
         for k1_index, k1, ao_at_k1 in zip(range(n_k_points), kpts, df_object.ao_on_grid):
@@ -127,7 +136,9 @@ class FFTDF(cpu_FFTDF):
         cpu_FFTDF.__init__(self, cell, kpts)
         self.to_gpu()
         numerical_integrator = self._numint
-        self.ao_on_grid = cupy.asarray(numerical_integrator.eval_ao(cell, self.grids.coords, kpts))
+        self.ao_on_grid = [cupy.asarray(ao_at_k) for ao_at_k in
+                           numerical_integrator.eval_ao(cell, self.grids.coords, kpts)]
+
         self.coulomb_in_k_space = cupy.asarray(tools.get_coulG(cell, mesh=self.mesh)).reshape(*self.mesh)
         self.n_grid_points = math.prod(self.mesh)
         self.overlap = cupy.asarray(cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts))
