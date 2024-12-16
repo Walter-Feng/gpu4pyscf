@@ -141,7 +141,6 @@ class FFTDF(cpu_FFTDF):
 
         self.coulomb_in_k_space = cupy.asarray(tools.get_coulG(cell, mesh=self.mesh)).reshape(*self.mesh)
         self.n_grid_points = math.prod(self.mesh)
-        self.overlap = cupy.asarray(cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts))
         self.exxdiv = None
 
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,

@@ -1,7 +1,8 @@
 import gpu4pyscf.pbc.df.fft
 from ase.build import bulk
 from gpu4pyscf.pbc.scf.rhf import KRHF
-from gpu4pyscf.pbc.df.fft import FFTDF
+# from gpu4pyscf.pbc.df.fft import FFTDF
+from pyscf.pbc.df.fft import FFTDF
 from pyscf.pbc import gto, scf, dft
 from pyscf.pbc.tools.pyscf_ase import ase_atoms_to_pyscf
 import numpy as np
