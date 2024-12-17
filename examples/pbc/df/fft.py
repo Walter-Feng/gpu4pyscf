@@ -23,12 +23,15 @@ cell = gto.M(
 cell.exp_to_discard = 0.1
 cell.max_memory = 64000
 
-mp_grid = np.array([2, 2, 2])  # 4 k-points for each axis, 4^3=64 kpts in total
+mp_grid = np.array([1, 1, 1])  # 4 k-points for each axis, 4^3=64 kpts in total
 kpts = cell.make_kpts(mp_grid)
 mf = KRHF(cell, kpts)
-mf.max_cycle = 10
 cpu_mf = cpu_KRHF(cell, kpts)
 cpu_mf.with_df = cpu_FFTDF(cell, kpts)
 
-mf.kernel()
-cpu_mf.kernel()
+mf.scf()
+
+# dm = cpu_mf.make_rdm1()
+#
+# print("gpu total energy: ", mf.energy_tot(cupy.asarray(dm)))
+# print("cpu total energy: ", cpu_mf.energy_tot(dm))

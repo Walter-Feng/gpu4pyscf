@@ -26,10 +26,10 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
         self.kpts = kpts
         self.conv_tol = max(cell.precision * 10, 1e-8)
         self.exx_built = False
-        self.hcore = cupy.asarray(cpu_KHF.KSCF.get_hcore(self, cell, kpts))
         self.overlap = cupy.asarray(cpu_KHF.KSCF.get_ovlp(self, cell, kpts))
         self.inv_sqrt_overlap = inverse_square_root(self.overlap)
         self.sqrt_overlap = cupy.linalg.inv(self.inv_sqrt_overlap)
+        self.hcore = cupy.asarray(cpu_KHF.KSCF.get_hcore(self, cell, kpts))
 
     def make_rdm1(self, mo_coeff_kpts=None, mo_occ_kpts=None):
         if mo_coeff_kpts is None:
@@ -135,13 +135,12 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
                              cupy.sort(mo_energy_kpts[k][mo_occ_kpts[k] == 0]))
             cupy.set_printoptions(threshold=1000)
 
-        print(cupy.asarray(mo_occ_kpts).shape)
         return cupy.asarray(mo_occ_kpts)
 
     def check_sanity(self):
         lib.StreamObject.check_sanity(self)
         if (isinstance(self.exxdiv, str) and self.exxdiv.lower() != 'ewald' and
-            isinstance(self.with_df, gpu_fft.FFTDF)):
+                isinstance(self.with_df, gpu_fft.FFTDF)):
             logger.warn(self, 'exxdiv %s is not supported in DF or MDF',
                         self.exxdiv)
 
@@ -150,7 +149,7 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
             cond = np.max(lib.cond(s.get()))
             if cond * 1e-17 > self.conv_tol:
                 logger.warn(self, 'Singularity detected in overlap matrix (condition number = %4.3g). '
-                            'SCF may be inaccurate and hard to converge.', cond)
+                                  'SCF may be inaccurate and hard to converge.', cond)
         return self
 
     def get_grad(self, mo_coeff_kpts, mo_occ_kpts, fock):
@@ -163,6 +162,34 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
         grad_kpts = [gpu_hf.get_grad(mo_coeff_kpts[k], mo_occ_kpts[k], fock[k])
                      for k in range(nkpts)]
         return cupy.hstack(grad_kpts)
+
+    def get_fock(self, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
+                 diis_start_cycle=None, level_shift_factor=None, damp_factor=None,
+                 fock_last=None):
+        h1e_kpts, s_kpts, vhf_kpts, dm_kpts = h1e, s1e, vhf, dm
+        if h1e_kpts is None: h1e_kpts = self.get_hcore()
+        if vhf_kpts is None: vhf_kpts = self.get_veff(self.cell, dm_kpts)
+        f_kpts = h1e_kpts + vhf_kpts
+        if cycle < 0 and diis is None:  # Not inside the SCF iteration
+            return f_kpts
+
+        if diis_start_cycle is None:
+            diis_start_cycle = self.diis_start_cycle
+        if level_shift_factor is None:
+            level_shift_factor = self.level_shift
+        if damp_factor is None:
+            damp_factor = self.damp
+        if s_kpts is None: s_kpts = self.get_ovlp()
+        if dm_kpts is None: dm_kpts = self.make_rdm1()
+
+        if 0 <= cycle < diis_start_cycle - 1 and abs(damp_factor) > 1e-4:
+            f_kpts = [gpu_hf.damping(S, D * .5, F, damp_factor) for (S, D, F) in zip(s_kpts, dm_kpts, f_kpts)]
+        if diis and cycle >= diis_start_cycle:
+            f_kpts = [diis.update(S, D, F, self, h1e, vhf) for (S, D, F) in zip(s_kpts, dm_kpts, f_kpts)]
+        if abs(level_shift_factor) > 1e-4:
+            f_kpts = [gpu_hf.level_shift(S, D * .5, F, level_shift_factor) for (S, D, F) in
+                      zip(s_kpts, dm_kpts, f_kpts)]
+        return cupy.asarray(f_kpts)
 
     kernel = gpu_hf._kernel
     scf = gpu_hf.scf

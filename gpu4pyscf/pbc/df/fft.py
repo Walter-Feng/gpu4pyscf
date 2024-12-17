@@ -51,8 +51,12 @@ def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=
     coulomb_weighted_density_in_real_space = cupy.fft.ifftn(coulomb_weighted_density, axes=(1, 2, 3)).reshape(
         n_channels, -1)
 
+    if is_zero(kpts):
+        coulomb_weighted_density_in_real_space = coulomb_weighted_density_in_real_space.real
+
     weight = cell.vol / df_object.n_grid_points / n_k_points
     coulomb_weighted_density_in_real_space *= weight
+
 
     # needs to modify if kpts_band is specified. Does anyone really use custom kpts_band by the way?
     vj_at_kpts_on_gpu = cupy.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
@@ -110,7 +114,10 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
         for i in range(n_channels):
             density_dot_ao_at_k2[i] = formatted_density_matrices[i, k2_index] @ ao_at_k2.conj().T
         for k1_index, k1, ao_at_k1 in zip(range(n_k_points), kpts, df_object.ao_on_grid):
-            e_ikr = cupy.exp(coords @ cupy.asarray(1j * (k1 - k2)))
+            if is_zero(kpts):
+                e_ikr = cupy.ones(len(coords))
+            else:
+                e_ikr = cupy.exp(coords @ cupy.asarray(1j * (k1 - k2)))
             ao_sandwiched_e_ikr_in_real_space = cupy.einsum(
                 "np, nq, n -> pqn", ao_at_k1.conj(), ao_at_k2, e_ikr).reshape(n_ao, n_ao, *mesh)
 
@@ -122,6 +129,9 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
 
             coulomb_in_real_space = cupy.fft.ifftn(coulomb_in_g_space * ao_sandwiched_e_ikr_in_g_space,
                                                    axes=(2, 3, 4)).reshape(n_ao, n_ao, -1)
+
+            if is_zero(kpts):
+                coulomb_in_real_space = coulomb_in_real_space.real
 
             for i in range(n_channels):
                 coulomb_weighted_density_dot_ao_at_k2 = cupy.einsum("pqn, qn -> pn", coulomb_in_real_space,
