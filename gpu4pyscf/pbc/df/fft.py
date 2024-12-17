@@ -9,7 +9,7 @@ import cupy
 import math
 
 
-def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, weights=None):
+def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None):
     '''Get the Coulomb (J) AO matrix at sampled k-points.
 
     Args:
@@ -65,7 +65,7 @@ def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=
     return _format_jks(vj_at_kpts_on_gpu, dm_at_kpts, kpts_band, kpts)
 
 
-def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None):
+def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, exxdiv=None, overlap=None):
     '''Get the Coulomb (J) and exchange (K) AO matrices at sampled k-points.
 
     Args:
@@ -93,6 +93,8 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
     assert cell.low_dim_ft_type != 'inf_vacuum'
     assert cell.dimension > 1
     coords = cupy.asarray(df_object.grids.coords)
+    if overlap is None:
+        overlap = cupy.asarray(cell.pbc_inyot("int1e_ovlp", hermi=hermi, kpts=kpts))
 
     density_matrices_at_kpts = cupy.asarray(dm_kpts)
     formatted_density_matrices = _format_dms(density_matrices_at_kpts, kpts)
@@ -128,6 +130,11 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
                 coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
                 vk[i, k1_index, :, :] += weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
 
+    if exxdiv == 'ewald':
+        for i in range(n_channels):
+            vk[i] += df_object.madelung * cupy.einsum("kpq, kqr, krs -> kps",
+                                                      overlap, formatted_density_matrices[i], overlap)
+
     return _format_jks(vk, dm_kpts, None, kpts)
 
 
@@ -141,11 +148,11 @@ class FFTDF(cpu_FFTDF):
 
         self.coulomb_in_k_space = cupy.asarray(tools.get_coulG(cell, mesh=self.mesh)).reshape(*self.mesh)
         self.n_grid_points = math.prod(self.mesh)
-        self.exxdiv = None
+        self.madelung = tools.pbc.madelung(cell, kpts)
 
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
-               with_j=True, with_k=True, omega=None, exxdiv=None):
+               with_j=True, with_k=True, omega=None, exxdiv=None, overlap=None):
         j_on_gpu = get_j_kpts(self, dm, hermi, kpts, kpts_band)
-        k_on_gpu = get_k_kpts(self, dm, hermi, kpts, kpts_band)
+        k_on_gpu = get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv, overlap)
 
-        return j_on_gpu.get(), k_on_gpu.get()
+        return j_on_gpu, k_on_gpu

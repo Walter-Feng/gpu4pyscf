@@ -71,6 +71,9 @@ def get_err_vec(s, d, f):
         errvec = cupy.hstack([
             get_err_vec(s, d[0], f[0]).ravel(),
             get_err_vec(s, d[1], f[1]).ravel()])
+    elif isinstance(f, cupy.ndarray) and f.ndim == 3 and d.ndim == 3 and s.ndim == 3:
+        dot_product = cupy.einsum("kpq, kqr, krs -> kps", s, d, f)
+        errvec = (dot_product.transpose(0, 2, 1).conj() - dot_product).ravel()
     else:
         raise RuntimeError('Unknown SCF DIIS type')
     return errvec
