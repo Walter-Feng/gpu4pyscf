@@ -185,7 +185,7 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
         if 0 <= cycle < diis_start_cycle - 1 and abs(damp_factor) > 1e-4:
             f_kpts = [gpu_hf.damping(S, D * .5, F, damp_factor) for (S, D, F) in zip(s_kpts, dm_kpts, f_kpts)]
         if diis and cycle >= diis_start_cycle:
-            f_kpts = [diis.update(S, D, F, self, h1e, vhf) for (S, D, F) in zip(s_kpts, dm_kpts, f_kpts)]
+            f_kpts = diis.update(s_kpts, dm_kpts, f_kpts)
         if abs(level_shift_factor) > 1e-4:
             f_kpts = [gpu_hf.level_shift(S, D * .5, F, level_shift_factor) for (S, D, F) in
                       zip(s_kpts, dm_kpts, f_kpts)]
