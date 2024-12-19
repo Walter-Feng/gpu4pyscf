@@ -1,6 +1,5 @@
 import pyscf.pbc.scf.khf as cpu_KHF
 from pyscf.scf import hf as mol_hf
-import gpu4pyscf
 import gpu4pyscf.pbc.df.fft as gpu_fft
 import numpy as np
 import cupy
@@ -8,12 +7,6 @@ from pyscf import lib
 import gpu4pyscf.scf.hf as gpu_hf
 from gpu4pyscf.scf import diis
 from gpu4pyscf.lib import logger
-
-
-def inverse_square_root(matrix):
-    eigenvalues, eigenvectors = cupy.linalg.eigh(matrix)
-    return cupy.einsum("kpq, kq, krq -> kpr", eigenvectors, 1.0 / cupy.sqrt(eigenvalues), eigenvectors.conj())
-
 
 class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
 
@@ -27,11 +20,9 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
         self.conv_tol = max(cell.precision * 10, 1e-8)
         self.exx_built = False
         self.overlap = cupy.asarray(cpu_KHF.KSCF.get_ovlp(self, cell, kpts))
-        self.inv_sqrt_overlap = inverse_square_root(self.overlap)
-        self.sqrt_overlap = cupy.linalg.inv(self.inv_sqrt_overlap)
         self.hcore = cupy.asarray(cpu_KHF.KSCF.get_hcore(self, cell, kpts))
 
-    def make_rdm1(self, mo_coeff_kpts=None, mo_occ_kpts=None):
+    def make_rdm1(self, mo_coeff_kpts=None, mo_occ_kpts=None, **kwargs):
         if mo_coeff_kpts is None:
             # Note: this is actually "self.mo_coeff_kpts"
             # which is stored in self.mo_coeff of the scf.hf.RHF superclass
@@ -41,15 +32,18 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
             # which is stored in self.mo_occ of the scf.hf.RHF superclass
             mo_occ_kpts = self.mo_occ
 
-        return cupy.einsum("kpq, kq, krq -> kpr", mo_coeff_kpts, mo_occ_kpts, mo_coeff_kpts.conj())
+        gpu = cupy.einsum("kpq, kq, krq -> kpr", mo_coeff_kpts, mo_occ_kpts, mo_coeff_kpts.conj())
+        cpu_ref = cpu_KHF.make_rdm1(mo_coeff_kpts.get(), mo_occ_kpts.get())
+
+        assert (cupy.max(cupy.abs(gpu - cupy.asarray(cpu_ref))) < 1e-12)
+        return gpu
 
     def eig(self, fock_at_k_points, overlap_at_k_points):
-        transformed_fock = cupy.einsum("kpq, kqr, krs -> kps", self.inv_sqrt_overlap, fock_at_k_points,
-                                       self.inv_sqrt_overlap)
+        result_at_k_points = [gpu_hf.eigh(h, s) for h, s in zip(fock_at_k_points, overlap_at_k_points)]
 
-        eigenvalues, eigenvectors = cupy.linalg.eigh(transformed_fock)
-
-        return eigenvalues, cupy.einsum("kpq, kqr -> kpr", self.sqrt_overlap, eigenvectors)
+        eigenvalues = cupy.asarray([result[0] for result in result_at_k_points])
+        eigenvectors = cupy.asarray([result[1] for result in result_at_k_points])
+        return eigenvalues, eigenvectors
 
     def get_hcore(self, cell=None, kpts=None):
         return self.hcore
@@ -152,12 +146,16 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
                                   'SCF may be inaccurate and hard to converge.', cond)
         return self
 
-    def get_grad(self, mo_coeff_kpts, mo_occ_kpts, fock):
+    def get_grad(self, mo_coeff_kpts, mo_occ_kpts, fock=None):
         '''
         returns 1D array of gradients, like non K-pt version
         note that occ and virt indices of different k pts now occur
         in sequential patches of the 1D array
         '''
+        if fock is None:
+            dm1 = self.make_rdm1(mo_coeff_kpts, mo_occ_kpts)
+            fock = self.get_hcore(self.cell, self.kpts) + self.get_veff(self.cell, dm1)
+
         nkpts = len(mo_occ_kpts)
         grad_kpts = [gpu_hf.get_grad(mo_coeff_kpts[k], mo_occ_kpts[k], fock[k])
                      for k in range(nkpts)]
@@ -225,3 +223,7 @@ class KRHF(KSCF):
                                'of electrons %s', ne / nkpts, nelectron / nkpts)
             dm *= (nelectron / ne).reshape(-1, 1, 1)
         return dm
+
+class RHF(KRHF):
+    def __init__(self, cell, exxdiv='ewald'):
+        KRHF.__init__(self, cell, np.zeros((1, 3)), exxdiv)
