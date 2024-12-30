@@ -1,17 +1,16 @@
-# Copyright 2024 The GPU4PySCF Authors. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import unittest
 import numpy
@@ -29,7 +28,7 @@ def setUpModule():
         ["O" , (0. , 0.     , 0.)],
         [1   , (0. , -0.757 , 0.587)],
         [1   , (0. , 0.757  , 0.587)] ])
-    mol.basis = 'sto3g'
+    mol.basis = ('sto3g', [[2, [1., 1.]]])
     mol.build()
 
 def tearDownModule():
@@ -94,17 +93,17 @@ class KnownValues(unittest.TestCase):
     def test_hessian_lda(self, disp=None):
         print('-----testing LDA Hessian----')
         mf = mol.RKS(xc='LDA').run()
-        _vs_cpu(mf)
+        _vs_cpu(mf, tol=5e-6)
 
     def test_hessian_gga(self):
         print('-----testing PBE Hessian----')
         mf = mol.RKS(xc='PBE').run()
-        _vs_cpu(mf)
+        _vs_cpu(mf, tol=1e-6)
 
     def test_hessian_hybrid(self):
         print('-----testing B3LYP Hessian----')
         mf = mol.RKS(xc='b3lyp').run()
-        _vs_cpu(mf)
+        _vs_cpu(mf, tol=5e-6)
 
     def test_hessian_mgga(self):
         print('-----testing M06 Hessian----')

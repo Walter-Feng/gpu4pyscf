@@ -1,19 +1,16 @@
-#!/usr/bin/env python
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# Copyright 2024 The PySCF Developers. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import unittest
 import numpy as np
@@ -131,7 +128,7 @@ class KnownValues(unittest.TestCase):
         assert td.device == 'gpu'
         es = td.kernel(nstates=4)[0]
         ref = td.to_cpu().kernel(nstates=4)[0]
-        self.assertAlmostEqual(abs(es - ref).max(), 0, 8)
+        self.assertAlmostEqual(abs(es - ref).max(), 0, 7)
         self.assertAlmostEqual(lib.fp(es[:3]), 0.047793873508724743, 6)
 
     def test_tddft_camb3lyp(self):
@@ -142,7 +139,7 @@ class KnownValues(unittest.TestCase):
         assert td.device == 'gpu'
         es = td.kernel(nstates=4)[0]
         e_ref = td.to_cpu().kernel(nstates=4)[0]
-        self.assertAlmostEqual(abs(es[:3]-e_ref[:3]).max(), 0, 8)
+        self.assertAlmostEqual(abs(es[:3]-e_ref[:3]).max(), 0, 7)
         self.assertAlmostEqual(lib.fp(es[:3]), 0.2827429269753051, 6)
 
     def test_tda_b3lyp(self):

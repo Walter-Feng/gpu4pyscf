@@ -1,17 +1,16 @@
-# Copyright 2023 The GPU4PySCF Authors. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import unittest
 import numpy as np
@@ -21,6 +20,7 @@ from pyscf import df, lib
 from gpu4pyscf import scf as gpu_scf
 from gpu4pyscf.df import int3c2e, df_jk
 from gpu4pyscf.df.df import DF
+from gpu4pyscf.lib.cupy_helper import tag_array
 
 atom='''
 Ti 0.0 0.0 0.0
@@ -109,6 +109,41 @@ class KnownValues(unittest.TestCase):
         assert abs(vk - refk).max() < 1e-9
         assert abs(lib.fp(vj) - 455.864593801164).max() < 1e-9
         assert abs(lib.fp(vk) - 37.7022369618297).max() < 1e-9
+
+    def test_jk_mo(self):
+        dfobj = DF(mol, 'sto3g').build()
+        np.random.seed(3)
+        nao = mol.nao
+        mo_coeff = np.random.rand(nao, nao)
+        mo_occ = np.zeros([nao])
+        mo_occ[:3] = 2
+        dm = 2.0*mo_coeff[:,mo_occ>1].dot(mo_coeff[:,mo_occ>1].T)
+        refj, refk = dfobj.to_cpu().get_jk(dm)
+        dm = cupy.asarray(dm)
+        dm = tag_array(dm, mo_coeff=cupy.asarray(mo_coeff), mo_occ=cupy.asarray(mo_occ))
+        vj, vk = dfobj.get_jk(dm)
+        vj = vj.get()
+        vk = vk.get()
+        assert abs(vj - refj).max() < 1e-9
+        assert abs(vk - refk).max() < 1e-9
+
+    def test_jk_cpu(self):
+        dfobj = DF(mol, 'sto3g').build()
+        dfobj.use_gpu_memory = False
+        np.random.seed(3)
+        nao = mol.nao
+        mo_coeff = np.random.rand(nao, nao)
+        mo_occ = np.zeros([nao])
+        mo_occ[:3] = 2
+        dm = 2.0*mo_coeff[:,mo_occ>1].dot(mo_coeff[:,mo_occ>1].T)
+        refj, refk = dfobj.to_cpu().get_jk(dm)
+        dm = cupy.asarray(dm)
+        dm = tag_array(dm, mo_coeff=cupy.asarray(mo_coeff), mo_occ=cupy.asarray(mo_occ))
+        vj, vk = dfobj.get_jk(dm)
+        vj = vj.get()
+        vk = vk.get()
+        assert abs(vj - refj).max() < 1e-9
+        assert abs(vk - refk).max() < 1e-9
 
 if __name__ == "__main__":
     print("Full Tests for DF JK")

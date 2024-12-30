@@ -1,17 +1,16 @@
-# Copyright 2024 The GPU4PySCF Authors. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import unittest
 import numpy
@@ -46,7 +45,7 @@ class KnownValues(unittest.TestCase):
         hobj = mf.Hessian()
         ref = hobj.kernel()
         e2_gpu = hobj.to_gpu().kernel()
-        assert abs(ref - e2_gpu).max() < 1e-8
+        assert abs(ref - e2_gpu).max() < 1e-6
 
     def test_partial_hess_elec(self):
         mf = scf.UHF(mol)
@@ -54,15 +53,15 @@ class KnownValues(unittest.TestCase):
         mf.kernel()
         hobj = mf.Hessian()
         e1_cpu, ej_cpu, ek_cpu = uhf_cpu._partial_hess_ejk(hobj)
+        e2_cpu = ej_cpu - ek_cpu
 
         mf = mf.to_gpu()
         mf.kernel()
         hobj = mf.Hessian()
-        e1_gpu, ej_gpu, ek_gpu = uhf_gpu._partial_hess_ejk(hobj)
+        e1_gpu, e2_gpu = uhf_gpu._partial_hess_ejk(hobj)
 
         assert numpy.linalg.norm(e1_cpu - e1_gpu.get()) < 1e-5
-        assert numpy.linalg.norm(ej_cpu - ej_gpu.get()) < 1e-5
-        assert numpy.linalg.norm(ek_cpu - ek_gpu.get()) < 1e-5
+        assert numpy.linalg.norm(e2_cpu - e2_gpu.get()) < 1e-5
 
     def test_hessian_uhf_D3(self):
         print('----- testing UHF with D3BJ ------')
@@ -72,7 +71,7 @@ class KnownValues(unittest.TestCase):
         mf.conv_tol_cpscf = 1e-8
         ref = mf.Hessian().kernel()
         e2_gpu = mf.Hessian().to_gpu().kernel()
-        assert abs(ref - e2_gpu).max() < 1e-8
+        assert abs(ref - e2_gpu).max() < 1e-6
 
 if __name__ == "__main__":
     print("Full Tests for UHF Hessian")

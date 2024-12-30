@@ -1,21 +1,21 @@
-# Copyright 2023 The GPU4PySCF Authors. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import unittest
 import numpy
 import cupy
+from gpu4pyscf.lib import cupy_helper
 from gpu4pyscf.lib.cupy_helper import (
     take_last2d, transpose_sum, krylov, unpack_sparse,
     add_sparse, takebak, empty_mapped, dist_matrix,
@@ -201,6 +201,19 @@ class KnownValues(unittest.TestCase):
         a_sph1 = cart2sph(a_cart, axis=1, ang=7)
         assert cupy.linalg.norm(a_sph0 - a_sph1) < 1e-8
         '''
+
+    def test_unpack_tril(self):
+        d = 10
+        n = 515
+        npair = n * (n+1) // 2
+        atril = cupy.random.rand(d, npair) + cupy.random.rand(d, npair)*1j
+        a = cupy_helper.unpack_tril(atril)
+        idx, idy = cupy.tril_indices(n)
+        ref = cupy.empty((d, n, n), dtype=atril.dtype)
+        ref[:,idy,idx] = atril.conj()
+        ref[:,idx,idy] = atril
+        assert abs(a - ref).max() < 1e-12
+
 if __name__ == "__main__":
     print("Full tests for cupy helper module")
     unittest.main()

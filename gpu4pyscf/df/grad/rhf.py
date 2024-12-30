@@ -1,17 +1,16 @@
-# Copyright 2023 The GPU4PySCF Authors. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import copy
 import numpy
@@ -19,13 +18,11 @@ import cupy
 from cupyx.scipy.linalg import solve_triangular
 from pyscf import scf, gto
 from gpu4pyscf.df import int3c2e, df
-from gpu4pyscf.lib.cupy_helper import (print_mem_info, tag_array,
-unpack_tril, contract, load_library, take_last2d, cholesky)
+from gpu4pyscf.lib.cupy_helper import tag_array, contract, cholesky
 from gpu4pyscf.grad import rhf as rhf_grad
 from gpu4pyscf import __config__
 from gpu4pyscf.lib import logger
-
-libcupy_helper = load_library('libcupy_helper')
+from gpu4pyscf.df.grad.jk import get_rhoj_rhok
 
 LINEAR_DEP_THRESHOLD = df.LINEAR_DEP_THR
 MIN_BLK_SIZE = getattr(__config__, 'min_ao_blksize', 128)
@@ -73,7 +70,7 @@ def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, omega
             with_df = mf_grad.base.with_df._rsh_df[key]
         else:
             dfobj = mf_grad.base.with_df
-            with_df = dfobj._rsh_df[key] = copy.copy(dfobj).reset()
+            with_df = dfobj._rsh_df[key] = dfobj.copy().reset()
 
     auxmol = with_df.auxmol
     if not hasattr(with_df, 'intopt') or with_df._cderi is None:
@@ -93,32 +90,9 @@ def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, omega
     orbo = mo_coeff[:,mo_occ>0] * mo_occ[mo_occ>0] ** 0.5
     mo_coeff = None
     orbo = intopt.sort_orbitals(orbo, axis=[0])
-    nocc = orbo.shape[-1]
 
-    # (L|ij) -> rhoj: (L), rhok: (L|oo)
-    low = with_df.cd_low
-    rows = with_df.intopt.cderi_row
-    cols = with_df.intopt.cderi_col
-    dm_sparse = dm[rows, cols]
-    dm_sparse[with_df.intopt.cderi_diag] *= .5
-
-    blksize = with_df.get_blksize()
-    if with_j:
-        rhoj = cupy.empty([naux])
-    if with_k:
-        rhok = cupy.empty([naux, nocc, nocc], order='C')
-    p0 = p1 = 0
-
-    for cderi, cderi_sparse in with_df.loop(blksize=blksize):
-        p1 = p0 + cderi.shape[0]
-        if with_j:
-            rhoj[p0:p1] = 2.0*dm_sparse.dot(cderi_sparse)
-        if with_k:
-            tmp = contract('Lij,jk->Lki', cderi, orbo)
-            contract('Lki,il->Lkl', tmp, orbo, out=rhok[p0:p1])
-        p0 = p1
-    tmp = dm_sparse = cderi_sparse = cderi = None
-
+    rhoj, rhok = get_rhoj_rhok(with_df, dm, orbo, with_j=with_j, with_k=with_k)
+    
     # (d/dX P|Q) contributions
     if omega and omega > 1e-10:
         with auxmol.with_range_coulomb(omega):
@@ -129,6 +103,7 @@ def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, omega
 
     auxslices = auxmol.aoslice_by_atom()
     aux_cart2sph = intopt.aux_cart2sph
+    low = with_df.cd_low
     low_t = low.T.copy()
     if with_j:
         if low.tag == 'eig':
@@ -147,6 +122,7 @@ def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, omega
         vjaux_2c = cupy.array([-vjaux[:,p0:p1].sum(axis=1) for p0, p1 in auxslices[:,2:]])
         rhoj = vjaux = tmp = None
     if with_k:
+        nocc = orbo.shape[-1]
         if low.tag == 'eig':
             rhok = contract('pq,qij->pij', low_t.T, rhok)
         elif low.tag == 'cd':

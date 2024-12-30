@@ -1,17 +1,16 @@
-# Copyright 2023 The GPU4PySCF Authors. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import numpy as np
 import cupy
@@ -19,16 +18,17 @@ import copy
 from cupyx.scipy.linalg import solve_triangular
 from pyscf import scf, gto
 from gpu4pyscf.df import int3c2e
-from gpu4pyscf.lib.cupy_helper import tag_array, contract, load_library, take_last2d
+from gpu4pyscf.lib.cupy_helper import tag_array, contract, load_library
 from gpu4pyscf.grad import uhf as uhf_grad
 from gpu4pyscf import __config__
 from gpu4pyscf.lib import logger
+from gpu4pyscf.df.grad.jk import get_rhoj_rhok
 
-libgvhf = load_library('libgvhf')
 FREE_CUPY_CACHE = True
 BINSIZE = 128
 
-def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, omega=None, mo_coeff=None, mo_occ=None, dm2 = None):
+def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, 
+           omega=None, mo_coeff=None, mo_occ=None, dm2 = None):
     '''
     Computes the first-order derivatives of the energy contributions from
     J and K terms per atom.
@@ -50,7 +50,7 @@ def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, omega
             with_df = mf_grad.base.with_df._rsh_df[key]
         else:
             dfobj = mf_grad.base.with_df
-            with_df = dfobj._rsh_df[key] = copy.copy(dfobj).reset()
+            with_df = dfobj._rsh_df[key] = dfobj.copy().reset()
 
     auxmol = with_df.auxmol
     if not hasattr(with_df, 'intopt') or with_df._cderi is None:
@@ -80,6 +80,10 @@ def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, omega
 
     # (L|ij) -> rhoj: (L), rhok: (L|oo)
     low = with_df.cd_low
+    rhoj, rhok = get_rhoj_rhok(with_df, dm, orbo, with_j=with_j, with_k=with_k)
+    if dm2 is not None:
+        rhoj2, _   = get_rhoj_rhok(with_df, dm2_tmp, orbo, with_j=with_j, with_k=False)
+    '''
     rows = with_df.intopt.cderi_row
     cols = with_df.intopt.cderi_col
     dm_sparse = dm[rows, cols]
@@ -108,6 +112,7 @@ def get_jk(mf_grad, mol=None, dm0=None, hermi=0, with_j=True, with_k=True, omega
             contract('Lki,il->Lkl', tmp, orbo, out=rhok[p0:p1])
         p0 = p1
     tmp = dm_sparse = cderi_sparse = cderi = None
+    '''
 
     # (d/dX P|Q) contributions
     if omega and omega > 1e-10:

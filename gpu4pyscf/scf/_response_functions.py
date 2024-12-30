@@ -1,22 +1,21 @@
-# Copyright 2024 The GPU4PySCF Authors. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import cupy
 from pyscf import lib
 from gpu4pyscf.lib import logger
-from gpu4pyscf.scf import hf, uhf
+from gpu4pyscf.scf import hf, uhf, rohf
 
 def _gen_rhf_response(mf, mo_coeff=None, mo_occ=None,
                       singlet=None, hermi=0, grids=None, max_memory=None):
@@ -39,16 +38,12 @@ def _gen_rhf_response(mf, mo_coeff=None, mo_occ=None,
             grids.build(mol=mol, with_non0tab=False, sort_grids=True)
         ni = mf._numint
         ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
-        if getattr(mf, 'nlc', '') != '':
+        if mf.do_nlc():
             logger.warn(mf, 'NLC functional found in DFT object.  Its second '
                         'deriviative is not available. Its contribution is '
                         'not included in the response function.')
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
         hybrid = ni.libxc.is_hybrid_xc(mf.xc)
-
-        if max_memory is None:
-            mem_avail = cupy.cuda.runtime.memGetInfo()[0] * .5e-6
-            max_memory = min(mf.max_memory, mem_avail)
 
         if singlet is None:
             # for ground state orbital hessian
@@ -137,7 +132,7 @@ def _gen_uhf_response(mf, mo_coeff=None, mo_occ=None,
     '''Generate a function to compute the product of UHF response function and
     UHF density matrices.
     '''
-    assert isinstance(mf, uhf.UHF)
+    assert isinstance(mf, (uhf.UHF, rohf.ROHF))
     if mo_coeff is None: mo_coeff = mf.mo_coeff
     if mo_occ is None: mo_occ = mf.mo_occ
     mol = mf.mol
@@ -158,10 +153,6 @@ def _gen_uhf_response(mf, mo_coeff=None, mo_occ=None,
         rho0, vxc, fxc = ni.cache_xc_kernel(mol, grids, mf.xc,
                                             mo_coeff, mo_occ, 1)
         dm0 = None
-
-        if max_memory is None:
-            mem_now = lib.current_memory()[0]
-            max_memory = max(2000, mf.max_memory*.8-mem_now)
 
         def vind(dm1):
             if hermi == 2:
@@ -202,3 +193,4 @@ def _gen_uhf_response(mf, mo_coeff=None, mo_occ=None,
 
 hf.RHF.gen_response = _gen_rhf_response
 uhf.UHF.gen_response = _gen_uhf_response
+rohf.ROHF.gen_response = _gen_uhf_response

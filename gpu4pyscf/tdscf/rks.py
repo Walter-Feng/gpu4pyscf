@@ -1,26 +1,24 @@
-#!/usr/bin/env python
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# Copyright 2024 The PySCF Developers. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import numpy as np
 import cupy as cp
 from pyscf import lib
 from pyscf.tdscf._lr_eig import eigh as lr_eigh
 from gpu4pyscf.dft.rks import KohnShamDFT
-from gpu4pyscf.lib.cupy_helper import contract
+from gpu4pyscf.lib.cupy_helper import contract, tag_array, transpose_sum
+from gpu4pyscf.lib import logger
 from gpu4pyscf.tdscf import rhf as tdhf_gpu
 from gpu4pyscf import dft
 
@@ -37,6 +35,7 @@ class CasidaTDDFT(TDDFT):
     '''
 
     init_guess = TDA.init_guess
+    get_precond = TDA.get_precond
 
     def gen_vind(self, mf=None):
         if mf is None:
@@ -62,24 +61,25 @@ class CasidaTDDFT(TDDFT):
         def vind(zs):
             zs = cp.asarray(zs).reshape(-1,nocc,nvir)
             # *2 for double occupancy
-            dmov = contract('xov,qv->xoq', zs*(d_ia*2), orbv)
-            dmov = contract('po,xoq->xpq', orbo, dmov)
+            mo1 = contract('xov,pv->xpo', zs*(d_ia*2), orbv)
+            dms = contract('xpo,qo->xpq', mo1, orbo)
             # +cc for A+B and K_{ai,jb} in A == K_{ai,bj} in B
-            dmov = dmov + dmov.transpose(0,2,1)
-
-            v1ao = vresp(dmov)
-            v1ov = contract('po,xpq->xoq', orbo, v1ao)
-            v1ov = contract('xoq,qv->xov', v1ov, orbv)
-            v1ov += zs * ed_ia
-            v1ov *= d_ia
-            return v1ov.reshape(v1ov.shape[0],-1).get()
+            dms = transpose_sum(dms)
+            dms = tag_array(dms, mo1=mo1, occ_coeff=orbo)
+            v1ao = vresp(dms)
+            v1mo = contract('xpq,qo->xpo', v1ao, orbo)
+            v1mo = contract('xpo,pv->xov', v1mo, orbv)
+            v1mo += zs * ed_ia
+            v1mo *= d_ia
+            return v1mo.reshape(v1mo.shape[0],-1).get()
 
         return vind, hdiag
 
     def kernel(self, x0=None, nstates=None):
         '''TDDFT diagonalization solver
         '''
-        cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+        log = logger.new_logger(self)
+        cpu0 = log.init_timer()
         mf = self._scf
         if mf._numint.libxc.is_hybrid_xc(mf.xc):
             raise RuntimeError('%s cannot be used with hybrid functional'
@@ -91,8 +91,6 @@ class CasidaTDDFT(TDDFT):
         else:
             self.nstates = nstates
 
-        log = lib.logger.Logger(self.stdout, self.verbose)
-
         vind, hdiag = self.gen_vind(self._scf)
         precond = self.get_precond(hdiag)
 
@@ -102,7 +100,7 @@ class CasidaTDDFT(TDDFT):
 
         x0sym = None
         if x0 is None:
-            x0 = self.init_guess(self._scf, self.nstates)
+            x0 = self.init_guess()
 
         self.converged, w2, x1 = lr_eigh(
             vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,
@@ -124,7 +122,7 @@ class CasidaTDDFT(TDDFT):
             x = (zp + zm) * .5
             y = (zp - zm) * .5
             norm = lib.norm(x)**2 - lib.norm(y)**2
-            norm = (.5/norm)**.5  # normalize to 0.5 for alpha spin
+            norm = abs(.5/norm)**.5  # normalize to 0.5 for alpha spin
             return (x*norm, y*norm)
 
         idx = np.where(w2 > self.positive_eig_threshold)[0]

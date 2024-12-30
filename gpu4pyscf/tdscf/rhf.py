@@ -1,19 +1,16 @@
-#!/usr/bin/env python
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# Copyright 2024 The PySCF Developers. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 import numpy as np
@@ -22,7 +19,7 @@ import scipy.linalg
 from pyscf import gto
 from pyscf import lib
 from pyscf.tdscf import rhf as tdhf_cpu
-from pyscf.tdscf._lr_eig import eigh as lr_eigh, eig as lr_eig
+from gpu4pyscf.tdscf._lr_eig import eigh as lr_eigh, eig as lr_eig, real_eig
 from gpu4pyscf import scf
 from gpu4pyscf.lib.cupy_helper import contract, tag_array
 from gpu4pyscf.lib import utils
@@ -62,15 +59,14 @@ def gen_tda_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
 
     def vind(zs):
         zs = cp.asarray(zs).reshape(-1,nocc,nvir)
-        mo1 = contract('xov,qv->xqo', zs, orbv)
-        dmov = contract('po,xqo->xpq', orbo2, mo1)
-        dmov = tag_array(dmov, mo1=mo1, occ_coeff=orbo)
-        v1ao = vresp(dmov)
-        v1ov = contract('po,xpq->xoq', orbo, v1ao)
-        v1ov = contract('xoq,qv->xov', v1ov, orbv)
-        #:v1ov += einsum('xia,ia->xia', zs, e_ia)
-        v1ov += zs * e_ia
-        return v1ov.reshape(v1ov.shape[0],-1).get()
+        mo1 = contract('xov,pv->xpo', zs, orbv)
+        dms = contract('xpo,qo->xpq', mo1, orbo2.conj())
+        dms = tag_array(dms, mo1=mo1, occ_coeff=orbo)
+        v1ao = vresp(dms)
+        v1mo = contract('xpq,qo->xpo', v1ao, orbo)
+        v1mo = contract('xpo,pv->xov', v1mo, orbv.conj())
+        v1mo += zs * e_ia
+        return v1mo.reshape(v1mo.shape[0],-1).get()
 
     return vind, hdiag
 
@@ -102,7 +98,15 @@ class TDBase(lib.StreamObject):
 
     gen_vind = NotImplemented
     get_ab = NotImplemented
-    get_precond = tdhf_cpu.TDBase.get_precond
+
+    def get_precond(self, hdiag):
+        def precond(x, e, *args):
+            if isinstance(e, np.ndarray):
+                e = e[0]
+            diagd = hdiag - (e-self.level_shift)
+            diagd[abs(diagd)<1e-8] = 1e-8
+            return x/diagd
+        return precond
 
     nuc_grad_method = NotImplemented
     as_scanner = tdhf_cpu.as_scanner
@@ -172,7 +176,7 @@ class TDA(TDBase):
             mf = self._scf
         return gen_tda_operation(mf, singlet=self.singlet)
 
-    def init_guess(self, mf, nstates=None, wfnsym=None, return_symmetry=False):
+    def init_guess(self, mf=None, nstates=None, wfnsym=None, return_symmetry=False):
         '''
         Generate initial guess for TDA
 
@@ -180,6 +184,7 @@ class TDA(TDBase):
             nstates : int
                 The number of initial guess vectors.
         '''
+        if mf is None: mf = self._scf
         if nstates is None: nstates = self.nstates
         assert wfnsym is None
         assert not return_symmetry
@@ -209,8 +214,8 @@ class TDA(TDBase):
     def kernel(self, x0=None, nstates=None):
         '''TDA diagonalization solver
         '''
-        log = logger.Logger(self.stdout, self.verbose)
-        t0 = log.init_timer()
+        log = logger.new_logger(self)
+        cpu0 = log.init_timer()
         self.check_sanity()
         self.dump_flags()
         if nstates is None:
@@ -228,7 +233,7 @@ class TDA(TDBase):
 
         x0sym = None
         if x0 is None:
-            x0 = self.init_guess(self._scf, self.nstates)
+            x0 = self.init_guess()
 
         self.converged, self.e, x1 = lr_eigh(
             vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,
@@ -240,7 +245,7 @@ class TDA(TDBase):
         nvir = nmo - nocc
         # 1/sqrt(2) because self.x is for alpha excitation and 2(X^+*X) = 1
         self.xy = [(xi.reshape(nocc,nvir) * .5**.5, 0) for xi in x1]
-        log.timer('TDA', *t0)
+        log.timer('TDA', *cpu0)
         self._finalize()
         return self.e, self.xy
 
@@ -265,38 +270,31 @@ def gen_tdhf_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
     orbo = mo_coeff[:,occidx]
 
     e_ia = hdiag = mo_energy[viridx] - mo_energy[occidx,None]
-    hdiag = cp.hstack((hdiag.ravel(), -hdiag.ravel())).get()
     vresp = mf.gen_response(singlet=singlet, hermi=0)
     nocc, nvir = e_ia.shape
 
-    def vind(xys):
-        xys = cp.asarray(xys).reshape(-1,2,nocc,nvir)
-        xs, ys = xys.transpose(1,0,2,3)
+    def vind(zs):
+        nz = len(zs)
+        xs, ys = zs.reshape(nz,2,nocc,nvir).transpose(1,0,2,3)
+        xs = cp.asarray(xs).reshape(nz,nocc,nvir)
+        ys = cp.asarray(ys).reshape(nz,nocc,nvir)
         # *2 for double occupancy
-        tmp = contract('xov,qv->xoq', xs*2, orbv)
-        dms = contract('po,xoq->xpq', orbo, tmp)
-        tmp = contract('xov,pv->xop', ys*2, orbv)
-        dms += contract('xop,qo->xpq', tmp, orbo)
+        tmp = contract('xov,pv->xpo', xs, orbv*2)
+        dms = contract('xpo,qo->xpq', tmp, orbo.conj())
+        tmp = contract('xov,qv->xoq', ys, orbv.conj()*2)
+        dms+= contract('xoq,po->xpq', tmp, orbo)
         v1ao = vresp(dms) # = <mb||nj> Xjb + <mj||nb> Yjb
-        # A ~= <ib||aj>, B = <ij||ab>
-        # AX + BY
-        # = <ib||aj> Xjb + <ij||ab> Yjb
-        # = (<mb||nj> Xjb + <mj||nb> Yjb) Cmi* Cna
-        v1ov = contract('po,xpq->xoq', orbo, v1ao)
-        v1ov = contract('xoq,qv->xov', v1ov, orbv)
-        # (B*)X + (A*)Y
-        # = <ab||ij> Xjb + <aj||ib> Yjb
-        # = (<mb||nj> Xjb + <mj||nb> Yjb) Cma* Cni
-        v1vo = contract('xpq,qo->xpo', v1ao, orbo)
-        v1vo = contract('xpo,pv->xov', v1vo, orbv)
-        v1ov += xs * e_ia  # AX
-        v1vo += ys * e_ia  # (A*)Y
-        # (AX, -AY)
-        nz = xys.shape[0]
-        hx = cp.hstack((v1ov.reshape(nz,-1), -v1vo.reshape(nz,-1)))
-        return hx.get()
+        v1_top = contract('xpq,qo->xpo', v1ao, orbo)
+        v1_top = contract('xpo,pv->xov', v1_top, orbv)
+        v1_bot = contract('xpq,po->xoq', v1ao, orbo)
+        v1_bot = contract('xoq,qv->xov', v1_bot, orbv)
+        v1_top += xs * e_ia  # AX
+        v1_bot += ys * e_ia  # (A*)Y
+        return cp.hstack((v1_top.reshape(nz,nocc*nvir),
+                          -v1_bot.reshape(nz,nocc*nvir))).get()
 
-    return vind, hdiag
+    hdiag = cp.hstack([hdiag.ravel(), -hdiag.ravel()])
+    return vind, hdiag.get()
 
 
 class TDHF(TDBase):
@@ -308,7 +306,8 @@ class TDHF(TDBase):
             mf = self._scf
         return gen_tdhf_operation(mf, singlet=self.singlet)
 
-    def init_guess(self, mf, nstates=None, wfnsym=None, return_symmetry=False):
+    def init_guess(self, mf=None, nstates=None, wfnsym=None, return_symmetry=False):
+        assert not return_symmetry
         x0 = TDA.init_guess(self, mf, nstates, wfnsym, return_symmetry)
         y0 = np.zeros_like(x0)
         return np.hstack([x0, y0])
@@ -316,7 +315,8 @@ class TDHF(TDBase):
     def kernel(self, x0=None, nstates=None):
         '''TDHF diagonalization with non-Hermitian eigenvalue solver
         '''
-        cpu0 = (logger.process_clock(), logger.perf_counter())
+        log = logger.new_logger(self)
+        cpu0 = log.init_timer()
         self.check_sanity()
         self.dump_flags()
         if nstates is None:
@@ -325,33 +325,20 @@ class TDHF(TDBase):
             self.nstates = nstates
         mol = self.mol
 
-        log = logger.Logger(self.stdout, self.verbose)
-
         vind, hdiag = self.gen_vind(self._scf)
         precond = self.get_precond(hdiag)
+        pickeig = None
 
         # handle single kpt PBC SCF
         if getattr(self._scf, 'kpt', None) is not None:
             from pyscf.pbc.lib.kpts_helper import gamma_point
-            real_system = (gamma_point(self._scf.kpt) and
-                           self._scf.mo_coeff[0].dtype == np.double)
-        else:
-            real_system = True
-
-        # We only need positive eigenvalues
-        def pickeig(w, v, nroots, envs):
-            realidx = np.where((abs(w.imag) < REAL_EIG_THRESHOLD) &
-                                  (w.real > self.positive_eig_threshold))[0]
-            # If the complex eigenvalue has small imaginary part, both the
-            # real part and the imaginary part of the eigenvector can
-            # approximately be used as the "real" eigen solutions.
-            return lib.linalg_helper._eigs_cmplx2real(w, v, realidx, real_system)
+            assert gamma_point(self._scf.kpt)
 
         x0sym = None
         if x0 is None:
-            x0 = self.init_guess(self._scf, self.nstates)
+            x0 = self.init_guess()
 
-        self.converged, w, x1 = lr_eig(
+        self.converged, self.e, x1 = real_eig(
             vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,
             nroots=nstates, x0sym=x0sym, pick=pickeig, max_cycle=self.max_cycle,
             max_memory=self.max_memory, verbose=log)
@@ -359,15 +346,16 @@ class TDHF(TDBase):
         nocc = mol.nelectron // 2
         nmo = self._scf.mo_occ.size
         nvir = nmo - nocc
-        self.e = w
         def norm_xy(z):
-            x, y = z.reshape(2,nocc,nvir)
+            x, y = z.reshape(2, -1)
             norm = lib.norm(x)**2 - lib.norm(y)**2
-            norm = np.sqrt(.5/norm)  # normalize to 0.5 for alpha spin
-            return x*norm, y*norm
+            if norm < 0:
+                log.warn('TDDFT amplitudes |X| smaller than |Y|')
+            norm = abs(.5/norm)**.5  # normalize to 0.5 for alpha spin
+            return x.reshape(nocc,nvir)*norm, y.reshape(nocc,nvir)*norm
         self.xy = [norm_xy(z) for z in x1]
 
-        log.timer('TDDFT', *cpu0)
+        log.timer('TDHF/TDDFT', *cpu0)
         self._finalize()
         return self.e, self.xy
 

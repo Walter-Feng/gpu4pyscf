@@ -1,17 +1,17 @@
-/* Copyright 2023 The GPU4PySCF Authors. All Rights Reserved.
+/*
+ * Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #include <stdio.h>
@@ -29,7 +29,6 @@
 #include "rys_roots.cu"
 #include "g2e.cu"
 #include "gout3c2e.cu"
-#include "g3c2e_root1.cu"
 #include "g2e_root2.cu"
 #include "g2e_root3.cu"
 #include "g3c2e.cu"
@@ -50,6 +49,7 @@ static int GINTfill_int3c2e_tasks(ERITensor *eri, BasisProdOffsets *offsets, GIN
         switch (type_ijkl) {
         case 0b0000: GINTfill_int3c2e_kernel0000<<<blocks, threads, 0, stream>>>(*envs, *eri, *offsets); break;
         case 0b0010: GINTfill_int3c2e_kernel0010<<<blocks, threads, 0, stream>>>(*envs, *eri, *offsets); break;
+        case 0b0100: GINTfill_int3c2e_kernel0100<<<blocks, threads, 0, stream>>>(*envs, *eri, *offsets); break;
         case 0b1000: GINTfill_int3c2e_kernel1000<<<blocks, threads, 0, stream>>>(*envs, *eri, *offsets); break;
         default:
             fprintf(stderr, "roots=1 type_ijkl %d\n", type_ijkl);
@@ -130,16 +130,6 @@ int GINTfill_int3c2e(cudaStream_t stream, BasisProdCache *bpcache, double *eri, 
         return 2;
     }
 
-    // TODO: improve the efficiency by unrolling
-    if (envs.nrys_roots > 1) {
-        int16_t *idx4c = (int16_t *)malloc(sizeof(int16_t) * envs.nf * 3);
-        GINTg2e_index_xyz(idx4c, &envs);
-        checkCudaErrors(cudaMemcpyToSymbol(c_idx4c, idx4c, sizeof(int16_t)*envs.nf*3));
-        free(idx4c);
-    }
-
-    int kl_bin, ij_bin1;
-
     //checkCudaErrors(cudaMemcpyToSymbol(c_envs, &envs, sizeof(GINTEnvVars)));
     // move bpcache to constant memory
     checkCudaErrors(cudaMemcpyToSymbol(c_bpcache, bpcache, sizeof(BasisProdCache)));
@@ -158,7 +148,7 @@ int GINTfill_int3c2e(cudaStream_t stream, BasisProdCache *bpcache, double *eri, 
 
     int *bas_pairs_locs = bpcache->bas_pairs_locs;
     int *primitive_pairs_locs = bpcache->primitive_pairs_locs;
-    for (kl_bin = 0; kl_bin < nbins; kl_bin++) {
+    for (int kl_bin = 0; kl_bin < nbins; kl_bin++) {
         int bas_kl0 = bins_locs_kl[kl_bin];
         int bas_kl1 = bins_locs_kl[kl_bin+1];
         int ntasks_kl = bas_kl1 - bas_kl0;
@@ -166,7 +156,7 @@ int GINTfill_int3c2e(cudaStream_t stream, BasisProdCache *bpcache, double *eri, 
             continue;
         }
         // ij_bin + kl_bin < nbins <~> e_ij*e_kl < cutoff
-        ij_bin1 = nbins - kl_bin;
+        int ij_bin1 = nbins - kl_bin;
         int bas_ij0 = bins_locs_ij[0];
         int bas_ij1 = bins_locs_ij[ij_bin1];
         int ntasks_ij = bas_ij1 - bas_ij0;

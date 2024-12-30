@@ -1,19 +1,16 @@
-# gpu4pyscf is a plugin to use Nvidia GPU in PySCF package
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# Copyright (C) 2022 Qiming Sun
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import os
 import numpy as np
@@ -29,7 +26,12 @@ from gpu4pyscf.dft import libxc_structs
 
 import site
 path_list = [os.path.abspath(os.path.join(__file__, '..', '..', '..'))] + site.getsitepackages()
+path_list.append(site.USER_SITE)    # Search for the directory where user-specific packages are installed
+
 __version__ = '6.1' # hard coded
+
+# monkey patch libxc reference due to a bug in nvcc
+__reference__ = 'unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29'
 
 # CPU routines
 is_nlc           = dft.libxc.is_nlc
@@ -210,7 +212,7 @@ class XCfun:
             output = _check_arrays(output, output_labels[3:4], xc_func_sizes, npoints, do_kxc)
             output = _check_arrays(output, output_labels[4:5], xc_func_sizes, npoints, do_lxc)
 
-            args.extend([   inp[x] for x in  input_labels])
+            args.extend([   inp[x].ravel() for x in  input_labels])
             args.extend([output[x] for x in output_labels])
 
             out_params = xc_lda_out_params()

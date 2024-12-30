@@ -1,19 +1,16 @@
-#!/usr/bin/env python
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# Copyright 2024 The PySCF Developers. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 '''
 J engine using McMurchie-Davidson algorithm
@@ -31,7 +28,7 @@ from gpu4pyscf.lib.cupy_helper import load_library, condense, sandwich_dot, tran
 from gpu4pyscf.__config__ import props as gpu_specs
 from gpu4pyscf.lib import logger
 from gpu4pyscf.scf import jk
-from gpu4pyscf.scf.jk import _make_j_engine_pair_locs, RysIntEnvVars
+from gpu4pyscf.scf.jk import _make_j_engine_pair_locs, RysIntEnvVars, _scale_sp_ctr_coeff
 
 __all__ = [
     'get_j',
@@ -82,7 +79,8 @@ def get_j(mol, dm, hermi=1, vhfopt=None, omega=None, verbose=None):
     dm_xyz = np.zeros(pair_loc[-1])
     # Must use this modified _env to ensure the consistency with GPU kernel
     # In this _env, normalization coefficients for s and p funcitons are scaled.
-    _env = vhfopt._mol_gpu[2].get()
+    #_env = vhfopt._mol_gpu[2].get()
+    _env = _scale_sp_ctr_coeff(mol)
     libvhf_md.Et_dot_dm(
         dm_xyz.ctypes, dms.ctypes, ao_loc.ctypes, pair_loc.ctypes,
         mol._bas.ctypes, ctypes.c_int(mol.nbas), _env.ctypes)
@@ -97,7 +95,6 @@ def get_j(mol, dm, hermi=1, vhfopt=None, omega=None, verbose=None):
     )
 
     libvhf_md.init_mdj_constant(ctypes.c_int(SHM_SIZE))
-
     uniq_l_ctr = vhfopt.uniq_l_ctr
     uniq_l = uniq_l_ctr[:,0]
     l_ctr_bas_loc = vhfopt.l_ctr_offsets
@@ -105,6 +102,7 @@ def get_j(mol, dm, hermi=1, vhfopt=None, omega=None, verbose=None):
     n_groups = len(uniq_l_ctr)
     tile_mappings = {}
     workers = gpu_specs['multiProcessorCount']
+
     info = cp.empty(2, dtype=np.uint32)
 
     for i in range(n_groups):
@@ -152,13 +150,14 @@ def get_j(mol, dm, hermi=1, vhfopt=None, omega=None, verbose=None):
                         ctypes.cast(vhfopt.tile_q_cond.data.ptr, ctypes.c_void_p),
                         ctypes.cast(vhfopt.q_cond.data.ptr, ctypes.c_void_p),
                         lib.c_null_ptr(),
+                        lib.c_null_ptr(),
                         ctypes.c_float(log_cutoff-log_max_dm),
                         ctypes.cast(info.data.ptr, ctypes.c_void_p),
                         ctypes.c_int(workers), ctypes.c_double(omega),
                         mol._atm.ctypes, ctypes.c_int(mol.natm),
                         mol._bas.ctypes, ctypes.c_int(mol.nbas), _env.ctypes)
                     if err != 0:
-                        raise RuntimeError(f'RYS_build_jk kernel for {llll} failed')
+                        raise RuntimeError(f'MD_build_j kernel for {llll} failed')
                     if log.verbose >= logger.DEBUG1:
                         ntasks = tile_ij_mapping.size * tile_kl_mapping.size
                         t1, t1p = log.timer_debug1(f'processing {llll}, tasks ~= {ntasks}', *t1), t1
@@ -192,10 +191,15 @@ class _VHFOpt(jk._VHFOpt):
         self.direct_scf_tol = cutoff
         self.uniq_l_ctr = None
         self.l_ctr_offsets = None
-        self.q_cond = None
-        self.tile_q_cond = None
         self.tile = 1
 
+        # Hold cache on GPU devices
+        self._rys_envs = {}
+        self._mol_gpu = {}
+        self._q_cond = {}
+        self._tile_q_cond = {}
+        self._s_estimator = {}
+        
 def _md_j_engine_quartets_scheme(mol, l_ctr_pattern, shm_size=SHM_SIZE):
     ls = l_ctr_pattern[:,0]
     li, lj, lk, ll = ls

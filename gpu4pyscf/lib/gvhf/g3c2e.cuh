@@ -1,17 +1,17 @@
-/* Copyright 2023 The GPU4PySCF Authors. All Rights Reserved.
+/*
+ * Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #pragma once
@@ -301,10 +301,10 @@ static void GINTkernel_int3c2e_ip1_getjk_direct(GINTEnvVars envs, JKMatrix jk, d
 
     if (rhoj == NULL){
         for (k = k0; k < k1; ++k) {
-            int kp = k - k0;
             for (j = j0; j < j1; ++j) {
-                int jp = j - j0;
                 for (i = i0; i < i1; ++i) {
+                    int kp = k - k0;
+                    int jp = j - j0;
                     int ip = i - i0;
 
                     int loc_k = c_l_locs[k_l] + kp;
@@ -342,17 +342,19 @@ static void GINTkernel_int3c2e_ip1_getjk_direct(GINTEnvVars envs, JKMatrix jk, d
 
     if (rhok == NULL){
         for (i = i0; i < i1; ++i) {
-            int ip = i - i0;
             for (j = j0; j < j1; ++j) {
-                int jp = j - j0;
                 double jx = 0.0;
                 double jy = 0.0;
                 double jz = 0.0;
-                int loc_j = c_l_locs[j_l] + jp;
-                int loc_i = c_l_locs[i_l] + ip;
                 for (k = k0; k < k1; ++k) {
+                    int ip = i - i0;
+                    int jp = j - j0;
                     int kp = k - k0;
+                    
+                    int loc_j = c_l_locs[j_l] + jp;
+                    int loc_i = c_l_locs[i_l] + ip;
                     int loc_k = c_l_locs[k_l] + kp;
+                    
                     int ix = dk * idx[loc_k] + dj * idx[loc_j] + di * idx[loc_i];
                     int iy = dk * idy[loc_k] + dj * idy[loc_j] + di * idy[loc_i] + g_size;
                     int iz = dk * idz[loc_k] + dj * idz[loc_j] + di * idz[loc_i] + g_size * 2;
@@ -388,18 +390,19 @@ static void GINTkernel_int3c2e_ip1_getjk_direct(GINTEnvVars envs, JKMatrix jk, d
     }
 
     for (i = i0; i < i1; ++i) {
-        int ip = i - i0;
-        int ii = 3*(i-i0);
         for (j = j0; j < j1; ++j) {
-            int jp = j - j0;
             double jx = 0.0;
             double jy = 0.0;
             double jz = 0.0;
-            int loc_j = c_l_locs[j_l] + jp;
-            int loc_i = c_l_locs[i_l] + ip;
             for (k = k0; k < k1; ++k) {
+                int jp = j - j0;
                 int kp = k - k0;
+                int ip = i - i0;
+                
                 int loc_k = c_l_locs[k_l] + kp;
+                int loc_j = c_l_locs[j_l] + jp;
+                int loc_i = c_l_locs[i_l] + ip;
+                
                 int ix = dk * idx[loc_k] + dj * idx[loc_j] + di * idx[loc_i];
                 int iy = dk * idy[loc_k] + dj * idy[loc_j] + di * idy[loc_i] + g_size;
                 int iz = dk * idz[loc_k] + dj * idz[loc_j] + di * idz[loc_i] + g_size * 2;
@@ -419,6 +422,7 @@ static void GINTkernel_int3c2e_ip1_getjk_direct(GINTEnvVars envs, JKMatrix jk, d
 
                 int off_rhok = i + nao*j + k*nao*nao;
                 double rhok_tmp = rhok[off_rhok];
+                int ii = 3*(i-i0);
                 k3[ii + 0] += rhok_tmp * sx;
                 k3[ii + 1] += rhok_tmp * sy;
                 k3[ii + 2] += rhok_tmp * sz;
@@ -431,6 +435,172 @@ static void GINTkernel_int3c2e_ip1_getjk_direct(GINTEnvVars envs, JKMatrix jk, d
             int off_dm = i + nao*j;
             //double rhoj_tmp = dm[off_dm] * rhoj_k;
             double dm_ij = dm[off_dm];
+            int ii = 3*(i-i0);
+            
+            j3[ii + 0] += jx * dm_ij;
+            j3[ii + 1] += jy * dm_ij;
+            j3[ii + 2] += jz * dm_ij;
+        }
+    }
+}
+
+template <int LI, int LJ, int LK> __device__
+static void GINTkernel_int3c2e_ip1_getjk_direct(GINTEnvVars envs, JKMatrix jk, double* j3, double* k3, double* f, double* g,
+                       int ish, int jsh, int ksh)
+{
+    int *ao_loc = c_bpcache.ao_loc;
+    int i0 = ao_loc[ish  ] - jk.ao_offsets_i;
+    int j0 = ao_loc[jsh  ] - jk.ao_offsets_j;
+    int k0 = ao_loc[ksh  ] - jk.ao_offsets_k;
+
+    constexpr int LI_CEIL = LI + 1;
+    constexpr int NROOTS = (LI_CEIL+LJ+LK)/2 + 1;
+    constexpr int nfi = (LI+1)*(LI+2)/2;
+    constexpr int nfj = (LJ+1)*(LJ+2)/2;
+    constexpr int nfk = (LK+1)*(LK+2)/2;
+
+    constexpr int di = NROOTS;
+    constexpr int dj = di * (LI_CEIL + 1);
+    constexpr int dk = dj * (LJ + 1);
+    constexpr int g_size = dk * (LK + 1);
+
+    int nao = jk.nao;
+    
+    double* __restrict__ rhoj = jk.rhoj;
+    double* __restrict__ rhok = jk.rhok;
+    double* __restrict__ dm = jk.dm;
+
+    int *idx = c_idx;
+    int *idy = c_idx + TOT_NF;
+    int *idz = c_idx + TOT_NF * 2;
+
+    if (rhoj == NULL){
+        for (int kp = 0; kp < nfk; ++kp) {
+            for (int jp = 0; jp < nfj; ++jp) {
+                for (int ip = 0; ip < nfi; ++ip) {
+                    
+                    int loc_k = c_l_locs[LK] + kp;
+                    int loc_j = c_l_locs[LJ] + jp;
+                    int loc_i = c_l_locs[LI] + ip;
+
+                    int ix = dk * idx[loc_k] + dj * idx[loc_j] + di * idx[loc_i];
+                    int iy = dk * idy[loc_k] + dj * idy[loc_j] + di * idy[loc_i] + g_size;
+                    int iz = dk * idz[loc_k] + dj * idz[loc_j] + di * idz[loc_i] + g_size * 2;
+
+                    double sx = 0.0;
+                    double sy = 0.0;
+                    double sz = 0.0;
+#pragma unroll
+                    for (int ir = 0; ir < NROOTS; ++ir){
+                        double gx = g[ix+ir];
+                        double gy = g[iy+ir];
+                        double gz = g[iz+ir];
+                        sx += f[ix + ir] * gy * gz;
+                        sy += gx * f[iy + ir] * gz;
+                        sz += gx * gy * f[iz + ir];
+                    }
+
+                    int ii = 3*ip;
+                    int off_rhok = (i0+ip) + nao*(j0+jp) + (k0+kp)*nao*nao;
+                    double rhok_tmp = rhok[off_rhok];
+                    k3[ii + 0] += rhok_tmp * sx;
+                    k3[ii + 1] += rhok_tmp * sy;
+                    k3[ii + 2] += rhok_tmp * sz;
+                }
+            }
+        }
+        return;
+    }
+
+    if (rhok == NULL){
+        for (int ip = 0; ip < nfi; ++ip) {
+            for (int jp = 0; jp < nfj; ++jp) {
+                double jx = 0.0;
+                double jy = 0.0;
+                double jz = 0.0;
+                for (int kp = 0; kp < nfk; ++kp) {
+                    int loc_j = c_l_locs[LJ] + jp;
+                    int loc_i = c_l_locs[LI] + ip;
+                    int loc_k = c_l_locs[LK] + kp;
+                    
+                    int ix = dk * idx[loc_k] + dj * idx[loc_j] + di * idx[loc_i];
+                    int iy = dk * idy[loc_k] + dj * idy[loc_j] + di * idy[loc_i] + g_size;
+                    int iz = dk * idz[loc_k] + dj * idz[loc_j] + di * idz[loc_i] + g_size * 2;
+
+                    double sx = 0.0;
+                    double sy = 0.0;
+                    double sz = 0.0;
+#pragma unroll
+                    for (int ir = 0; ir < NROOTS; ++ir){
+                        double gx = g[ix+ir];
+                        double gy = g[iy+ir];
+                        double gz = g[iz+ir];
+                        sx += f[ix + ir] * gy * gz;
+                        sy += gx * f[iy + ir] * gz;
+                        sz += gx * gy * f[iz + ir];
+                    }
+
+                    double rhoj_k = rhoj[kp + k0];
+                    jx += rhoj_k * sx;
+                    jy += rhoj_k * sy;
+                    jz += rhoj_k * sz;
+                }
+                int ii = 3*ip;
+                int off_dm = (ip + i0) + nao*(j0 + jp);
+                //double rhoj_tmp = dm[off_dm] * rhoj_k;
+                double dm_ij = dm[off_dm];
+                j3[ii + 0] += jx * dm_ij;
+                j3[ii + 1] += jy * dm_ij;
+                j3[ii + 2] += jz * dm_ij;
+            }
+        }
+        return;
+    }
+
+    for (int ip = 0; ip < nfi; ++ip) {
+        for (int jp = 0; jp < nfj; ++jp) {
+            double jx = 0.0;
+            double jy = 0.0;
+            double jz = 0.0;
+            for (int kp = 0; kp < nfk; ++kp) {                
+                int loc_k = c_l_locs[LK] + kp;
+                int loc_j = c_l_locs[LJ] + jp;
+                int loc_i = c_l_locs[LI] + ip;
+                
+                int ix = dk * idx[loc_k] + dj * idx[loc_j] + di * idx[loc_i];
+                int iy = dk * idy[loc_k] + dj * idy[loc_j] + di * idy[loc_i] + g_size;
+                int iz = dk * idz[loc_k] + dj * idz[loc_j] + di * idz[loc_i] + g_size * 2;
+
+                double sx = 0.0;
+                double sy = 0.0;
+                double sz = 0.0;
+#pragma unroll
+                for (int ir = 0; ir < NROOTS; ++ir){
+                    double gx = g[ix+ir];
+                    double gy = g[iy+ir];
+                    double gz = g[iz+ir];
+                    sx += f[ix + ir] * gy * gz;
+                    sy += gx * f[iy + ir] * gz;
+                    sz += gx * gy * f[iz + ir];
+                }
+
+                int off_rhok = (i0 + ip) + nao*(j0 + jp) + (k0 + kp)*nao*nao;
+                double rhok_tmp = rhok[off_rhok];
+                int ii = 3*ip;
+                k3[ii + 0] += rhok_tmp * sx;
+                k3[ii + 1] += rhok_tmp * sy;
+                k3[ii + 2] += rhok_tmp * sz;
+
+                double rhoj_k = rhoj[k0+kp];
+                jx += rhoj_k * sx;
+                jy += rhoj_k * sy;
+                jz += rhoj_k * sz;
+            }
+            int off_dm = (i0 + ip) + nao*(j0 + jp);
+            //double rhoj_tmp = dm[off_dm] * rhoj_k;
+            double dm_ij = dm[off_dm];
+            int ii = 3*ip;
+            
             j3[ii + 0] += jx * dm_ij;
             j3[ii + 1] += jy * dm_ij;
             j3[ii + 2] += jz * dm_ij;
@@ -516,16 +686,13 @@ static void GINTkernel_int3c2e_ip2_getjk_direct(GINTEnvVars envs, JKMatrix jk, d
 
     if (rhok == NULL){
         for (int kp = 0; kp < k1-k0; ++kp) {
-            //int kp = k - k0;
             double jx = 0.0;
             double jy = 0.0;
             double jz = 0.0;
-            int loc_k = c_l_locs[k_l] + kp;
+            
             for (int jp = 0; jp < j1-j0; ++jp) {
-                //int jp = j - j0;
                 for (int ip = 0; ip < i1-i0; ++ip) {
-                    //int ip = i - i0;
-
+                    int loc_k = c_l_locs[k_l] + kp;
                     int loc_j = c_l_locs[j_l] + jp;
                     int loc_i = c_l_locs[i_l] + ip;
 
@@ -612,6 +779,166 @@ static void GINTkernel_int3c2e_ip2_getjk_direct(GINTEnvVars envs, JKMatrix jk, d
     }
 }
 
+template <int LI, int LJ, int LK> __device__
+static void GINTkernel_int3c2e_ip2_getjk_direct(GINTEnvVars envs, JKMatrix jk, double* j3, double* k3, double* f, double *g,
+                       int ish, int jsh, int ksh)
+{
+    int *ao_loc = c_bpcache.ao_loc;
+    int i0 = ao_loc[ish  ] - jk.ao_offsets_i;
+    int j0 = ao_loc[jsh  ] - jk.ao_offsets_j;
+    int k0 = ao_loc[ksh  ] - jk.ao_offsets_k;
+
+    constexpr int LK_CEIL = LK + 1;
+    constexpr int NROOTS = (LI+LJ+LK_CEIL)/2 + 1;
+    constexpr int nfi = (LI+1)*(LI+2)/2;
+    constexpr int nfj = (LJ+1)*(LJ+2)/2;
+    constexpr int nfk = (LK+1)*(LK+2)/2; 
+
+    constexpr int di = NROOTS;
+    constexpr int dj = di * (LI + 1);
+    constexpr int dk = dj * (LJ + 1);
+    constexpr int g_size = dk * (LK_CEIL + 1);
+
+    int nao = jk.nao;
+    
+    double* __restrict__ rhoj = jk.rhoj;
+    double* __restrict__ rhok = jk.rhok;
+    double* __restrict__ dm = jk.dm;
+
+    int *idx = c_idx;
+    int *idy = c_idx + TOT_NF;
+    int *idz = c_idx + TOT_NF * 2;
+
+    if (rhoj == NULL){
+        for (int kp = 0; kp < nfk; ++kp) {
+            for (int jp = 0; jp < nfj; ++jp) {
+                for (int ip = 0; ip < nfi; ++ip) {
+                    int loc_k = c_l_locs[LK] + kp;
+                    int loc_j = c_l_locs[LJ] + jp;
+                    int loc_i = c_l_locs[LI] + ip;
+
+                    int ix = dk * idx[loc_k] + dj * idx[loc_j] + di * idx[loc_i];
+                    int iy = dk * idy[loc_k] + dj * idy[loc_j] + di * idy[loc_i] + g_size;
+                    int iz = dk * idz[loc_k] + dj * idz[loc_j] + di * idz[loc_i] + g_size * 2;
+
+                    double sx = 0.0;
+                    double sy = 0.0;
+                    double sz = 0.0;
+#pragma unroll
+                    for (int ir = 0; ir < NROOTS; ++ir){
+                        double gx = g[ix+ir];
+                        double gy = g[iy+ir];
+                        double gz = g[iz+ir];
+                        sx += f[ix + ir] * gy * gz;
+                        sy += gx * f[iy + ir] * gz;
+                        sz += gx * gy * f[iz + ir];
+                    }
+
+                    int kk = 3*kp;
+                    int off_rhok = (i0+ip) + nao*(j0+jp) + (k0+kp)*nao*nao;
+                    double rhok_tmp = rhok[off_rhok];
+                    k3[kk + 0] += sx * rhok_tmp;
+                    k3[kk + 1] += sy * rhok_tmp;
+                    k3[kk + 2] += sz * rhok_tmp;
+                }
+            }
+        }
+        return;
+    }
+
+    if (rhok == NULL){
+        for (int kp = 0; kp < nfk; ++kp) {
+            double jx = 0.0;
+            double jy = 0.0;
+            double jz = 0.0;
+            
+            for (int jp = 0; jp < nfj; ++jp) {
+                for (int ip = 0; ip < nfi; ++ip) {
+                    int loc_k = c_l_locs[LK] + kp;
+                    int loc_j = c_l_locs[LJ] + jp;
+                    int loc_i = c_l_locs[LI] + ip;
+
+                    int ix = dk * idx[loc_k] + dj * idx[loc_j] + di * idx[loc_i];
+                    int iy = dk * idy[loc_k] + dj * idy[loc_j] + di * idy[loc_i] + g_size;
+                    int iz = dk * idz[loc_k] + dj * idz[loc_j] + di * idz[loc_i] + g_size * 2;
+
+                    double sx = 0.0;
+                    double sy = 0.0;
+                    double sz = 0.0;
+#pragma unroll
+                    for (int ir = 0; ir < NROOTS; ++ir){
+                        double gx = g[ix+ir];
+                        double gy = g[iy+ir];
+                        double gz = g[iz+ir];
+                        sx += f[ix + ir] * gy * gz;
+                        sy += gx * f[iy + ir] * gz;
+                        sz += gx * gy * f[iz + ir];
+                    }
+                    int off_dm = (ip+i0) + nao*(jp+j0);
+                    double dm_ij = dm[off_dm];
+                    jx += dm_ij * sx;
+                    jy += dm_ij * sy;
+                    jz += dm_ij * sz;
+                }
+            }
+            double rhoj_k = rhoj[kp + k0];
+            int kk = 3*kp;
+            j3[kk + 0] += jx * rhoj_k;
+            j3[kk + 1] += jy * rhoj_k;
+            j3[kk + 2] += jz * rhoj_k;
+        }
+        return;
+    }
+
+    for (int kp = 0; kp < nfk; ++kp) {
+        double jx = 0.0;
+        double jy = 0.0;
+        double jz = 0.0;
+        
+        for (int jp = 0; jp < nfj; ++jp) {
+            for (int ip = 0; ip < nfi; ++ip) {
+                int loc_k = c_l_locs[LK] + kp;
+                int loc_j = c_l_locs[LJ] + jp;
+                int loc_i = c_l_locs[LI] + ip;
+
+                int ix = dk * idx[loc_k] + dj * idx[loc_j] + di * idx[loc_i];
+                int iy = dk * idy[loc_k] + dj * idy[loc_j] + di * idy[loc_i] + g_size;
+                int iz = dk * idz[loc_k] + dj * idz[loc_j] + di * idz[loc_i] + g_size * 2;
+
+                double sx = 0.0;
+                double sy = 0.0;
+                double sz = 0.0;
+#pragma unroll
+                for (int ir = 0; ir < NROOTS; ++ir){
+                    double gx = g[ix+ir];
+                    double gy = g[iy+ir];
+                    double gz = g[iz+ir];
+                    sx += f[ix + ir] * gy * gz;
+                    sy += gx * f[iy + ir] * gz;
+                    sz += gx * gy * f[iz + ir];
+                }
+
+                int off_rhok = (i0+ip) + nao*(j0+jp) + (k0+kp)*nao*nao;
+                double rhok_tmp = rhok[off_rhok];
+                k3[3*kp + 0] += sx * rhok_tmp;
+                k3[3*kp + 1] += sy * rhok_tmp;
+                k3[3*kp + 2] += sz * rhok_tmp;
+
+                int off_dm = (i0+ip) + nao*(j0+jp);
+                double dm_ij = dm[off_dm];
+                jx += dm_ij * sx;
+                jy += dm_ij * sy;
+                jz += dm_ij * sz;
+            }
+        }
+        
+        double rhoj_k = rhoj[kp+k0];
+        j3[3*kp + 0] += jx * rhoj_k;
+        j3[3*kp + 1] += jy * rhoj_k;
+        j3[3*kp + 2] += jz * rhoj_k;
+    }
+}
+
 __device__
 static void write_int3c2e_ip1_jk(JKMatrix jk, double* j3, double* k3, int ish){
     int *ao_loc = c_bpcache.ao_loc;
@@ -630,10 +957,10 @@ static void write_int3c2e_ip1_jk(JKMatrix jk, double* j3, double* k3, int ish){
             for (int j = 0; j < 3; j++){
                 int ii = 3*(i-i0) + j;
                 sdata[tx][ty] = j3[ii]; __syncthreads();
-                if(ty<8) sdata[tx][ty] += sdata[tx][ty+8]; __syncthreads();
-                if(ty<4) sdata[tx][ty] += sdata[tx][ty+4]; __syncthreads();
-                if(ty<2) sdata[tx][ty] += sdata[tx][ty+2]; __syncthreads();
-                if(ty<1) sdata[tx][ty] += sdata[tx][ty+1]; __syncthreads();
+                if(THREADSY >= 16 && ty<8) sdata[tx][ty] += sdata[tx][ty+8]; __syncthreads();
+                if(THREADSY >= 8  && ty<4) sdata[tx][ty] += sdata[tx][ty+4]; __syncthreads();
+                if(THREADSY >= 4  && ty<2) sdata[tx][ty] += sdata[tx][ty+2]; __syncthreads();
+                if(THREADSY >= 2  && ty<1) sdata[tx][ty] += sdata[tx][ty+1]; __syncthreads();
                 if (ty == 0) atomicAdd(vj+i+j*nao, sdata[tx][0]);
             }
         }
@@ -644,10 +971,10 @@ static void write_int3c2e_ip1_jk(JKMatrix jk, double* j3, double* k3, int ish){
             for (int j = 0; j < 3; j++){
                 int ii = 3*(i-i0) + j;
                 sdata[tx][ty] = k3[ii]; __syncthreads();
-                if(ty<8) sdata[tx][ty] += sdata[tx][ty+8]; __syncthreads();
-                if(ty<4) sdata[tx][ty] += sdata[tx][ty+4]; __syncthreads();
-                if(ty<2) sdata[tx][ty] += sdata[tx][ty+2]; __syncthreads();
-                if(ty<1) sdata[tx][ty] += sdata[tx][ty+1]; __syncthreads();
+                if(THREADSY >= 16 && ty<8) sdata[tx][ty] += sdata[tx][ty+8]; __syncthreads();
+                if(THREADSY >= 8  && ty<4) sdata[tx][ty] += sdata[tx][ty+4]; __syncthreads();
+                if(THREADSY >= 4  && ty<2) sdata[tx][ty] += sdata[tx][ty+2]; __syncthreads();
+                if(THREADSY >= 2  && ty<1) sdata[tx][ty] += sdata[tx][ty+1]; __syncthreads();
                 if (ty == 0) atomicAdd(vk+i+j*nao, sdata[tx][0]);
             }
         }
@@ -672,10 +999,10 @@ static void write_int3c2e_ip2_jk(JKMatrix jk, double *j3, double* k3, int ksh){
             for (int j = 0; j < 3; j++){
                 int kk = 3*(k-k0) + j;
                 sdata[tx][ty] = j3[kk]; __syncthreads();
-                if(tx<8) sdata[tx][ty] += sdata[tx+8][ty]; __syncthreads();
-                if(tx<4) sdata[tx][ty] += sdata[tx+4][ty]; __syncthreads();
-                if(tx<2) sdata[tx][ty] += sdata[tx+2][ty]; __syncthreads();
-                if(tx<1) sdata[tx][ty] += sdata[tx+1][ty]; __syncthreads();
+                if(THREADSX >= 16 && tx<8) sdata[tx][ty] += sdata[tx+8][ty]; __syncthreads();
+                if(THREADSX >= 8  && tx<4) sdata[tx][ty] += sdata[tx+4][ty]; __syncthreads();
+                if(THREADSX >= 4  && tx<2) sdata[tx][ty] += sdata[tx+2][ty]; __syncthreads();
+                if(THREADSX >= 2  && tx<1) sdata[tx][ty] += sdata[tx+1][ty]; __syncthreads();
                 if (tx == 0) atomicAdd(vj+k+j*naux, sdata[0][ty]);
             }
         }
@@ -685,10 +1012,10 @@ static void write_int3c2e_ip2_jk(JKMatrix jk, double *j3, double* k3, int ksh){
             for (int j = 0; j < 3; j++){
                 int kk = 3*(k-k0) + j;
                 sdata[tx][ty] = k3[kk]; __syncthreads();
-                if(tx<8) sdata[tx][ty] += sdata[tx+8][ty]; __syncthreads();
-                if(tx<4) sdata[tx][ty] += sdata[tx+4][ty]; __syncthreads();
-                if(tx<2) sdata[tx][ty] += sdata[tx+2][ty]; __syncthreads();
-                if(tx<1) sdata[tx][ty] += sdata[tx+1][ty]; __syncthreads();
+                if(THREADSX >= 16 && tx<8) sdata[tx][ty] += sdata[tx+8][ty]; __syncthreads();
+                if(THREADSX >= 8  && tx<4) sdata[tx][ty] += sdata[tx+4][ty]; __syncthreads();
+                if(THREADSX >= 4  && tx<2) sdata[tx][ty] += sdata[tx+2][ty]; __syncthreads();
+                if(THREADSX >= 2  && tx<1) sdata[tx][ty] += sdata[tx+1][ty]; __syncthreads();
                 if (tx == 0) atomicAdd(vk+k+j*naux, sdata[0][ty]);
             }
         }

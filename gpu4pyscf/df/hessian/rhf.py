@@ -1,11 +1,4 @@
-#!/usr/bin/env python
-#
-# This code was copied from the data generation program of Tencent Alchemy
-# project (https://github.com/tencent-alchemy).
-#
-
-#
-# Copyright 2019 Tencent America LLC. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,18 +25,17 @@ Ref:
 '''
 
 
-import numpy
 import cupy
-import numpy as np
 from pyscf import lib
 from gpu4pyscf.grad import rhf as rhf_grad
 from gpu4pyscf.hessian import rhf as rhf_hess
 from gpu4pyscf.lib.cupy_helper import (
-    contract, tag_array, get_avail_mem, release_gpu_stack, take_last2d, pinv)
+    contract, tag_array, get_avail_mem, release_gpu_stack, pinv)
 from gpu4pyscf.df import int3c2e, df
 from gpu4pyscf.lib import logger
 from gpu4pyscf import __config__
 from gpu4pyscf.df.grad.rhf import _gen_metric_solver
+from gpu4pyscf.gto.mole import sort_atoms
 
 LINEAR_DEP_THR = df.LINEAR_DEP_THR
 BLKSIZE = 128
@@ -55,6 +47,29 @@ def partial_hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
     e1, ej, ek = _partial_hess_ejk(hessobj, mo_energy, mo_coeff, mo_occ,
                                    atmlst, max_memory, verbose, True)
     return e1 + ej - ek
+
+def _hk_ip1_ip1(rhok1_Pko, dm0, mocc_2):
+    ''' hk contributions due to (10|0)(0|10) + (10|0)(0|01)
+    '''
+    nnz = rhok1_Pko.shape[0]
+    nao = dm0.shape[0]
+    mem_avail = get_avail_mem()
+    blksize = int((mem_avail*0.4/(nao*nao*3*8)/ALIGNED))*ALIGNED
+    hk_ao_ao = cupy.zeros([nao,nao,3,3])
+    for k0, k1 in lib.prange(0,nnz,blksize):
+        rhok1_Pko_kslice = cupy.asarray(rhok1_Pko[k0:k1])
+
+        # (10|0)(0|10) without response of RI basis
+        vk2_ip1_ip1 = contract('piox,pkoy->ikxy', rhok1_Pko_kslice, rhok1_Pko_kslice)
+        hk_ao_ao += contract('ikxy,ik->ikxy', vk2_ip1_ip1, dm0)
+        vk2_ip1_ip1 = None
+
+        # (10|0)(0|01) without response of RI basis
+        rhok1_Pkl_kslice = contract('piox,ko->pikx', rhok1_Pko_kslice, mocc_2)
+        hk_ao_ao += contract('pikx,pkiy->ikxy', rhok1_Pkl_kslice, rhok1_Pkl_kslice)
+        rhok1_Pkl_kslice = None
+    return hk_ao_ao
+
 
 def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
                       atmlst=None, max_memory=4000, verbose=None, with_k=True, omega=None):
@@ -96,7 +111,7 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
     # ================================ sorted AO begin ===============================================
     intopt = int3c2e.VHFOpt(mol, auxmol, 'int2e')
     intopt.build(mf.direct_scf_tol, diag_block_with_triu=True, aosym=False, group_size=BLKSIZE, group_size_aux=BLKSIZE)
-    naux = auxmol.nao #len(aux_ao_idx)
+    naux = auxmol.nao
     mocc_2 = intopt.sort_orbitals(mocc_2, axis=[0])
     dm0 = intopt.sort_orbitals(dm0, axis=[0,1])
     dm0_tag = tag_array(dm0, occ_coeff=mocc_2)
@@ -116,10 +131,10 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
 
     #  int3c contributions
     wj, wk_P__ = int3c2e.get_int3c2e_jk(mol, auxmol, dm0_tag, omega=omega)
+    t1 = log.timer_debug1('intermediate variables with int3c2e', *t1)
     rhoj0_P = solve_j2c(wj)
     rhok0_P__ = solve_j2c(wk_P__)
     wj = wk_P__ = None
-    t1 = log.timer_debug1('intermediate variables with int3c2e', *t1)
 
     # int3c_ip2 contributions
     wj_ip2, wk_ip2_P__ = int3c2e.get_int3c2e_ip2_wjk(intopt, dm0_tag, omega=omega)
@@ -147,7 +162,7 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
         nocc = mocc.shape[1]
         slice_size = naux*nocc*9   # largest slice of intermediate variables
         blksize = int(mem_avail*0.2/8/slice_size/ALIGNED) * ALIGNED
-        log.debug(f'GPU Memory {mem_avail/GB:.1f} GB available, block size {blksize}')
+        log.debug(f'GPU Memory {mem_avail/GB:.1f} GB available, {blksize} aux AOs per block')
         if blksize < ALIGNED:
             raise RuntimeError('Not enough memory for intermediate variables')
 
@@ -189,36 +204,20 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
                 rhok1_Pko[:,i0:i1] = contract('qp,qiox->piox', cd_low, wk1_tmp).get()
             wk1_tmp = None
         cd_low = None
-
-        mem_avail = get_avail_mem()
-        blksize = int((mem_avail*0.4/(nao*nao*3*8)/ALIGNED))*ALIGNED
-        log.debug(f'GPU Memory {mem_avail/GB:.1f} GB available, block size {blksize}')
-        for k0, k1 in lib.prange(0,nnz,blksize):
-            rhok1_Pko_kslice = cupy.asarray(rhok1_Pko[k0:k1])
-
-            # (10|0)(0|10) without response of RI basis
-            vk2_ip1_ip1 = contract('piox,pkoy->ikxy', rhok1_Pko_kslice, rhok1_Pko_kslice)
-            hk_ao_ao += contract('ikxy,ik->ikxy', vk2_ip1_ip1, dm0)
-            vk2_ip1_ip1 = None
-
-            # (10|0)(0|01) without response of RI basis
-            rhok1_Pkl_kslice = contract('piox,ko->pikx', rhok1_Pko_kslice, mocc_2)
-            hk_ao_ao += contract('pikx,pkiy->ikxy', rhok1_Pkl_kslice, rhok1_Pkl_kslice)
-            rhok1_Pkl_kslice = None
-        rhok1_Pko_kslice = None
-
+        
+        hk_ao_ao += _hk_ip1_ip1(rhok1_Pko, dm0, mocc_2)
     wk1_Pko = rhok1_Pko = None
     t1 = log.timer_debug1('intermediate variables with int3c2e_ip1', *t1)
 
     cupy.get_default_memory_pool().free_all_blocks()
     #  int3c_ipip1 contributions
-    hj_ao_diag, hk_ao_diag = int3c2e.get_int3c2e_ipip1_hjk(intopt, rhoj0_P, rhok0_P__, dm0_tag, omega=omega, with_k=with_k)
+    hj_ao_diag, hk_ao_diag = int3c2e.get_int3c2e_hjk(intopt, 'ipip1', rhoj0_P, rhok0_P__, dm0_tag, omega=omega, with_k=with_k)
     hj_ao_diag *= 2.0
     t1 = log.timer_debug1('intermediate variables with int3c2e_ipip1', *t1)
 
     #  int3c_ipvip1 contributions
     # (11|0), (0|00) without response of RI basis
-    hj, hk = int3c2e.get_int3c2e_ipvip1_hjk(intopt, rhoj0_P, rhok0_P__, dm0_tag, omega=omega, with_k=with_k)
+    hj, hk = int3c2e.get_int3c2e_hjk(intopt, 'ipvip1', rhoj0_P, rhok0_P__, dm0_tag, omega=omega, with_k=with_k)
     hj_ao_ao += 2.0*hj
     if with_k:
         hk_ao_ao += hk
@@ -228,7 +227,7 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
     #  int3c_ip1ip2 contributions
     # (10|1), (0|0)(0|00)
     if hessobj.auxbasis_response:
-        hj, hk = int3c2e.get_int3c2e_ip1ip2_hjk(intopt, rhoj0_P, rhok0_P__, dm0_tag, omega=omega, with_k=with_k)
+        hj, hk = int3c2e.get_int3c2e_hjk(intopt, 'ip1ip2', rhoj0_P, rhok0_P__, dm0_tag, omega=omega, with_k=with_k)
         hj_ao_aux += hj
         if with_k:
             hk_ao_aux += hk
@@ -238,13 +237,13 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
     #  int3c_ipip2 contributions
     if hessobj.auxbasis_response > 1:
         # (00|2), (0|0)(0|00)
-        hj, hk = int3c2e.get_int3c2e_ipip2_hjk(intopt, rhoj0_P, rhok0_P__, dm0_tag, omega=omega, with_k=with_k)
+        hj, hk = int3c2e.get_int3c2e_hjk(intopt, 'ipip2', rhoj0_P, rhok0_P__, dm0_tag, omega=omega, with_k=with_k)
         hj_aux_diag = hj
         if with_k:
             hk_aux_diag = .5*hk
         hj = hk = None
         t1 = log.timer_debug1('intermediate variables with int3c2e_ipip2', *t1)
-
+    
     # int2c contributions
     if hessobj.auxbasis_response > 1:
         if omega and omega > 1e-10:
@@ -425,7 +424,10 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
 
 def make_h1(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None, verbose=None):
     mol = hessobj.mol
-    h1ao = [None] * mol.natm
+    natm = mol.natm
+    nocc = int(cupy.count_nonzero(mo_occ > 0))
+    nmo = len(mo_occ)
+    h1ao = cupy.empty((natm, 3, nmo, nocc))
     for ia, h1, vj1, vk1 in _gen_jk(hessobj, mo_coeff, mo_occ, chkfile,
                                     atmlst, verbose, True):
         h1 += vj1 - vk1 * .5
@@ -469,7 +471,7 @@ def _gen_jk(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None,
     intopt = int3c2e.VHFOpt(mol, auxmol, 'int2e')
     mem_avail = get_avail_mem()
     blksize = int(mem_avail*0.2/(nao*nao*8*3)/ALIGNED) * ALIGNED
-    log.debug(f'GPU Memory {mem_avail/GB:.1f} GB available, block size {blksize}')
+    log.debug(f'GPU Memory {mem_avail/GB:.1f} GB available, {blksize} aux AOs per block')
 
     intopt.build(mf.direct_scf_tol,
                  diag_block_with_triu=True,
@@ -536,7 +538,7 @@ def _gen_jk(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None,
         aux2atom = int3c2e.get_aux2atom(intopt, auxslices)
         mem_avail = get_avail_mem()
         blksize = int(0.2*mem_avail/(3*naux*nocc*8)/ALIGNED) * ALIGNED
-        log.debug(f'GPU Memory {mem_avail/GB:.1f} GB available, block size {blksize}')
+        log.debug(f'GPU Memory {mem_avail/GB:.1f} GB available, {blksize} AOs per block')
         if blksize < ALIGNED:
             raise RuntimeError('Not enough memory to compute int3c2e_ip2')
 

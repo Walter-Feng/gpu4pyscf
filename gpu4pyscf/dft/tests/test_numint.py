@@ -1,19 +1,16 @@
-# gpu4pyscf is a plugin to use Nvidia GPU in PySCF package
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# Copyright (C) 2022 Qiming Sun
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import unittest
 import numpy as np
@@ -80,6 +77,7 @@ class KnownValues(unittest.TestCase):
 
         v = cupy.asarray(v)
         vref = cupy.asarray(vref)
+
         assert cupy.allclose(e, eref)
         assert cupy.allclose(n, nref)
         assert cupy.allclose(v, vref)
@@ -219,11 +217,10 @@ class KnownValues(unittest.TestCase):
         ni_gpu = NumInt()
         ni_cpu = pyscf_numint()
         for xctype in ('LDA', 'GGA', 'MGGA'):
-            print(xctype)
             deriv = 1
             if xctype == 'LDA':
                 deriv = 0
-            ao_gpu = ni_gpu.eval_ao(mol, grids_gpu.coords, deriv=deriv)
+            ao_gpu = ni_gpu.eval_ao(mol, grids_gpu.coords, deriv=deriv, transpose=False)
             ao_cpu = ni_cpu.eval_ao(mol, grids_cpu.coords, deriv=deriv)
             rho = ni_gpu.eval_rho(mol, ao_gpu, dm, xctype=xctype, hermi=0, with_lapl=False)
             ref = ni_cpu.eval_rho(mol, ao_cpu, dm, xctype=xctype, hermi=0, with_lapl=False)

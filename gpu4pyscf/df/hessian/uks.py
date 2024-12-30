@@ -1,11 +1,4 @@
-#!/usr/bin/env python
-#
-# This code was copied from the data generation program of Tencent Alchemy
-# project (https://github.com/tencent-alchemy).
-#
-
-#
-# Copyright 2019 Tencent America LLC. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -133,8 +126,3 @@ class Hessian(uks_hess.Hessian):
     hess_elec = uhf_hess.hess_elec
     kernel = rhf_hess.kernel
     hess = kernel
-
-    def solve_mo1(self, mo_energy, mo_coeff, mo_occ, h1ao_or_chkfile,
-                  fx=None, atmlst=None, max_memory=4000, verbose=None):
-        return uhf_hess.solve_mo1(self.base, mo_energy, mo_coeff, mo_occ, h1ao_or_chkfile,
-                         fx, atmlst, max_memory, verbose)

@@ -1,168 +1,266 @@
-import pyscf
-from pyscf.pbc.df.fft import FFTDF as cpu_FFTDF
-from pyscf.pbc.df.df_jk import _format_dms, _format_kpts_band, _format_jks
-from pyscf.pbc import tools
-from pyscf import lib
-from pyscf.pbc.lib.kpts_helper import is_zero
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+'''GPW method'''
+
+__all__ = [
+    'get_nuc', 'get_pp', 'get_SI', 'FFTDF'
+]
+
 import numpy as np
-import cupy
-import math
+import cupy as cp
+from pyscf import gto
+from pyscf import lib
+from pyscf.pbc.df import fft as fft_cpu
+from pyscf.pbc.df import aft as aft_cpu
+from pyscf.pbc.df.aft import _check_kpts, ft_ao
+from pyscf.pbc.gto import pseudo
+from pyscf.pbc.lib.kpts_helper import is_zero
+from gpu4pyscf.lib import logger, utils
+from gpu4pyscf.pbc import tools
+from gpu4pyscf.pbc.df import fft_jk
 
-
-def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None):
-    '''Get the Coulomb (J) AO matrix at sampled k-points.
-
-    Args:
-        dm_kpts : (nkpts, nao, nao) ndarray or a list of (nkpts,nao,nao) ndarray
-            Density matrix at each k-point.  If a list of k-point DMs, eg,
-            UHF alpha and beta DM, the alpha and beta DMs are contracted
-            separately.
-        kpts : (nkpts, 3) ndarray
-
-    Returns:
-        vj : (nkpts, nao, nao) ndarray
-        or list of vj if the input dm_kpts is a list of DMs
-    '''
-
-    cell = df_object.cell
-    mesh = df_object.mesh
+def get_nuc(mydf, kpts=None):
+    from gpu4pyscf.pbc.dft import numint
+    kpts, is_single_kpt = _check_kpts(mydf, kpts)
+    cell = mydf.cell
     assert cell.low_dim_ft_type != 'inf_vacuum'
     assert cell.dimension > 1
+    mesh = mydf.mesh
+    charge = cp.asarray(-cell.atom_charges(), dtype=np.float64)
+    Gv = cell.get_Gv(mesh)
+    SI = get_SI(cell, mesh=mesh)
+    rhoG = charge.dot(SI)
 
-    density_matrices_at_kpts = cupy.asarray(dm_at_kpts)
-    formatted_density_matrices = _format_dms(density_matrices_at_kpts, kpts)
-    n_channels, n_k_points, n_ao = formatted_density_matrices.shape[:3]
+    coulG = tools.get_coulG(cell, mesh=mesh, Gv=Gv)
+    vneG = rhoG * coulG
+    vneR = tools.ifft(vneG, mesh).real
 
-    data_type = df_object.ao_on_grid[-1].dtype
-
-    # Maybe the ao_on_grid of shape (n_channels, n_ao, n_grid_points) cannot be saved.
-    density_in_real_space = cupy.zeros((n_channels, df_object.n_grid_points), dtype=data_type)
-
-    for i in range(n_channels):
-        for k in range(n_k_points):
-            density_in_real_space[i] += cupy.einsum('pq, np, nq -> n', formatted_density_matrices[i, k],
-                                                    df_object.ao_on_grid[k].conj(),
-                                                    df_object.ao_on_grid[k], optimize=True)
-
-    density_in_real_space = density_in_real_space.reshape(-1, *mesh)
-    density_in_g_space = cupy.fft.fftn(density_in_real_space, axes=(1, 2, 3))
-    coulomb = cupy.asarray(tools.get_coulG(cell, mesh=mesh)).reshape(*mesh)
-    coulomb_weighted_density = cupy.einsum("xyz, ixyz -> ixyz", coulomb, density_in_g_space)
-    coulomb_weighted_density_in_real_space = cupy.fft.ifftn(coulomb_weighted_density, axes=(1, 2, 3)).reshape(
-        n_channels, -1)
-
+    nkpts = len(kpts)
+    nao = cell.nao
     if is_zero(kpts):
-        coulomb_weighted_density_in_real_space = coulomb_weighted_density_in_real_space.real
+        vne = cp.zeros((nkpts,nao,nao))
+    else:
+        vne = cp.zeros((nkpts,nao,nao), dtype=np.complex128)
+    kpts = np.asarray(kpts)
+    ao_ks = numint.eval_ao_kpts(cell, mydf.grids.coords, kpts)
+    for k, ao in enumerate(ao_ks):
+        vne[k] += (ao.conj().T*vneR).dot(ao)
 
-    weight = cell.vol / df_object.n_grid_points / n_k_points
-    coulomb_weighted_density_in_real_space *= weight
+    if is_single_kpt:
+        vne = vne[0]
+    return vne
 
-
-    # needs to modify if kpts_band is specified. Does anyone really use custom kpts_band by the way?
-    vj_at_kpts_on_gpu = cupy.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
-    for i in range(n_channels):
-        for k in range(n_k_points):
-            vj_at_kpts_on_gpu[i, k] = cupy.einsum('np, n, nq -> pq', df_object.ao_on_grid[k].conj(),
-                                                  coulomb_weighted_density_in_real_space[i],
-                                                  df_object.ao_on_grid[k], optimize=True)
-
-    return _format_jks(vj_at_kpts_on_gpu, dm_at_kpts, kpts_band, kpts)
-
-
-def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, exxdiv=None, overlap=None):
-    '''Get the Coulomb (J) and exchange (K) AO matrices at sampled k-points.
-
-    Args:
-        dm_kpts : (nkpts, nao, nao) ndarray
-            Density matrix at each k-point
-        kpts : (nkpts, 3) ndarray
-
-    Kwargs:
-        hermi : int
-            Whether K matrix is hermitian
-
-            | 0 : not hermitian and not symmetric
-            | 1 : hermitian
-
-        kpts_band : (3,) ndarray or (*,3) ndarray
-            A list of arbitrary "band" k-points at which to evalute the matrix.
-
-    Returns:
-        vj : (nkpts, nao, nao) ndarray
-        vk : (nkpts, nao, nao) ndarray
-        or list of vj and vk if the input dm_kpts is a list of DMs
+def get_pp(mydf, kpts=None):
+    '''Get the periodic pseudopotential nuc-el AO matrix, with G=0 removed.
     '''
-    cell = df_object.cell
-    mesh = df_object.mesh
+    from gpu4pyscf.pbc.dft import numint
+    kpts, is_single_kpt = _check_kpts(mydf, kpts)
+    cell = mydf.cell
     assert cell.low_dim_ft_type != 'inf_vacuum'
     assert cell.dimension > 1
-    coords = cupy.asarray(df_object.grids.coords)
-    if overlap is None:
-        overlap = cupy.asarray(cell.pbc_inyot("int1e_ovlp", hermi=hermi, kpts=kpts))
+    mesh = mydf.mesh
+    Gv = cell.get_Gv(mesh)
+    SI = get_SI(cell, mesh=mesh)
+    vpplocG = pseudo.get_vlocG(cell, Gv)
+    vpplocG = -np.einsum('ij,ij->j', SI, vpplocG)
+    vpplocG = cp.asarray(vpplocG)
+    # vpploc evaluated in real-space
+    vpplocR = tools.ifft(vpplocG, mesh).real
 
-    density_matrices_at_kpts = cupy.asarray(dm_kpts)
-    formatted_density_matrices = _format_dms(density_matrices_at_kpts, kpts)
-    n_channels, n_k_points, n_ao = formatted_density_matrices.shape[:3]
-    data_type = df_object.ao_on_grid[-1].dtype
+    ngrids = len(vpplocG)
+    nkpts = len(kpts)
+    nao = cell.nao
+    if is_zero(kpts):
+        vpp = cp.zeros((nkpts,nao,nao))
+    else:
+        vpp = cp.zeros((nkpts,nao,nao), dtype=np.complex128)
+    kpts = np.asarray(kpts)
+    ao_ks = numint.eval_ao_kpts(cell, mydf.grids.coords, kpts)
+    for k, ao in enumerate(ao_ks):
+        vpp[k] += (ao.conj().T*vpplocR).dot(ao)
 
-    weight = 1. / n_k_points * (cell.vol / df_object.n_grid_points)
+    # vppnonloc evaluated in reciprocal space
+    fakemol = gto.Mole()
+    fakemol._atm = np.zeros((1,gto.ATM_SLOTS), dtype=np.int32)
+    fakemol._bas = np.zeros((1,gto.BAS_SLOTS), dtype=np.int32)
+    ptr = gto.PTR_ENV_START
+    fakemol._env = np.zeros(ptr+10)
+    fakemol._bas[0,gto.NPRIM_OF ] = 1
+    fakemol._bas[0,gto.NCTR_OF  ] = 1
+    fakemol._bas[0,gto.PTR_EXP  ] = ptr+3
+    fakemol._bas[0,gto.PTR_COEFF] = ptr+4
 
-    vk = cupy.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
+    # buf for SPG_lmi upto l=0..3 and nl=3
+    buf = np.empty((48,ngrids), dtype=np.complex128)
+    def vppnl_by_k(kpt):
+        Gk = Gv + kpt
+        G_rad = lib.norm(Gk, axis=1)
+        aokG = ft_ao.ft_ao(cell, Gv, kpt=kpt) * (1/cell.vol)**.5
+        vppnl = 0
+        for ia in range(cell.natm):
+            symb = cell.atom_symbol(ia)
+            if symb not in cell._pseudo:
+                continue
+            pp = cell._pseudo[symb]
+            p1 = 0
+            for l, proj in enumerate(pp[5:]):
+                rl, nl, hl = proj
+                if nl > 0:
+                    fakemol._bas[0,gto.ANG_OF] = l
+                    fakemol._env[ptr+3] = .5*rl**2
+                    fakemol._env[ptr+4] = rl**(l+1.5)*np.pi**1.25
+                    pYlm_part = fakemol.eval_gto('GTOval', Gk)
 
-    for k2_index, k2, ao_at_k2 in zip(range(n_k_points), kpts, df_object.ao_on_grid):
-        density_dot_ao_at_k2 = cupy.ndarray((n_channels, n_ao, df_object.n_grid_points), dtype=data_type)
-        for i in range(n_channels):
-            density_dot_ao_at_k2[i] = formatted_density_matrices[i, k2_index] @ ao_at_k2.conj().T
-        for k1_index, k1, ao_at_k1 in zip(range(n_k_points), kpts, df_object.ao_on_grid):
-            if is_zero(kpts):
-                e_ikr = cupy.ones(len(coords))
-            else:
-                e_ikr = cupy.exp(coords @ cupy.asarray(1j * (k1 - k2)))
-            ao_sandwiched_e_ikr_in_real_space = cupy.einsum(
-                "np, nq, n -> pqn", ao_at_k1.conj(), ao_at_k2, e_ikr).reshape(n_ao, n_ao, *mesh)
+                    p0, p1 = p1, p1+nl*(l*2+1)
+                    # pYlm is real, SI[ia] is complex
+                    pYlm = np.ndarray((nl,l*2+1,ngrids), dtype=np.complex128, buffer=buf[p0:p1])
+                    for k in range(nl):
+                        qkl = pseudo.pp._qli(G_rad*rl, l, k)
+                        pYlm[k] = pYlm_part.T * qkl
+                    #:SPG_lmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYlm)
+                    #:SPG_lm_aoG = np.einsum('nmg,gp->nmp', SPG_lmi, aokG)
+                    #:tmp = np.einsum('ij,jmp->imp', hl, SPG_lm_aoG)
+                    #:vppnl += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
+            if p1 > 0:
+                SPG_lmi = buf[:p1]
+                SPG_lmi *= SI[ia].conj()
+                SPG_lm_aoGs = lib.zdot(SPG_lmi, aokG)
+                p1 = 0
+                for l, proj in enumerate(pp[5:]):
+                    rl, nl, hl = proj
+                    if nl > 0:
+                        p0, p1 = p1, p1+nl*(l*2+1)
+                        hl = np.asarray(hl)
+                        SPG_lm_aoG = SPG_lm_aoGs[p0:p1].reshape(nl,l*2+1,-1)
+                        tmp = np.einsum('ij,jmp->imp', hl, SPG_lm_aoG)
+                        vppnl += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
+        return vppnl * (1./cell.vol)
 
-            ao_sandwiched_e_ikr_in_g_space = cupy.fft.fftn(ao_sandwiched_e_ikr_in_real_space,
-                                                           axes=(2, 3, 4))
+    for k, kpt in enumerate(kpts):
+        vppnl = vppnl_by_k(kpt)
+        if is_zero(kpt):
+            vpp[k] += cp.asarray(vppnl.real)
+        else:
+            vpp[k] += cp.asarray(vppnl)
 
-            coulomb_in_g_space = cupy.asarray(
-                tools.get_coulG(df_object.cell, k=k2 - k1, mf=df_object, mesh=mesh).reshape(*mesh))
+    if is_single_kpt:
+        vpp = vpp[0]
+    return vpp
 
-            coulomb_in_real_space = cupy.fft.ifftn(coulomb_in_g_space * ao_sandwiched_e_ikr_in_g_space,
-                                                   axes=(2, 3, 4)).reshape(n_ao, n_ao, -1)
+def get_SI(cell, Gv=None, mesh=None, atmlst=None):
+    '''Calculate the structure factor (0D, 1D, 2D, 3D) for all atoms; see MH (3.34).
 
-            if is_zero(kpts):
-                coulomb_in_real_space = coulomb_in_real_space.real
+    Args:
+        cell : instance of :class:`Cell`
 
-            for i in range(n_channels):
-                coulomb_weighted_density_dot_ao_at_k2 = cupy.einsum("pqn, qn -> pn", coulomb_in_real_space,
-                                                                    density_dot_ao_at_k2[i])
+        Gv : (N,3) array
+            G vectors
 
-                coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
-                vk[i, k1_index, :, :] += weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
+        atmlst : list of ints, optional
+            Indices of atoms for which the structure factors are computed.
 
-    if exxdiv == 'ewald':
-        for i in range(n_channels):
-            vk[i] += df_object.madelung * cupy.einsum("kpq, kqr, krs -> kps",
-                                                      overlap, formatted_density_matrices[i], overlap)
+    Returns:
+        SI : (natm, ngrids) ndarray, dtype=np.complex128
+            The structure factor for each atom at each G-vector.
+    '''
+    coords = cp.asarray(cell.atom_coords())
+    if atmlst is not None:
+        coords = coords[np.asarray(atmlst)]
+    if Gv is None:
+        if mesh is None:
+            mesh = cell.mesh
+        basex, basey, basez = cell.get_Gv_weights(mesh)[1]
+        basex = cp.asarray(basex)
+        basey = cp.asarray(basey)
+        basez = cp.asarray(basez)
+        b = cp.asarray(cell.reciprocal_vectors())
+        rb = coords.dot(b.T)
+        SIx = cp.exp(-1j*rb[:,0,None] * basex)
+        SIy = cp.exp(-1j*rb[:,1,None] * basey)
+        SIz = cp.exp(-1j*rb[:,2,None] * basez)
+        SI = SIx[:,:,None,None] * SIy[:,None,:,None] * SIz[:,None,None,:]
+        natm = coords.shape[0]
+        SI = SI.reshape(natm, -1)
+    else:
+        SI = cp.exp(-1j*coords.dot(cp.asarray(Gv).T))
+    return SI
 
-    return _format_jks(vk, dm_kpts, None, kpts)
 
+class FFTDF(lib.StreamObject):
+    '''Density expansion on plane waves (GPW method)
+    '''
 
-class FFTDF(cpu_FFTDF):
-    def __init__(self, cell, kpts=np.zeros((1, 3))):
-        cpu_FFTDF.__init__(self, cell, kpts)
-        self.to_gpu()
-        numerical_integrator = self._numint
-        self.ao_on_grid = [cupy.asarray(ao_at_k) for ao_at_k in
-                           numerical_integrator.eval_ao(cell, self.grids.coords, kpts)]
+    blockdim = 240
 
-        self.coulomb_in_k_space = cupy.asarray(tools.get_coulG(cell, mesh=self.mesh)).reshape(*self.mesh)
-        self.n_grid_points = math.prod(self.mesh)
-        self.madelung = tools.pbc.madelung(cell, kpts)
+    _keys = fft_cpu.FFTDF._keys
+
+    def __init__(self, cell, kpts=np.zeros((1,3))):
+        from gpu4pyscf.pbc.dft import gen_grid
+        from gpu4pyscf.pbc.dft import numint
+        self.cell = cell
+        self.stdout = cell.stdout
+        self.verbose = cell.verbose
+        self.max_memory = cell.max_memory
+        self.kpts = kpts
+        self.grids = gen_grid.UniformGrids(cell)
+
+        # The following attributes are not input options.
+        # self.exxdiv has no effects. It was set in the get_k_kpts function to
+        # mimic the KRHF/KUHF object in the call to tools.get_coulG.
+        self.exxdiv = None
+        self._numint = numint.KNumInt()
+        self._rsh_df = {}  # Range separated Coulomb DF objects
+
+    mesh = fft_cpu.FFTDF.mesh
+    dump_flags = fft_cpu.FFTDF.dump_flags
+    check_sanity = fft_cpu.FFTDF.check_sanity
+    build = fft_cpu.FFTDF.build
+    reset = fft_cpu.FFTDF.reset
+
+    aoR_loop = NotImplemented
+
+    get_pp = get_pp
+    get_nuc = get_nuc
 
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
-               with_j=True, with_k=True, omega=None, exxdiv=None, overlap=None):
-        j_on_gpu = get_j_kpts(self, dm, hermi, kpts, kpts_band)
-        k_on_gpu = get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv, overlap)
+               with_j=True, with_k=True, omega=None, exxdiv=None):
+        if omega is not None:  # J/K for RSH functionals
+            with self.range_coulomb(omega) as rsh_df:
+                return rsh_df.get_jk(dm, hermi, kpts, kpts_band, with_j, with_k,
+                                     omega=None, exxdiv=exxdiv)
 
-        return j_on_gpu, k_on_gpu
+        kpts, is_single_kpt = _check_kpts(self, kpts)
+        if is_single_kpt:
+            vj, vk = fft_jk.get_jk(self, dm, hermi, kpts[0], kpts_band,
+                                   with_j, with_k, exxdiv)
+        else:
+            vj = vk = None
+            if with_k:
+                vk = fft_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv)
+            if with_j:
+                vj = fft_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band)
+        return vj, vk
+
+    get_eri = get_ao_eri = NotImplemented
+    ao2mo = get_mo_eri = NotImplemented
+    ao2mo_7d = NotImplemented
+    get_ao_pairs_G = get_ao_pairs = NotImplemented
+    get_mo_pairs_G = get_mo_pairs = NotImplemented
+
+    range_coulomb = aft_cpu.AFTDF.range_coulomb
+
+    to_gpu = utils.to_gpu
+    device = utils.device
+    to_cpu = utils.to_cpu

@@ -1,38 +1,30 @@
-# gpu4pyscf is a plugin to use Nvidia GPU in PySCF package
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# Copyright (C) 2022 Qiming Sun
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # modified by Xiaojie Wu (wxj6000@gmail.com)
-import numpy
 import cupy
-
-from pyscf import lib
 from pyscf.dft import rks
 
 from gpu4pyscf.lib import logger
 from gpu4pyscf.dft import numint, gen_grid
 from gpu4pyscf.scf import hf
-from gpu4pyscf.lib.cupy_helper import load_library, tag_array
+from gpu4pyscf.lib.cupy_helper import tag_array
 from pyscf import __config__
 
 __all__ = [
     'get_veff', 'RKS', 'KohnShamDFT',
 ]
-
-libcupy_helper = load_library('libcupy_helper')
 
 def prune_small_rho_grids_(ks, mol, dm, grids):
     rho = ks._numint.get_rho(mol, dm, grids, ks.max_memory, verbose=ks.verbose)
@@ -134,16 +126,14 @@ def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
     if hermi == 2:  # because rho = 0
         n, exc, vxc = 0, 0, 0
     else:
-        max_memory = ks.max_memory - lib.current_memory()[0]
-        n, exc, vxc = ni.nr_rks(mol, ks.grids, ks.xc, dm, max_memory=max_memory)
+        n, exc, vxc = ni.nr_rks(mol, ks.grids, ks.xc, dm)
         if ks.do_nlc():
             if ni.libxc.is_nlc(ks.xc):
                 xc = ks.xc
             else:
                 assert ni.libxc.is_nlc(ks.nlc)
                 xc = ks.nlc
-            n, enlc, vnlc = ni.nr_nlc_vxc(mol, ks.nlcgrids, xc, dm,
-                                          max_memory=max_memory)
+            n, enlc, vnlc = ni.nr_nlc_vxc(mol, ks.nlcgrids, xc, dm)
 
             exc += enlc
             vxc += vnlc
@@ -185,7 +175,7 @@ def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
         vxc += vj - vk * .5
         if ground_state:
             exc -= cupy.einsum('ij,ji', dm, vk).real * .5 * .5
-
+    
     if ground_state:
         ecoul = cupy.einsum('ij,ji', dm, vj).real * .5
     else:
@@ -232,6 +222,8 @@ def energy_elec(ks, dm=None, h1e=None, vhf=None):
 # Inherit pyscf KohnShamDFT class since this is tested in the pyscf dispersion code
 class KohnShamDFT(rks.KohnShamDFT):
 
+    _keys = {'cphf_grids', *rks.KohnShamDFT._keys}
+
     to_rhf = NotImplemented
     to_uhf = NotImplemented
     to_ghf = NotImplemented
@@ -239,8 +231,6 @@ class KohnShamDFT(rks.KohnShamDFT):
     to_rks = NotImplemented
     to_uks = NotImplemented
     to_gks = NotImplemented
-
-    _keys = rks.KohnShamDFT._keys
 
     def __init__(self, xc='LDA,VWN'):
         self.xc = xc

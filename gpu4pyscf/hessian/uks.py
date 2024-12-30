@@ -1,26 +1,23 @@
-# Copyright 2024 The GPU4PySCF Authors. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 '''
 Non-relativistic UKS analytical Hessian
 '''
 
 
-import numpy
 import cupy
-import numpy as np
 import cupy as cp
 from pyscf import lib
 from gpu4pyscf.hessian import rhf as rhf_hess
@@ -52,20 +49,38 @@ def partial_hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
 
     if mf.nlc != '':
         raise NotImplementedError
+
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
     with_k = ni.libxc.is_hybrid_xc(mf.xc)
-    de2, ej, ek = uhf_hess._partial_hess_ejk(hessobj, mo_energy, mo_coeff, mo_occ,
-                                             atmlst, max_memory, verbose,
-                                             with_k=with_k)
-    de2 += ej  # (A,B,dR_A,dR_B)
+    j_factor = 1.
+    k_factor = 0.
     if with_k:
-        de2 -= hyb * ek
-
-    if abs(omega) > 1e-10 and abs(alpha-hyb) > 1e-10:
+        if omega == 0:
+            k_factor = hyb
+        elif alpha == 0: # LR=0, only SR exchange
+            pass
+        elif hyb == 0: # SR=0, only LR exchange
+            k_factor = alpha
+        else: # SR and LR exchange with different ratios
+            k_factor = alpha
+    de2, ejk = uhf_hess._partial_hess_ejk(hessobj, mo_energy, mo_coeff, mo_occ,
+                                          atmlst, max_memory, verbose,
+                                          j_factor, k_factor)
+    de2 += ejk  # (A,B,dR_A,dR_B)
+    if with_k and omega != 0:
+        j_factor = 0.
+        omega = -omega # Prefer computing the SR part
+        if alpha == 0: # LR=0, only SR exchange
+            k_factor = hyb
+        elif hyb == 0: # SR=0, only LR exchange
+            # full range exchange was computed in the previous step
+            k_factor = -alpha
+        else: # SR and LR exchange with different ratios
+            k_factor = hyb - alpha # =beta
         vhfopt = mf._opt_gpu.get(omega, None)
         with mol.with_range_coulomb(omega):
-            ek_lr = rhf_hess._partial_ejk_ip2(mol, dm0, vhfopt, verbose=verbose)[1]
-        de2 -= (alpha-hyb) * ek_lr
+            de2 += rhf_hess._partial_ejk_ip2(
+                mol, dm0, vhfopt, j_factor, k_factor, verbose=verbose)
 
     mem_now = lib.current_memory()[0]
     max_memory = max(2000, mf.max_memory*.9-mem_now)
@@ -95,7 +110,7 @@ def partial_hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
 def make_h1(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None, verbose=None):
     mol = hessobj.mol
     natm = mol.natm
-    assert atmlst is None
+    assert atmlst is None or atmlst == range(natm)
     mo_a, mo_b = mo_coeff
     mocca = mo_a[:,mo_occ[0]>0]
     moccb = mo_b[:,mo_occ[1]>0]
@@ -448,10 +463,10 @@ def _get_vxc_deriv2(hessobj, mo_coeff, mo_occ, max_memory):
                 vmatb_dm[ia][:,:,mask] += contract('yjg,xjg->xyj', ao_mask[1:4], aow)
             ao_dm0a = ao_dm0b = aow = None
             t1 = log.timer_debug2('integration', *t1)
+        vmata_dm = opt.unsort_orbitals(vmata_dm, axis=[3])
+        vmatb_dm = opt.unsort_orbitals(vmatb_dm, axis=[3])
         for ia in range(_sorted_mol.natm):
             p0, p1 = aoslices[ia][2:]
-            vmata_dm[ia][:,:,opt._ao_idx] = vmata_dm[ia]
-            vmatb_dm[ia][:,:,opt._ao_idx] = vmatb_dm[ia]
             vmata_dm[ia] += contract('xypq,pq->xyp', ipipa[:,:,:,p0:p1], dm0a[:,p0:p1])
             vmatb_dm[ia] += contract('xypq,pq->xyp', ipipb[:,:,:,p0:p1], dm0b[:,p0:p1])
     elif xctype == 'GGA':
@@ -505,9 +520,9 @@ def _get_vxc_deriv2(hessobj, mo_coeff, mo_occ, max_memory):
                 vmatb_dm[ia][:,:,mask] += vmatb_dm_tmp
             ao_dm0a = ao_dm0b = aow = None
             t1 = log.timer_debug2('integration', *t1)
+        vmata_dm = opt.unsort_orbitals(vmata_dm, axis=[3])
+        vmatb_dm = opt.unsort_orbitals(vmatb_dm, axis=[3])
         for ia in range(_sorted_mol.natm):
-            vmata_dm[ia][:,:,opt._ao_idx] = vmata_dm[ia]
-            vmatb_dm[ia][:,:,opt._ao_idx] = vmatb_dm[ia]
             p0, p1 = aoslices[ia][2:]
             vmata_dm[ia] += contract('xypq,pq->xyp', ipipa[:,:,:,p0:p1], dm0a[:,p0:p1])
             vmata_dm[ia] += contract('yxqp,pq->xyp', ipipa[:,:,p0:p1], dm0a[:,p0:p1])
@@ -620,9 +635,9 @@ def _get_vxc_deriv2(hessobj, mo_coeff, mo_occ, max_memory):
                 vmata_dm[ia][:,:,mask] += vmata_dm_tmp
                 vmatb_dm[ia][:,:,mask] += vmatb_dm_tmp
             t1 = log.timer_debug2('integration', *t1)
+        vmata_dm = opt.unsort_orbitals(vmata_dm, axis=[3])
+        vmatb_dm = opt.unsort_orbitals(vmatb_dm, axis=[3])
         for ia in range(_sorted_mol.natm):
-            vmata_dm[ia][:,:,opt._ao_idx] = vmata_dm[ia]
-            vmatb_dm[ia][:,:,opt._ao_idx] = vmatb_dm[ia]
             p0, p1 = aoslices[ia][2:]
             vmata_dm[ia] += contract('xypq,pq->xyp', ipipa[:,:,:,p0:p1], dm0a[:,p0:p1])
             vmata_dm[ia] += contract('yxqp,pq->xyp', ipipa[:,:,p0:p1], dm0a[:,p0:p1])

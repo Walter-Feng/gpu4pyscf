@@ -1,17 +1,17 @@
-/* Copyright 2023 The GPU4PySCF Authors. All Rights Reserved.
+/*
+ * Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #include <cuda_runtime.h>
@@ -110,9 +110,9 @@ static void _pcm_dD_dS(double *matrix_dd, double *matrix_ds,
     double dy_rij = dy / rij;
     double dz_rij = dz / rij;
 
-    matrix_ds[3*(i*n+j)]   = dS_dr * dx_rij;
-    matrix_ds[3*(i*n+j)+1] = dS_dr * dy_rij;
-    matrix_ds[3*(i*n+j)+2] = dS_dr * dz_rij;
+    matrix_ds[i*n+j       ] = dS_dr * dx_rij;
+    matrix_ds[i*n+j +  n*n] = dS_dr * dy_rij;
+    matrix_ds[i*n+j +2*n*n] = dS_dr * dz_rij;
 
     if (matrix_dd != NULL){
         double nxj = norm_vec[3*j];
@@ -123,9 +123,10 @@ static void _pcm_dD_dS(double *matrix_dd, double *matrix_ds,
         double dD_dri = 4.0*xi_r2_ij*xi_ij / SQRT_PI*exp(-xi_r2_ij)*nj_rij/rij3;
         if (i == j) dD_dri = 0.0;
 
-        matrix_dd[3*(i*n+j)]   = dD_dri*dx_rij + dS_dr*(-nxj/rij + 3.0*nj_rij/rij2*dx_rij);
-        matrix_dd[3*(i*n+j)+1] = dD_dri*dy_rij + dS_dr*(-nyj/rij + 3.0*nj_rij/rij2*dy_rij);
-        matrix_dd[3*(i*n+j)+2] = dD_dri*dz_rij + dS_dr*(-nzj/rij + 3.0*nj_rij/rij2*dz_rij);
+        nj_rij = 3.0*nj_rij/rij2;
+        matrix_dd[i*n+j        ] = dD_dri*dx_rij + dS_dr*(-nxj/rij + nj_rij*dx_rij);
+        matrix_dd[i*n+j +   n*n] = dD_dri*dy_rij + dS_dr*(-nyj/rij + nj_rij*dy_rij);
+        matrix_dd[i*n+j + 2*n*n] = dD_dri*dz_rij + dS_dr*(-nzj/rij + nj_rij*dz_rij);
     }
 }
 

@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# Copyright 2014-2018 The PySCF Developers. All Rights Reserved.
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -53,7 +52,7 @@ def solve_nos1(fvind, mo_energy, mo_occ, h1,
                level_shift=0):
     '''For field independent basis. First order overlap matrix is zero'''
     log = logger.new_logger(verbose=verbose)
-    t0 = (logger.process_clock(), logger.perf_counter())
+    t0 = log.init_timer()
 
     e_a = mo_energy[mo_occ==0]
     e_i = mo_energy[mo_occ>0]
@@ -88,7 +87,7 @@ def solve_withs1(fvind, mo_energy, mo_occ, h1, s1,
         energy matrix
     '''
     log = logger.new_logger(verbose=verbose)
-    t0 = (logger.process_clock(), logger.perf_counter())
+    t0 = log.init_timer()
 
     occidx = mo_occ > 0
     viridx = mo_occ == 0

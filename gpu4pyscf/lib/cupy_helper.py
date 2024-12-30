@@ -1,19 +1,16 @@
-# gpu4pyscf is a plugin to use Nvidia GPU in PySCF package
+# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
 #
-# Copyright (C) 2022 Qiming Sun
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import os
 import sys
@@ -26,6 +23,7 @@ from gpu4pyscf.lib import logger
 from gpu4pyscf.gto import mole
 from gpu4pyscf.lib.cutensor import contract
 from gpu4pyscf.lib.cusolver import eigh, cholesky  #NOQA
+from gpu4pyscf.__config__ import _streams, _num_devices, _p2p_access
 
 LMAX_ON_GPU = 7
 DSOLVE_LINDEP = 1e-13
@@ -82,6 +80,76 @@ def get_avail_mem():
         mem_avail = cupy.cuda.runtime.memGetInfo()[0]
         return mem_avail + total_mem - used_mem
 
+def p2p_transfer(a, b):
+    ''' If the direct P2P data transfer is not available, transfer data via CPU memory
+    '''
+    if a.device == b.device:
+        a[:] = b
+    elif _p2p_access:
+        a[:] = b
+    elif a.strides == b.strides and a.flags.c_contiguous and a.dtype == b.dtype:
+        # cupy supports a direct copy from different devices without p2p. See also
+        # https://github.com/cupy/cupy/blob/v13.3.0/cupy/_core/_routines_indexing.pyx#L48
+        # https://github.com/cupy/cupy/blob/v13.3.0/cupy/_core/_routines_indexing.pyx#L1015
+        a[:] = b
+    else:
+        with cupy.cuda.Device(a.device):
+            # TODO: reduce memory copy, a can be non-contiguous array
+            a[:] = cupy.asarray(b.get())
+
+def concatenate(array_list):
+    ''' Concatenate axis=0 only
+    '''
+    if _p2p_access:
+        return cupy.concatenate(array_list)
+    else:
+        array_list_cpu = [a.get() for a in array_list]
+        n = sum([a.shape[0] for a in array_list_cpu])
+        a0_shape = list(array_list_cpu[0].shape)
+        out_shape = tuple([n] + a0_shape[1:])
+        out = cupy.empty(out_shape)
+        p0 = p1 = 0
+        for a in array_list_cpu:
+            p1 = p0 + a.shape[0]
+            out[p0:p1].set(a)
+            p0 = p1
+        return out
+
+def broadcast_to_devices():
+    ''' Broadcast cupy ndarray to all the devices, return a list of cupy ndarray
+    '''
+    raise NotImplementedError
+
+def reduce_to_device(array_list, inplace=False):
+    ''' Reduce a list of ndarray in different devices to device 0
+    TODO: reduce memory footprint, improve throughput
+    '''
+    assert len(array_list) == _num_devices
+    if _num_devices == 1:
+        return array_list[0]
+    
+    out_shape = array_list[0].shape
+    for s in _streams:
+        s.synchronize()
+        
+    if inplace:
+        result = array_list[0]
+    else:
+        result = array_list[0].copy()
+    result = result.reshape(-1)
+    # Asynchronously add each matrix from its device
+    for device_id, matrix in enumerate(array_list):
+        if device_id == 0:
+            continue
+        
+        assert matrix.device.id == device_id
+        matrix = matrix.reshape(-1)
+        blksize = 1024*1024*128 # 1GB
+        for p0, p1 in lib.prange(0,len(matrix), blksize):
+            result[p0:p1] += cupy.asarray(matrix[p0:p1])
+    
+    return result.reshape(out_shape)
+    
 def device2host_2d(a_cpu, a_gpu, stream=None):
     if stream is None:
         stream = cupy.cuda.get_current_stream()
@@ -136,9 +204,33 @@ def return_cupy_array(fn):
         return to_cupy(ret)
     return filter_ret
 
-def unpack_tril(cderi_tril, cderi, stream=None):
-    nao = cderi.shape[1]
+def pack_tril(a):
+    if a.ndim == 2:
+        a = a[None]
+    n = a.shape[-1]
+    idx = cupy.arange(n)
+    mask = idx[:,None] >= idx
+    return a[:,mask]
+
+def unpack_tril(cderi_tril, cderi=None, stream=None):
+    assert cderi_tril.flags.c_contiguous
+    if cderi_tril.ndim == 1:
+        cderi_tril = cderi_tril[None]
     count = cderi_tril.shape[0]
+    if cderi is None:
+        nao = int((2*cderi_tril.shape[1])**.5)
+        cderi = cupy.empty((count,nao,nao), dtype=cderi_tril.dtype)
+    else:
+        nao = cderi.shape[1]
+
+    if cderi_tril.dtype != np.float64:
+        idx = cupy.arange(nao)
+        mask = idx[:,None] >= idx
+        cderiT = cderi.transpose(0,2,1)
+        cderiT[:,mask] = cderi_tril.conj()
+        cderi [:,mask] = cderi_tril
+        return cderi
+
     if stream is None:
         stream = cupy.cuda.get_current_stream()
     err = libcupy_helper.unpack_tril(
@@ -149,7 +241,7 @@ def unpack_tril(cderi_tril, cderi, stream=None):
         ctypes.c_int(count))
     if err != 0:
         raise RuntimeError('failed in unpack_tril kernel')
-    return
+    return cderi
 
 def unpack_sparse(cderi_sparse, row, col, p0, p1, nao, out=None, stream=None):
     if stream is None:
@@ -179,6 +271,7 @@ def add_sparse(a, b, indices):
     '''
     a[:,...,:np.ix_(indices, indices)] += b
     '''
+    assert a.device == b.device
     assert a.flags.c_contiguous
     assert b.flags.c_contiguous
     if len(indices) == 0: return a
@@ -190,6 +283,7 @@ def add_sparse(a, b, indices):
         count = 1
     else:
         raise RuntimeError('add_sparse only supports 2d or 3d tensor')
+    
     stream = cupy.cuda.get_current_stream()
     err = libcupy_helper.add_sparse(
         ctypes.cast(stream.ptr, ctypes.c_void_p),
@@ -362,11 +456,12 @@ def transpose_sum(a, stream=None):
     return a + a.transpose(0,2,1)
     '''
     assert a.flags.c_contiguous
-    n = a.shape[-1]
+    out = a
     if a.ndim == 2:
-        a = a.reshape([-1,n,n])
+        a = a[None]
     assert a.ndim == 3
-    count = a.shape[0]
+    count, m, n = a.shape
+    assert m == n
     stream = cupy.cuda.get_current_stream()
     err = libcupy_helper.transpose_sum(
         ctypes.cast(stream.ptr, ctypes.c_void_p),
@@ -376,7 +471,7 @@ def transpose_sum(a, stream=None):
     )
     if err != 0:
         raise RuntimeError('failed in transpose_sum kernel')
-    return a
+    return out
 
 # for i > j of 2d mat, mat[j,i] = mat[i,j]
 def hermi_triu(mat, hermi=1, inplace=True):
@@ -491,7 +586,7 @@ def krylov(aop, b, x0=None, tol=1e-10, max_cycle=30, dot=cupy.dot,
             callback function takes one dict as the argument which is
             generated by the builtin function :func:`locals`, so that the
             callback function can access all local variables in the current
-            envrionment.
+            environment.
     Returns:
         x : ndarray like b
     '''
@@ -561,6 +656,7 @@ def krylov(aop, b, x0=None, tol=1e-10, max_cycle=30, dot=cupy.dot,
     else:
         raise RuntimeError('Krylov solver failed to converge')
 
+    log.info(f'krylov space size {len(xs)}')
     xs = cupy.asarray(xs)
     ax = cupy.asarray(ax)
     nd = xs.shape[0]
@@ -915,10 +1011,11 @@ def sandwich_dot(a, c, out=None):
         a = a[None]
     counts = a.shape[0]
     m = c.shape[1]
-    out = cupy.empty((counts, m, m))
+    dtype = np.result_type(a, c)
+    out = cupy.empty((counts, m, m), dtype=dtype)
     tmp = None
     for i in range(counts):
-        tmp = cupy.dot(c.T, a[i], out=tmp)
+        tmp = cupy.dot(c.conj().T, a[i], out=tmp)
         cupy.dot(tmp, c, out=out[i])
     if a_ndim == 2:
         out = out[0]

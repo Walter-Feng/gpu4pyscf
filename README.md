@@ -41,18 +41,21 @@ The package also provides multiple dockerfiles in ```dockerfiles```. One can use
 Features
 --------
 - Density fitting scheme and direct SCF scheme;
-- SCF, analytical Gradient, and analytical Hessian calculations for Hartree-Fock and DFT;
+- SCF, analytical gradient, and analytical Hessian calculations for Hartree-Fock and DFT;
 - LDA, GGA, mGGA, hybrid, and range-separated functionals via [libXC](https://gitlab.com/libxc/libxc/-/tree/master/);
+- Spin-conserved and spin-flip TDA and TDDFT for excitated states
 - Geometry optimization and transition state search via [geomeTRIC](https://geometric.readthedocs.io/en/latest/);
 - Dispersion corrections via [DFTD3](https://github.com/dftd3/simple-dftd3) and [DFTD4](https://github.com/dftd4/dftd4);
 - Nonlocal functional correction (vv10) for SCF and gradient;
 - ECP is supported and calculated on CPU;
 - PCM models, SMD model, their analytical gradients, and semi-analytical Hessian matrix;
-- Unrestricted Hartree-Fock and Unrestricted DFT, gradient, and Hessian;
+- Unrestricted Hartree-Fock and unrestricted DFT, gradient, and Hessian;
 - MP2/DF-MP2 and CCSD (experimental);
-- Polarizability, IR, and NMR shielding
-- QM/MM with PBC
-- CHELPG, ESP, and RESP atomic charge
+- Polarizability, IR, and NMR shielding (experimental);
+- QM/MM with PBC;
+- CHELPG, ESP, and RESP atomic charge;
+- Multi-GPU for both direct SCF and density fitting (experimental)
+- SCF and DFT with periodic boundary condition (experimental)
 
 Limitations
 --------
@@ -133,22 +136,22 @@ References
 ---------
 ```
 @misc{li2024introducting,
-      title={Introducing GPU-acceleration into the Python-based Simulations of Chemistry Framework}, 
+      title={Introducing GPU-acceleration into the Python-based Simulations of Chemistry Framework},
       author={Rui Li and Qiming Sun and Xing Zhang and Garnet Kin-Lic Chan},
       year={2024},
       eprint={2407.09700},
       archivePrefix={arXiv},
       primaryClass={physics.comp-ph},
-      url={https://arxiv.org/abs/2407.09700}, 
+      url={https://arxiv.org/abs/2407.09700},
 }
 
 @misc{wu2024enhancing,
-      title={Enhancing GPU-acceleration in the Python-based Simulations of Chemistry Framework}, 
+      title={Enhancing GPU-acceleration in the Python-based Simulations of Chemistry Framework},
       author={Xiaojie Wu and Qiming Sun and Zhichen Pu and Tianze Zheng and Wenzhi Ma and Wen Yan and Xia Yu and Zhengxiao Wu and Mian Huo and Xiang Li and Weiluo Ren and Sheng Gong and Yumin Zhang and Weihao Gao},
       year={2024},
       eprint={2404.09452},
       archivePrefix={arXiv},
       primaryClass={physics.comp-ph},
-      url={https://arxiv.org/abs/2404.09452}, 
+      url={https://arxiv.org/abs/2404.09452},
 }
 ```
