@@ -55,11 +55,9 @@ class Communicator:
         self.gpu = nccl.NcclCommunicator(self.world.size, unique_id, rank)
 
     def reduce_on_gpu(self, cupy_array : cupy.ndarray):
-        result = cupy.ndarray(cupy_array.shape, dtype=cupy_array.dtype)
         nccl_sum_type = 0
         default_stream = 0
-        self.gpu.allReduce(cupy_array.data.ptr, result.data.ptr, 
+        self.gpu.allReduce(cupy_array.data.ptr, cupy_array.data.ptr, 
                            cupy_array.size, to_nccl_data_type(cupy_array), 
                            nccl_sum_type, default_stream)
 
-        return result

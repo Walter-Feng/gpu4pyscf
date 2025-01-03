@@ -49,10 +49,10 @@ def get_jk(mol, dm, hermi=1, vhfopt=None, with_j=True, with_k=True, omega=None,
     '''
 
     world_size = 1
-    rank = 0
+    world_rank = 0
     if hasattr(mol, 'comm'):
         world_size = mol.comm.world.size
-        rank = mol.comm.world.rank
+        world_rank = mol.comm.world.rank
 
     log = logger.new_logger(mol, verbose)
     cput0 = log.init_timer()
@@ -176,7 +176,9 @@ def get_jk(mol, dm, hermi=1, vhfopt=None, with_j=True, with_k=True, omega=None,
                      ctypes.cast(dm_shl.data.ptr, ctypes.c_void_p),
                      ctypes.c_int(nshls),
                      ctypes.cast(log_q_ij.data.ptr, ctypes.c_void_p),
-                     ctypes.cast(log_q_kl.data.ptr, ctypes.c_void_p)
+                     ctypes.cast(log_q_kl.data.ptr, ctypes.c_void_p),
+                     ctypes.c_int(world_size),
+                     ctypes.c_int(world_rank)
                      )
             if err != 0:
                 detail = f'CUDA Error for ({l_symb[li]}{l_symb[lj]}|{l_symb[lk]}{l_symb[ll]})'
@@ -188,6 +190,9 @@ def get_jk(mol, dm, hermi=1, vhfopt=None, with_j=True, with_k=True, omega=None,
             #exit()
 
     if with_j:
+        if hasattr(mol, 'comm'):
+            mol.comm.reduce_on_gpu(vj)
+
         vj_ao = []
         #vj = [cupy.einsum('pi,pq,qj->ij', coeff, x, coeff) for x in vj]
         for x in vj:
@@ -198,6 +203,8 @@ def get_jk(mol, dm, hermi=1, vhfopt=None, with_j=True, with_k=True, omega=None,
         vj = vj_ao
 
     if with_k:
+        if hasattr(mol, 'comm'):
+             mol.comm.reduce_on_gpu(vk)
         vk_ao = []
         for x in vk:
             #x = cupy.einsum('pi,pq->iq', coeff, x)

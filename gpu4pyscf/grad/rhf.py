@@ -26,7 +26,7 @@ from gpu4pyscf.lib.cupy_helper import tag_array, contract, take_last2d
 from gpu4pyscf.df import int3c2e      #TODO: move int3c2e to out of df
 from gpu4pyscf.lib import logger
 
-LMAX_ON_GPU = 3
+LMAX_ON_GPU = 4
 FREE_CUPY_CACHE = True
 BINSIZE = 128
 libgvhf = load_library('libgvhf')
@@ -356,6 +356,10 @@ def get_jk(mol, dm, hermi=1, vhfopt=None, with_j=True, with_k=True, omega=None,
             if sub_dm_cond < direct_scf_tol * 1e3:
                 continue
 
+            nrys = (li + lj + lk + ll + 1) // 2 + 1
+            print(nrys)
+            if nrys < 8:
+                continue
             log_cutoff = np.log(direct_scf_tol)
             sub_dm_cond = np.log(sub_dm_cond)
 

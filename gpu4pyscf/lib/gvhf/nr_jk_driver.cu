@@ -124,7 +124,8 @@ int GINTbuild_jk(BasisProdCache *bpcache,
                  int nbins_ij, int nbins_kl,
                  int cp_ij_id, int cp_kl_id, double omega, double log_cutoff, double sub_dm_cond,
                  double *dm_sh, int nshls,
-                 double *log_q_ij, double *log_q_kl)
+                 double *log_q_ij, double *log_q_kl,
+                 int world_size, int world_rank)
 {
     ContractionProdType *cp_ij = bpcache->cptype + cp_ij_id;
     ContractionProdType *cp_kl = bpcache->cptype + cp_kl_id;
@@ -206,9 +207,20 @@ int GINTbuild_jk(BasisProdCache *bpcache,
         int bas_ij0 = bins_locs_ij[0];
         int bas_ij1 = bins_locs_ij[ij_bin1];
         int ntasks_ij = bas_ij1 - bas_ij0;
+
         if (ntasks_ij <= 0) {
             continue;
         }
+        
+        int ntasks_ij_per_rank = ntasks_ij / world_size;
+        int residue = ntasks_ij - ntasks_ij_per_rank * world_size;
+        ntasks_ij = ntasks_ij_per_rank;
+        if(world_rank == 0) {
+            ntasks_ij += residue;
+        } else {
+            bas_ij0 += residue;
+        }
+        bas_ij0 += world_rank * ntasks_ij_per_rank;
 
         offsets.ntasks_ij = ntasks_ij;
         offsets.ntasks_kl = ntasks_kl;

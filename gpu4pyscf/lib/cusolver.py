@@ -22,7 +22,7 @@ from cupy_backends.cuda.libs import cublas
 from cupy.cuda import device
 
 _handle = device.get_cusolver_handle()
-libcusolver = ctypes.CDLL('libcusolver.so')
+libcusolver = ctypes.CDLL('libcusolver.so.11')
 
 CUSOLVER_EIG_TYPE_1 = 1
 CUSOLVER_EIG_TYPE_2 = 2
@@ -71,6 +71,13 @@ def eigh(h, s):
     '''
     solve generalized eigenvalue problem
     '''
+
+    s_eigenvalues, s_eigenvectors = cupy.linalg.eigh(s)
+    inverse_sqrt_s = s_eigenvectors @ (cupy.diag(1 / cupy.sqrt(s_eigenvalues))) @ (s_eigenvectors.T)
+    h_eigenvalues, h_eigenvectors = cupy.linalg.eigh(inverse_sqrt_s @ h @ inverse_sqrt_s)
+
+    return h_eigenvalues, inverse_sqrt_s @ h_eigenvectors
+    
     n = h.shape[0]
     w = cupy.zeros(n)
     A = h.copy()
