@@ -13,7 +13,7 @@ from pyscf import pbc
 from pyscf.pbc import gto as pbcgto
 from pyscf.pbc import dft as pbcdft
 from pyscf.pbc.dft import multigrid
-from gpu4pyscf.pbc.dft.multi_grid import muligrid_pair
+from gpu4pyscf.pbc.dft.multi_grid import multi_grid
 import sys
 import cProfile, pstats, io
 cell=pbcgto.Cell()

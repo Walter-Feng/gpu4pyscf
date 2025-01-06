@@ -256,9 +256,9 @@ class KSCF(pbchf.SCF):
         if cell is None: cell = self.cell
         if kpts is None: kpts = self.kpts
         if cell.pseudo:
-            nuc = self.with_df.get_pp(kpts)
+            nuc = cp.asarray(self.with_df.get_pp(kpts))
         else:
-            nuc = self.with_df.get_nuc(kpts)
+            nuc = cp.asarray(self.with_df.get_nuc(kpts))
         if len(cell._ecpbas) > 0:
             raise NotImplementedError('ECP in PBC SCF')
         t = cp.asarray(cell.pbc_intor('int1e_kin', 1, 1, kpts))

@@ -44,12 +44,14 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
     if not hybrid and isinstance(ks.with_df, multigrid.MultiGridFFTDF):
         if ks.do_nlc():
             raise NotImplementedError(f'MultiGrid for NLC functional {ks.xc} + {ks.nlc}')
-        n, exc, vxc = multigrid.nr_rks(ks.with_df, ks.xc, dm, hermi,
+        n, exc, vxc = multigrid.nr_rks(ks.with_df, ks.xc, dm.get(), hermi,
                                        kpts, kpts_band,
                                        with_j=True, return_j=False)
         log.info('nelec by numeric integration = %s', n)
+
+        result = tag_array(cp.asarray(vxc), ecoul=vxc.ecoul, exc=exc, vj=None, vk=None)
         t0 = log.timer('vxc', *t0)
-        return vxc
+        return result
 
     # ndim = 3 : dm.shape = (nkpts, nao, nao)
     ground_state = dm.ndim == 3 and kpts_band is None
