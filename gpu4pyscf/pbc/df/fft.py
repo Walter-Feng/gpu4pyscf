@@ -72,7 +72,7 @@ def get_pp(mydf, kpts=None):
     assert cell.dimension > 1
     mesh = mydf.mesh
     Gv = cell.get_Gv(mesh)
-    SI = get_SI(cell, mesh=mesh)
+    SI = get_SI(cell, mesh=mesh).get()
     vpplocG = pseudo.get_vlocG(cell, Gv)
     vpplocG = -np.einsum('ij,ij->j', SI, vpplocG)
     vpplocG = cp.asarray(vpplocG)
