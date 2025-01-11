@@ -9,7 +9,7 @@ import cupy
 import math
 
 
-def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None):
+def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, comm=None):
     '''Get the Coulomb (J) AO matrix at sampled k-points.
 
     Args:
@@ -47,8 +47,7 @@ def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=
     density_in_real_space = density_in_real_space.reshape(-1, *mesh)
     density_in_g_space = cupy.fft.fftn(density_in_real_space, axes=(1, 2, 3))
     coulomb = cupy.asarray(tools.get_coulG(cell, mesh=mesh)).reshape(*mesh)
-    coulomb_weighted_density = cupy.einsum("xyz, ixyz -> ixyz", coulomb, density_in_g_space)
-    coulomb_weighted_density_in_real_space = cupy.fft.ifftn(coulomb_weighted_density, axes=(1, 2, 3)).reshape(
+    coulomb_weighted_density_in_real_space = cupy.fft.ifftn(coulomb * density_in_g_space, axes=(1, 2, 3)).reshape(
         n_channels, -1)
 
     if is_zero(kpts):
@@ -56,7 +55,6 @@ def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=
 
     weight = cell.vol / df_object.n_grid_points / n_k_points
     coulomb_weighted_density_in_real_space *= weight
-
 
     # needs to modify if kpts_band is specified. Does anyone really use custom kpts_band by the way?
     vj_at_kpts_on_gpu = cupy.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
@@ -118,27 +116,31 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
                 e_ikr = cupy.ones(len(coords))
             else:
                 e_ikr = cupy.exp(coords @ cupy.asarray(1j * (k1 - k2)))
-            ao_sandwiched_e_ikr_in_real_space = cupy.einsum(
-                "np, nq, n -> pqn", ao_at_k1.conj(), ao_at_k2, e_ikr).reshape(n_ao, n_ao, *mesh)
 
-            ao_sandwiched_e_ikr_in_g_space = cupy.fft.fftn(ao_sandwiched_e_ikr_in_real_space,
-                                                           axes=(2, 3, 4))
+            block_size = 32
+            for p0, p1 in lib.prange(0, n_ao, block_size):
 
-            coulomb_in_g_space = cupy.asarray(
-                tools.get_coulG(df_object.cell, k=k2 - k1, mf=df_object, mesh=mesh).reshape(*mesh))
+                ao_sandwiched_e_ikr_in_real_space = cupy.einsum(
+                    "np, nq, n -> pqn", ao_at_k1[:, p0:p1].conj(), ao_at_k2, e_ikr).reshape(p1 - p0, n_ao, *mesh)
 
-            coulomb_in_real_space = cupy.fft.ifftn(coulomb_in_g_space * ao_sandwiched_e_ikr_in_g_space,
-                                                   axes=(2, 3, 4)).reshape(n_ao, n_ao, -1)
+                ao_sandwiched_e_ikr_in_g_space = cupy.fft.fftn(ao_sandwiched_e_ikr_in_real_space,
+                                                               axes=(2, 3, 4))
 
-            if is_zero(kpts):
-                coulomb_in_real_space = coulomb_in_real_space.real
+                coulomb_in_g_space = cupy.asarray(
+                    tools.get_coulG(df_object.cell, k=k2 - k1, mf=df_object, mesh=mesh).reshape(*mesh))
 
-            for i in range(n_channels):
-                coulomb_weighted_density_dot_ao_at_k2 = cupy.einsum("pqn, qn -> pn", coulomb_in_real_space,
-                                                                    density_dot_ao_at_k2[i])
+                coulomb_in_real_space = cupy.fft.ifftn(coulomb_in_g_space * ao_sandwiched_e_ikr_in_g_space,
+                                                       axes=(2, 3, 4)).reshape(p1 - p0, n_ao, -1)
 
-                coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
-                vk[i, k1_index, :, :] += weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
+                if is_zero(kpts):
+                    coulomb_in_real_space = coulomb_in_real_space.real
+
+                for i in range(n_channels):
+                    coulomb_weighted_density_dot_ao_at_k2 = cupy.einsum("pqn, qn -> pn", coulomb_in_real_space,
+                                                                        density_dot_ao_at_k2[i])
+
+                    coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
+                    vk[i, k1_index, p0:p1, :] += weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
 
     if exxdiv == 'ewald':
         for i in range(n_channels):
