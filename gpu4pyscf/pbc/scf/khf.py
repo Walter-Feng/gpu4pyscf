@@ -240,6 +240,8 @@ class KSCF(pbchf.SCF):
         self.kpts = kpts
         self.conv_tol = max(cell.precision * 10, 1e-8)
         self.exx_built = False
+        self.overlap = self.get_ovlp(cell, kpts)
+        self.hcore = self.get_hcore(cell, kpts)
 
     kpts = khf_cpu.KSCF.kpts
     mol = pbchf.SCF.mol
@@ -253,16 +255,19 @@ class KSCF(pbchf.SCF):
     reset = pbchf.SCF.reset
 
     def get_hcore(self, cell=None, kpts=None):
-        if cell is None: cell = self.cell
-        if kpts is None: kpts = self.kpts
-        if cell.pseudo:
-            nuc = cp.asarray(self.with_df.get_pp(kpts))
+        if self.hcore:
+            return self.hcore
         else:
-            nuc = cp.asarray(self.with_df.get_nuc(kpts))
-        if len(cell._ecpbas) > 0:
-            raise NotImplementedError('ECP in PBC SCF')
-        t = cp.asarray(cell.pbc_intor('int1e_kin', 1, 1, kpts))
-        return nuc + t
+            if cell is None: cell = self.cell
+            if kpts is None: kpts = self.kpts
+            if cell.pseudo:
+                nuc = cp.asarray(self.with_df.get_pp(kpts))
+            else:
+                nuc = cp.asarray(self.with_df.get_nuc(kpts))
+            if len(cell._ecpbas) > 0:
+                raise NotImplementedError('ECP in PBC SCF')
+            t = cp.asarray(cell.pbc_intor('int1e_kin', 1, 1, kpts))
+            return nuc + t
 
     def get_j(self, cell=None, dm_kpts=None, hermi=1, kpts=None,
               kpts_band=None, omega=None):
@@ -326,7 +331,12 @@ class KSCF(pbchf.SCF):
     make_rdm2 = NotImplemented
 
     init_direct_scf = NotImplemented
-    get_ovlp = return_cupy_array(khf_cpu.get_ovlp)
+    def get_ovlp(self, cell=None, kpts=None):
+        if self.overlap:
+            return self.overlap
+        else:
+            return_cupy_array(khf_cpu.get_ovlp)(self, cell, kpts)
+
     get_fock = get_fock
     get_fermi = get_fermi
     get_occ = get_occ

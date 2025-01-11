@@ -18,6 +18,7 @@ __all__ = [
     'get_nuc', 'get_pp', 'get_SI', 'FFTDF'
 ]
 
+import math
 import numpy as np
 import cupy as cp
 from pyscf import gto
@@ -222,6 +223,10 @@ class FFTDF(lib.StreamObject):
         self.exxdiv = None
         self._numint = numint.KNumInt()
         self._rsh_df = {}  # Range separated Coulomb DF objects
+        self.ao_on_grid = numint.eval_ao(cell, self.grids.coords, kpts)
+        self.coulomb_in_k_space = tools.get_coulG(cell, mesh=self.mesh).reshape(*self.mesh)
+        self.n_grid_points = math.prod(self.mesh)
+        self.madelung = tools.pbc.madelung(cell, kpts)
 
     mesh = fft_cpu.FFTDF.mesh
     dump_flags = fft_cpu.FFTDF.dump_flags
@@ -241,16 +246,24 @@ class FFTDF(lib.StreamObject):
                 return rsh_df.get_jk(dm, hermi, kpts, kpts_band, with_j, with_k,
                                      omega=None, exxdiv=exxdiv)
 
-        kpts, is_single_kpt = _check_kpts(self, kpts)
-        if is_single_kpt:
-            vj, vk = fft_jk.get_jk(self, dm, hermi, kpts[0], kpts_band,
-                                   with_j, with_k, exxdiv)
-        else:
-            vj = vk = None
-            if with_k:
-                vk = fft_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv)
-            if with_j:
-                vj = fft_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band)
+        # kpts, is_single_kpt = _check_kpts(self, kpts)
+        # if is_single_kpt:
+        #     vj, vk = fft_jk.get_jk(self, dm, hermi, kpts[0], kpts_band,
+        #                            with_j, with_k, exxdiv)
+        # else:
+        #     vj = vk = None
+        #     if with_k:
+        #         vk = fft_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv)
+        #     if with_j:
+        #         vj = fft_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band)
+
+        vj = vk = None
+
+        if with_k:
+            vk = fft_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv)
+        if with_j:
+            vj = fft_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band)
+
         return vj, vk
 
     get_eri = get_ao_eri = NotImplemented

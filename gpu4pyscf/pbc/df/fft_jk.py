@@ -30,7 +30,7 @@ from gpu4pyscf.lib import logger
 from gpu4pyscf.lib.cupy_helper import contract
 from gpu4pyscf.pbc import tools
 
-def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None):
+def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, comm=None):
     '''Get the Coulomb (J) AO matrix at sampled k-points.
 
     Args:
@@ -40,63 +40,54 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None):
             separately.
         kpts : (nkpts, 3) ndarray
 
-    Kwargs:
-        kpts_band : (3,) ndarray or (*,3) ndarray
-            A list of arbitrary "band" k-points at which to evalute the matrix.
-
     Returns:
         vj : (nkpts, nao, nao) ndarray
         or list of vj if the input dm_kpts is a list of DMs
     '''
-    cell = mydf.cell
-    mesh = mydf.mesh
+
+    cell = df_object.cell
+    mesh = df_object.mesh
     assert cell.low_dim_ft_type != 'inf_vacuum'
     assert cell.dimension > 1
 
-    ni = mydf._numint
-    dm_kpts = cp.asarray(dm_kpts, order='C')
-    dms = _format_dms(dm_kpts, kpts)
-    nset, nkpts, nao = dms.shape[:3]
+    density_matrices_at_kpts = cp.asarray(dm_at_kpts)
+    formatted_density_matrices = _format_dms(density_matrices_at_kpts, kpts)
+    n_channels, n_k_points, n_ao = formatted_density_matrices.shape[:3]
 
-    coulG = tools.get_coulG(cell, mesh=mesh)
-    ngrids = len(coulG)
+    data_type = df_object.ao_on_grid[-1].dtype
 
-    if hermi == 1 or is_zero(kpts):
-        vR = cp.zeros((nset,ngrids))
-        ao_ks = ni.eval_ao(cell, mydf.grids.coords, kpts)
-        for i in range(nset):
-            rhoR = ni.eval_rho(cell, ao_ks, dms[i], hermi=hermi).real
-            rhoG = tools.fft(rhoR, mesh)
-            vG = coulG * rhoG
-            vR[i] = tools.ifft(vG, mesh).real
-    else:
-        vR = cp.zeros((nset,ngrids), dtype=np.complex128)
-        ao_ks = ni.eval_ao(cell, mydf.grids.coords, kpts)
-        for i in range(nset):
-            rhoR = ni.eval_rho(cell, ao_ks, dms[i], hermi=hermi)
-            rhoG = tools.fft(rhoR, mesh)
-            vG = coulG * rhoG
-            vR[i] = tools.ifft(vG, mesh)
+    # Maybe the ao_on_grid of shape (n_channels, n_ao, n_grid_points) cannot be saved.
+    density_in_real_space = cp.zeros((n_channels, df_object.n_grid_points), dtype=data_type)
 
-    vR *= cell.vol / ngrids
-    kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
-    nband = len(kpts_band)
-    if is_zero(kpts_band):
-        vj_kpts = cp.zeros((nset,nband,nao,nao))
-    else:
-        vj_kpts = cp.zeros((nset,nband,nao,nao), dtype=np.complex128)
+    for i in range(n_channels):
+        for k in range(n_k_points):
+            density_in_real_space[i] += cp.einsum('pq, np, nq -> n', formatted_density_matrices[i, k],
+                                                    df_object.ao_on_grid[k].conj(),
+                                                    df_object.ao_on_grid[k], optimize=True)
 
-    if input_band is not None:
-        ao_ks = ni.eval_ao(cell, mydf.grids.coords, kpts_band)
-    for k, ao in enumerate(ao_ks):
-        for i in range(nset):
-            aow = ao * vR[i,:,None]
-            vj_kpts[i,k] += ao.conj().T.dot(aow)
+    density_in_real_space = density_in_real_space.reshape(-1, *mesh)
+    density_in_g_space = cp.fft.fftn(density_in_real_space, axes=(1, 2, 3))
+    coulomb = cp.asarray(tools.get_coulG(cell, mesh=mesh)).reshape(*mesh)
+    coulomb_weighted_density_in_real_space = cp.fft.ifftn(coulomb * density_in_g_space, axes=(1, 2, 3)).reshape(
+        n_channels, -1)
 
-    return _format_jks(vj_kpts, dm_kpts, input_band, kpts)
+    if is_zero(kpts):
+        coulomb_weighted_density_in_real_space = coulomb_weighted_density_in_real_space.real
 
-def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
-               exxdiv=None):
+    weight = cell.vol / df_object.n_grid_points / n_k_points
+    coulomb_weighted_density_in_real_space *= weight
+
+    # needs to modify if kpts_band is specified. Does anyone really use custom kpts_band by the way?
+    vj_at_kpts_on_gpu = cp.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
+    for i in range(n_channels):
+        for k in range(n_k_points):
+            vj_at_kpts_on_gpu[i, k] = cp.einsum('np, n, nq -> pq', df_object.ao_on_grid[k].conj(),
+                                                  coulomb_weighted_density_in_real_space[i],
+                                                  df_object.ao_on_grid[k], optimize=True)
+
+    return _format_jks(vj_at_kpts_on_gpu, dm_at_kpts, kpts_band, kpts)
+
+def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, exxdiv=None, overlap=None):
     '''Get the Coulomb (J) and exchange (K) AO matrices at sampled k-points.
 
     Args:
@@ -119,103 +110,64 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
         vk : (nkpts, nao, nao) ndarray
         or list of vj and vk if the input dm_kpts is a list of DMs
     '''
-    cell = mydf.cell
-    mesh = mydf.mesh
+    cell = df_object.cell
+    mesh = df_object.mesh
     assert cell.low_dim_ft_type != 'inf_vacuum'
     assert cell.dimension > 1
-    coords = mydf.grids.coords
-    ngrids = coords.shape[0]
+    coords = cp.asarray(df_object.grids.coords)
+    if overlap is None:
+        overlap = cp.asarray(cell.pbc_inyot("int1e_ovlp", hermi=hermi, kpts=kpts))
 
-    if getattr(dm_kpts, 'mo_coeff', None) is not None:
-        mo_coeff = dm_kpts.mo_coeff
-        mo_occ   = dm_kpts.mo_occ
-    else:
-        mo_coeff = None
+    density_matrices_at_kpts = cp.asarray(dm_kpts)
+    formatted_density_matrices = _format_dms(density_matrices_at_kpts, kpts)
+    n_channels, n_k_points, n_ao = formatted_density_matrices.shape[:3]
+    data_type = df_object.ao_on_grid[-1].dtype
 
-    ni = mydf._numint
-    kpts = np.asarray(kpts)
-    dm_kpts = cp.asarray(dm_kpts, order='C')
-    dms = _format_dms(dm_kpts, kpts)
-    nset, nkpts, nao = dms.shape[:3]
+    weight = 1. / n_k_points * (cell.vol / df_object.n_grid_points)
 
-    weight = 1./nkpts * (cell.vol/ngrids)
+    vk = cp.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
 
-    kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
-    nband = len(kpts_band)
-
-    if is_zero(kpts_band) and is_zero(kpts):
-        vk_kpts = cp.zeros((nset,nband,nao,nao), dtype=dms.dtype)
-    else:
-        vk_kpts = cp.zeros((nset,nband,nao,nao), dtype=np.complex128)
-
-    ao2_kpts = ni.eval_ao(cell, coords, kpts=kpts)
-    if input_band is None:
-        ao1_kpts = ao2_kpts
-    else:
-        ao1_kpts = ni.eval_ao(cell, coords, kpts=kpts_band)
-
-    if mo_coeff is not None and nset == 1:
-        mo2_kpts = [
-            ao.dot(mo[:,occ>0] * occ[occ>0]**.5)
-            for occ, mo, ao in zip(mo_occ, mo_coeff, ao2_kpts)]
-        ao2_kpts = mo2_kpts
-    else:
-        mo2_kpts = None
-
-    vR_dm = cp.empty((nset,nao,ngrids), dtype=vk_kpts.dtype)
-    blksize = 32
-
-    for k2, ao2 in enumerate(ao2_kpts):
-        ao2T = ao2.T
-        kpt2 = kpts[k2]
-        naoj = ao2.shape[1]
-        if mo2_kpts is None:
-            ao_dms = [dms[i,k2].dot(ao2T.conj()) for i in range(nset)]
-        else:
-            ao_dms = [ao2T.conj()]
-
-        for k1, ao1 in enumerate(ao1_kpts):
-            ao1T = ao1.T
-            kpt1 = kpts_band[k1]
-
-            # If we have an ewald exxdiv, we add the G=0 correction near the
-            # end of the function to bypass any discretization errors
-            # that arise from the FFT.
-            if exxdiv == 'ewald':
-                coulG = tools.get_coulG(cell, kpt2-kpt1, False, mydf, mesh)
+    for k2_index, k2, ao_at_k2 in zip(range(n_k_points), kpts, df_object.ao_on_grid):
+        density_dot_ao_at_k2 = cp.ndarray((n_channels, n_ao, df_object.n_grid_points), dtype=data_type)
+        for i in range(n_channels):
+            density_dot_ao_at_k2[i] = formatted_density_matrices[i, k2_index] @ ao_at_k2.conj().T
+        for k1_index, k1, ao_at_k1 in zip(range(n_k_points), kpts, df_object.ao_on_grid):
+            if is_zero(kpts):
+                e_ikr = cp.ones(len(coords))
             else:
-                coulG = tools.get_coulG(cell, kpt2-kpt1, exxdiv, mydf, mesh)
-            if is_zero(kpt1-kpt2):
-                expmikr = cp.array(1.)
-            else:
-                expmikr = cp.exp(-1j * coords.dot(cp.asarray(kpt2-kpt1)))
+                e_ikr = cp.exp(coords @ cp.asarray(1j * (k1 - k2)))
 
-            for p0, p1 in lib.prange(0, nao, blksize):
-                rho1 = contract('ig,jg->ijg', ao1T[p0:p1].conj()*expmikr, ao2T)
-                vG = tools.fft(rho1.reshape(-1,ngrids), mesh)
-                rho1 = None
-                vG *= coulG
-                vR = tools.ifft(vG, mesh).reshape(p1-p0,naoj,ngrids)
-                vG = None
-                if vk_kpts.dtype == np.double:
-                    vR = vR.real
-                for i in range(nset):
-                    vR_dm[i,p0:p1] = contract('ijg,jg->ig', vR, ao_dms[i])
-                vR = None
-            vR_dm *= expmikr.conj()
+            block_size = 32
+            for p0, p1 in lib.prange(0, n_ao, block_size):
 
-            for i in range(nset):
-                vk_kpts[i,k1] += weight * vR_dm[i].dot(ao1)
+                ao_sandwiched_e_ikr_in_real_space = cp.einsum(
+                    "np, nq, n -> pqn", ao_at_k1[:, p0:p1].conj(), ao_at_k2, e_ikr).reshape(p1 - p0, n_ao, *mesh)
 
-    # Function _ewald_exxdiv_for_G0 to add back in the G=0 component to vk_kpts
-    # Note in the _ewald_exxdiv_for_G0 implementation, the G=0 treatments are
-    # different for 1D/2D and 3D systems.  The special treatments for 1D and 2D
-    # can only be used with AFTDF/GDF/MDF method.  In the FFTDF method, 1D, 2D
-    # and 3D should use the ewald probe charge correction.
+                ao_sandwiched_e_ikr_in_g_space = cp.fft.fftn(ao_sandwiched_e_ikr_in_real_space,
+                                                               axes=(2, 3, 4))
+
+                coulomb_in_g_space = cp.asarray(
+                    tools.get_coulG(df_object.cell, k=k2 - k1, mf=df_object, mesh=mesh).reshape(*mesh))
+
+                coulomb_in_real_space = cp.fft.ifftn(coulomb_in_g_space * ao_sandwiched_e_ikr_in_g_space,
+                                                       axes=(2, 3, 4)).reshape(p1 - p0, n_ao, -1)
+
+                if is_zero(kpts):
+                    coulomb_in_real_space = coulomb_in_real_space.real
+
+                for i in range(n_channels):
+                    coulomb_weighted_density_dot_ao_at_k2 = cp.einsum("pqn, qn -> pn", coulomb_in_real_space,
+                                                                        density_dot_ao_at_k2[i])
+
+                    coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
+                    vk[i, k1_index, p0:p1, :] += weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
+
     if exxdiv == 'ewald':
-        vk_kpts = _ewald_exxdiv_for_G0(cell, kpts, dms, vk_kpts, kpts_band=kpts_band)
+        for i in range(n_channels):
+            vk[i] += df_object.madelung * cp.einsum("kpq, kqr, krs -> kps",
+                                                      overlap, formatted_density_matrices[i], overlap)
 
-    return _format_jks(vk_kpts, dm_kpts, input_band, kpts)
+    return _format_jks(vk, dm_kpts, None, kpts)
 
 def get_jk(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None,
            with_j=True, with_k=True, exxdiv=None):
