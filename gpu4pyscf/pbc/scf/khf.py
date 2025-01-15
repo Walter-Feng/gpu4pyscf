@@ -14,13 +14,14 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
         self.rsjk = None
         mol_hf.SCF.__init__(self, cell)
         self.cell = cell
-        self.with_df = gpu_fft.FFTDF(cell, kpts=kpts)
+        self.overlap = cupy.asarray(cpu_KHF.KSCF.get_ovlp(self, cell, kpts))
+        self.with_df = gpu_fft.FFTDF(cell, kpts=kpts, overlap=self.overlap)
+        self.hcore = cupy.asarray(cpu_KHF.KSCF.get_hcore(self, cell, kpts))
         self.exxdiv = exxdiv
         self.kpts = kpts
         self.conv_tol = max(cell.precision * 10, 1e-8)
         self.exx_built = False
-        self.overlap = cupy.asarray(cpu_KHF.KSCF.get_ovlp(self, cell, kpts))
-        self.hcore = cupy.asarray(cpu_KHF.KSCF.get_hcore(self, cell, kpts))
+
 
     def make_rdm1(self, mo_coeff_kpts=None, mo_occ_kpts=None, **kwargs):
         if mo_coeff_kpts is None:
@@ -61,7 +62,7 @@ class KSCF(gpu_hf.SCF, cpu_KHF.KSCF):
                                       with_j, with_k, omega=omega, exxdiv=self.exxdiv)
         else:
             vj, vk = self.with_df.get_jk(dm_kpts, hermi, kpts, kpts_band,
-                                         with_j, with_k, omega=omega, exxdiv=self.exxdiv, overlap=self.get_ovlp())
+                                         with_j, with_k, omega=omega, exxdiv=self.exxdiv)
         logger.timer(self, 'vj and vk', *cpu0)
         return vj, vk
 

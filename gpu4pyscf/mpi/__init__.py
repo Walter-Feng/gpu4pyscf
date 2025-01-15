@@ -1,4 +1,3 @@
-from mpi4py import MPI
 import cupy
 import cupy.cuda.nccl as nccl
 
@@ -20,52 +19,86 @@ def to_nccl_data_type(cupy_array):
 
 
 class Communicator:
-    def __init__(self):
+    def __init__(self, gpu_id_list=None):
 
-        self.world = MPI.COMM_WORLD
+        self.size = 1
+        self.rank = 0
+        self.local_size = 1
+        self.local_rank = 0
+        self.is_main = True
 
-        self.is_main = (self.world.rank == 0)
+        try:
+            from mpi4py import MPI
 
-        unique_id = nccl.get_unique_id()
-        unique_id = self.world.bcast(unique_id)
+            self.world = MPI.COMM_WORLD
 
-        processor_name = MPI.Get_processor_name()
-        rank = self.world.rank
+            self.is_main = (self.world.rank == 0)
 
-        host_names = self.world.gather(processor_name)
+            processor_name = MPI.Get_processor_name()
+            rank = self.world.rank
 
-        # This removes redundant host names. Also the order can be random
-        # if the removal is operated individually
-        if self.is_main:
-            host_names = list(set(host_names))
+            host_names = self.world.gather(processor_name)
 
-        host_names = self.world.bcast(host_names)
-        color = host_names.index(processor_name)
+            # This removes redundant host names. Also the order can be random
+            # if the removal is operated individually
+            if self.is_main:
+                host_names = list(set(host_names))
 
-        n_gpu = cupy.cuda.runtime.getDeviceCount()
+            host_names = self.world.bcast(host_names)
+            color = host_names.index(processor_name)
+            self.local = self.world.Split(color, rank)
+            self.rank = rank
+            self.size = self.world.size
+            self.local_rank = self.local.rank
 
-        self.local = self.world.Split(color, rank)
-        local_rank = self.local.rank
-        cupy.cuda.Device(local_rank).use()
+        except:
+            self.world = None
+            self.local = None
 
-        if self.local.size > n_gpu:
-            raise Exception("the size of local processes exceeds allocable GPU devices")
+        try:
+            unique_id = nccl.get_unique_id()
+            unique_id = self.world.bcast(unique_id)
 
-        self.gpu = nccl.NcclCommunicator(self.world.size, unique_id, rank)
+            n_gpu = cupy.cuda.runtime.getDeviceCount()
+            if gpu_id_list is None:
+                gpu_id_list = range(n_gpu)
+
+            cupy.cuda.Device(gpu_id_list[self.local_rank]).use()
+
+            if self.local_size > n_gpu:
+                raise Exception("the size of local processes exceeds allocable GPU devices")
+
+            self.gpu = nccl.NcclCommunicator(self.size, unique_id, self.rank)
+
+        except:
+            self.gpu = None
 
     def reduce(self, cupy_array: cupy.ndarray, in_place=False):
         nccl_sum_type = 0
         default_stream = 0
-        if in_place:
+
+        if self.size == 1:
+            return cupy_array
+
+        if not in_place:
             result = cupy.ndarray(cupy_array.shape, dtype=cupy_array.dtype)
+        else:
+            result = cupy_array
+
+        if cupy.iscomplexobj(cupy_array):
+            self.gpu.allReduce(cupy_array.real.data.ptr, result.real.data.ptr,
+                               cupy_array.size, to_nccl_data_type(cupy_array.real),
+                               nccl_sum_type, default_stream)
+            self.gpu.allReduce(cupy_array.imag.data.ptr, result.imag.data.ptr,
+                               cupy_array.size, to_nccl_data_type(cupy_array.imag),
+                               nccl_sum_type, default_stream)
+
+        else:
             self.gpu.allReduce(cupy_array.data.ptr, result.data.ptr,
                                cupy_array.size, to_nccl_data_type(cupy_array),
                                nccl_sum_type, default_stream)
 
-            return result
+        return result
 
-        else:
-            self.gpu.allReduce(cupy_array.data.ptr, cupy_array.data.ptr,
-                               cupy_array.size, to_nccl_data_type(cupy_array),
-                               nccl_sum_type, default_stream)
 
+comm = Communicator()

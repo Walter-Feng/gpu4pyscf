@@ -8,6 +8,7 @@ import numpy as np
 import cupy
 import math
 
+from gpu4pyscf import mpi
 
 def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, comm=None):
     '''Get the Coulomb (J) AO matrix at sampled k-points.
@@ -46,8 +47,8 @@ def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=
 
     density_in_real_space = density_in_real_space.reshape(-1, *mesh)
     density_in_g_space = cupy.fft.fftn(density_in_real_space, axes=(1, 2, 3))
-    coulomb = cupy.asarray(tools.get_coulG(cell, mesh=mesh)).reshape(*mesh)
-    coulomb_weighted_density_in_real_space = cupy.fft.ifftn(coulomb * density_in_g_space, axes=(1, 2, 3)).reshape(
+    coulomb_weighted_density_in_real_space = cupy.fft.ifftn(df_object.coulomb_in_k_space * density_in_g_space,
+                                                            axes=(1, 2, 3)).reshape(
         n_channels, -1)
 
     if is_zero(kpts):
@@ -67,7 +68,7 @@ def get_j_kpts(df_object, dm_at_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=
     return _format_jks(vj_at_kpts_on_gpu, dm_at_kpts, kpts_band, kpts)
 
 
-def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, exxdiv=None, overlap=None):
+def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, exxdiv=None):
     '''Get the Coulomb (J) and exchange (K) AO matrices at sampled k-points.
 
     Args:
@@ -94,9 +95,6 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
     mesh = df_object.mesh
     assert cell.low_dim_ft_type != 'inf_vacuum'
     assert cell.dimension > 1
-    coords = cupy.asarray(df_object.grids.coords)
-    if overlap is None:
-        overlap = cupy.asarray(cell.pbc_inyot("int1e_ovlp", hermi=hermi, kpts=kpts))
 
     density_matrices_at_kpts = cupy.asarray(dm_kpts)
     formatted_density_matrices = _format_dms(density_matrices_at_kpts, kpts)
@@ -113,12 +111,15 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
             density_dot_ao_at_k2[i] = formatted_density_matrices[i, k2_index] @ ao_at_k2.conj().T
         for k1_index, k1, ao_at_k1 in zip(range(n_k_points), kpts, df_object.ao_on_grid):
             if is_zero(kpts):
-                e_ikr = cupy.ones(len(coords))
+                e_ikr = cupy.ones(len(df_object.coords))
             else:
-                e_ikr = cupy.exp(coords @ cupy.asarray(1j * (k1 - k2)))
+                e_ikr = cupy.exp(df_object.coords @ cupy.asarray(1j * (k1 - k2)))
 
-            block_size = 32
-            for p0, p1 in lib.prange(0, n_ao, block_size):
+            block_size = df_object.block_size
+            for index, ao_range in enumerate(lib.prange(0, n_ao, block_size)):
+                p0, p1 = ao_range
+                if index % mpi.comm.size != mpi.comm.rank:
+                    continue
 
                 ao_sandwiched_e_ikr_in_real_space = cupy.einsum(
                     "np, nq, n -> pqn", ao_at_k1[:, p0:p1].conj(), ao_at_k2, e_ikr).reshape(p1 - p0, n_ao, *mesh)
@@ -142,18 +143,21 @@ def get_k_kpts(df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=Non
                     coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
                     vk[i, k1_index, p0:p1, :] += weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
 
+    mpi.comm.reduce(vk, in_place=True)
     if exxdiv == 'ewald':
         for i in range(n_channels):
             vk[i] += df_object.madelung * cupy.einsum("kpq, kqr, krs -> kps",
-                                                      overlap, formatted_density_matrices[i], overlap)
+                                                      df_object.overlap, formatted_density_matrices[i],
+                                                      df_object.overlap)
 
     return _format_jks(vk, dm_kpts, None, kpts)
 
 
 class FFTDF(cpu_FFTDF):
-    def __init__(self, cell, kpts=np.zeros((1, 3))):
+    def __init__(self, cell, kpts=np.zeros((1, 3)), block_size=32, overlap=None):
         cpu_FFTDF.__init__(self, cell, kpts)
         self.to_gpu()
+        self.block_size = block_size
         numerical_integrator = self._numint
         self.ao_on_grid = [cupy.asarray(ao_at_k) for ao_at_k in
                            numerical_integrator.eval_ao(cell, self.grids.coords, kpts)]
@@ -161,10 +165,21 @@ class FFTDF(cpu_FFTDF):
         self.coulomb_in_k_space = cupy.asarray(tools.get_coulG(cell, mesh=self.mesh)).reshape(*self.mesh)
         self.n_grid_points = math.prod(self.mesh)
         self.madelung = tools.pbc.madelung(cell, kpts)
+        self.overlap = overlap
+        self.coords = cupy.asarray(self.grids.coords)
+
+        if overlap is None:
+            self.overlap = cupy.asarray(cell.pbc_intor("int1e_ovlp", hermi=True, kpts=kpts))
 
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
-               with_j=True, with_k=True, omega=None, exxdiv=None, overlap=None):
-        j_on_gpu = get_j_kpts(self, dm, hermi, kpts, kpts_band)
-        k_on_gpu = get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv, overlap)
+               with_j=True, with_k=True, omega=None, exxdiv=None):
+
+        j_on_gpu = None
+        k_on_gpu = None
+
+        if with_k:
+            k_on_gpu = get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv)
+        if with_j:
+            j_on_gpu = get_j_kpts(self, dm, hermi, kpts, kpts_band)
 
         return j_on_gpu, k_on_gpu
