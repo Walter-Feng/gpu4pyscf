@@ -229,7 +229,32 @@ class FFTDF(lib.StreamObject):
     build = fft_cpu.FFTDF.build
     reset = fft_cpu.FFTDF.reset
 
-    aoR_loop = NotImplemented
+    def aoR_loop(self, grids=None, kpts=None, deriv=0):
+        if grids is None:
+            grids = self.grids
+            cell = self.cell
+        else:
+            cell = grids.cell
+        if grids.non0tab is None:
+            grids.build(with_non0tab=True)
+
+        if kpts is None: kpts = self.kpts
+        kpts = np.asarray(kpts)
+
+        if (cell.dimension < 2 or
+            (cell.dimension == 2 and cell.low_dim_ft_type == 'inf_vacuum')):
+            raise RuntimeError('FFTDF method does not support low-dimension '
+                               'PBC system.  DF, MDF or AFTDF methods should '
+                               'be used.\nSee also examples/pbc/31-low_dimensional_pbc.py')
+
+        max_memory = max(2000, self.max_memory-lib.current_memory()[0])
+        ni = self._numint
+        nao = cell.nao_nr()
+        p1 = 0
+        for ao_k1_etc in ni.block_loop(cell, grids, deriv, kpts):
+            coords = ao_k1_etc[2]
+            p0, p1 = p1, p1 + coords.shape[0]
+            yield ao_k1_etc, p0, p1
 
     get_pp = get_pp
     get_nuc = get_nuc

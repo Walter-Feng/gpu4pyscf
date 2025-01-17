@@ -1,6 +1,9 @@
-import gpu4pyscf.gto as gto
+import pyscf.pbc.gto as gto
 import gpu4pyscf.pbc.df.fft as fft
 import gpu4pyscf.pbc.df.fft_jk as fft_jk
+from pyscf.dft.numint import libdft
+
+import gpu4pyscf.pbc.scf.hf
 from gpu4pyscf.lib import logger
 from gpu4pyscf.pbc.dft import numint
 from gpu4pyscf.pbc import tools
@@ -16,6 +19,7 @@ import scipy
 import ctypes
 
 libgdft = cupy_helper.load_library('libgdft')
+
 
 def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
              xctype='LDA', kpts=None, mesh=None, offset=None, submesh=None):
@@ -45,7 +49,7 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     Ls = gto.eval_gto.get_lattice_Ls(cell)
     nimgs = len(Ls)
 
-    weights = np.asarray(weights, order='C')
+    weights = weights.get()
     assert (weights.dtype == np.double)
     xctype = xctype.upper()
     n_mat = None
@@ -79,11 +83,11 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     else:
         lattice_type = '_nonorth'
     eval_fn = 'NUMINTeval_' + xctype.lower() + lattice_type
-    drv = libgdft.NUMINT_fill2c
+    drv = libdft.NUMINT_fill2c
 
     def make_mat(weights):
-        mat = cp.zeros((nimgs, comp, naoj, naoi))
-        drv(getattr(libgdft, eval_fn),
+        mat = np.zeros((nimgs, comp, naoj, naoi))
+        drv(getattr(libdft, eval_fn),
             weights.ctypes.data_as(ctypes.c_void_p),
             mat.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(comp), ctypes.c_int(hermi),
@@ -100,7 +104,7 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
             atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(atm)),
             bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(bas)),
             env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(env)))
-        return mat
+        return cp.asarray(mat)
 
     out = []
     for wv in weights:
@@ -211,12 +215,13 @@ def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
     else:
         shape = (comp, np.prod(submesh))
     eval_fn = 'NUMINTrho_' + xctype.lower() + lattice_type
-    drv = libgdft.NUMINT_rho_drv
+    drv = libdft.NUMINT_rho_drv
 
-    def make_rho_(rho, dm, hermi):
-        drv(getattr(libgdft, eval_fn),
+    def make_rho_(shape, dm, hermi):
+        rho = np.zeros(shape, order='C')
+        drv(getattr(libdft, eval_fn),
             rho.ctypes.data_as(ctypes.c_void_p),
-            dm.ctypes.data_as(ctypes.c_void_p),
+            dm.get().ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(comp), ctypes.c_int(hermi),
             (ctypes.c_int * 4)(i0, i1, j0, j1),
             ao_loc.ctypes.data_as(ctypes.c_void_p),
@@ -231,7 +236,7 @@ def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
             atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(atm)),
             bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(bas)),
             env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(env)))
-        return rho
+        return cp.asarray(rho)
 
     rho = []
     for i, dm_i in enumerate(dm):
@@ -282,22 +287,22 @@ def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
             # function NUMINT_rho_drv
             if out is None:
                 rho_i = cp.empty(shape, cp.complex128)
-                rho_i.real = make_rho_(cp.zeros(shape), dmR, 0)
-                rho_i.imag = make_rho_(cp.zeros(shape), dmI, 0)
+                rho_i.real = make_rho_(shape, dmR, 0)
+                rho_i.imag = make_rho_(shape, dmI, 0)
             else:
                 assert out[i].dtype == cp.complex128
                 rho_i = out[i].reshape(shape)
-                rho_i.real += make_rho_(cp.zeros(shape), dmR, 0)
-                rho_i.imag += make_rho_(cp.zeros(shape), dmI, 0)
+                rho_i.real += make_rho_(shape, dmR, 0)
+                rho_i.imag += make_rho_(shape, dmI, 0)
         else:
             if out is None:
                 # rho_i needs to be initialized to 0 because rho_i is updated
                 # inplace in function NUMINT_rho_drv
-                rho_i = make_rho_(cp.zeros(shape), dmR, hermi)
+                rho_i = make_rho_(shape, dmR, hermi)
             else:
                 assert out[i].dtype == cp.double
                 rho_i = out[i].reshape(shape)
-                make_rho_(rho_i, dmR, hermi)
+                rho_i += make_rho_(rho_i.shape, dmR, hermi)
         dmR = dmI = None
         rho.append(rho_i)
 
@@ -308,7 +313,7 @@ def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
 
 def _eval_rho_bra(cell, dms, shls_slice, hermi, xctype, kpts, grids,
                   ignore_imag, log):
-    a = cell.lattice_vectors()
+    a = cp.asarray(cell.lattice_vectors())
     rmax = a.max()
     mesh = np.asarray(grids.mesh)
     rcut = grids.cell.rcut
@@ -342,7 +347,7 @@ def _eval_rho_bra(cell, dms, shls_slice, hermi, xctype, kpts, grids,
         i0, i1 = i1, i1 + sum((l + 1) * (l + 2) // 2)
         sub_dms = dms[:, :, i0:i1]
 
-        atom_position = cell.atom_coord(atm_id)
+        atom_position = cp.asarray(cell.atom_coord(atm_id))
         frac_edge0 = b.dot(atom_position - rcut)
         frac_edge1 = b.dot(atom_position + rcut)
 
@@ -478,11 +483,14 @@ def _eval_rhoG(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_hig
         weight = 1. / nkpts * cell.vol / ngrids
         rho_freq = tools.fft(rho.reshape(nset * rho_slices, -1), mesh)
         rho_freq *= weight
-        gx = np.fft.fftfreq(mesh[0], 1. / mesh[0]).astype(np.int32)
-        gy = np.fft.fftfreq(mesh[1], 1. / mesh[1]).astype(np.int32)
-        gz = np.fft.fftfreq(mesh[2], 1. / mesh[2]).astype(np.int32)
+        gx = cp.fft.fftfreq(mesh[0], 1. / mesh[0]).astype(cp.int32)
+        gy = cp.fft.fftfreq(mesh[1], 1. / mesh[1]).astype(cp.int32)
+        gz = cp.fft.fftfreq(mesh[2], 1. / mesh[2]).astype(cp.int32)
         #:rhoG[:,gx[:,None,None],gy[:,None],gz] += rho_freq.reshape((-1,)+mesh)
-        multigrid._takebak_4d(rhoG, rho_freq.reshape((-1,) + mesh), (None, gx, gy, gz))
+
+        reshaped_rho_freq = rho_freq.reshape((-1,) + mesh)
+
+        rhoG[cp.ix_(cp.arange(nset * rho_slices), gx, gy, gz)] += reshaped_rho_freq
 
     rhoG = rhoG.reshape(nset, rho_slices, -1)
 
@@ -522,7 +530,7 @@ def _get_j_pass2(mydf, vG, hermi=1, kpts=np.zeros((1, 3)), verbose=None):
         gy = np.fft.fftfreq(mesh[1], 1. / mesh[1]).astype(np.int32)
         gz = np.fft.fftfreq(mesh[2], 1. / mesh[2]).astype(np.int32)
         #:sub_vG = vG[:,gx[:,None,None],gy[:,None],gz].reshape(nset,ngrids)
-        sub_vG = multigrid._take_4d(vG, (None, gx, gy, gz)).reshape(nset, ngrids)
+        sub_vG = vG[cp.ix_(cp.arange(vG.shape[0]), gx, gy, gz)].reshape(nset, ngrids)
 
         v_rs = tools.ifft(sub_vG, mesh).reshape(nset, ngrids)
         vR = cp.asarray(v_rs.real, order='C')
@@ -568,7 +576,7 @@ def _get_j_pass2(mydf, vG, hermi=1, kpts=np.zeros((1, 3)), verbose=None):
                 vp = cp.asarray(vp) + cp.asarray(vpI) * 1j
                 vpI = None
 
-            vp = cp.einsum('nkpq,pi,qj->nkij', vp, h_coeff, t_coeff)
+            vp = cp.einsum('nkpq,pi,qj->nkij', cp.asarray(vp), cp.asarray(h_coeff), cp.asarray(t_coeff))
 
             vj_kpts[:, :, idx_h[:, None], idx_h] += vp[:, :, :, :naoh]
             vj_kpts[:, :, idx_h[:, None], idx_l] += vp[:, :, :, naoh:]
@@ -653,7 +661,8 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
             exc, vxc = ni.eval_xc_eff(xc_code, rhoR[i, 0], deriv=1, xctype=xctype)[:2]
         else:
             exc, vxc = ni.eval_xc_eff(xc_code, rhoR[i], deriv=1, xctype=xctype)[:2]
-        excsum[i] += (rhoR[i, 0] * exc).sum() * weight
+
+        excsum[i] += (rhoR[i, 0] * exc.flatten()).sum() * weight
         wv = weight * vxc
         wv_freq.append(tools.fft(wv, mesh))
     wv_freq = cp.asarray(wv_freq).reshape(nset, -1, *mesh)
@@ -687,7 +696,12 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     return nelec, excsum, veff
 
 
-class MultiGridFFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
+class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
     def __init__(self, cell, kpts=np.zeros((1, 3))):
         fft.FFTDF.__init__(self, cell, kpts)
-        multigrid.MultiGridFFTDF.__init__(self, cell, kpts)
+
+
+def fftdf(mf):
+    mf.with_df, old_df = FFTDF(mf.cell), mf.with_df
+    mf.with_df.__dict__.update(old_df.__dict__)
+    return mf

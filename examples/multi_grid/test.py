@@ -7,15 +7,12 @@
 #f.close()
 
 import numpy
-import pyscf
-from pyscf import lib
-from pyscf import pbc
 from pyscf.pbc import gto as pbcgto
-from pyscf.pbc import dft as pbcdft
-from pyscf.pbc.dft import multigrid
-from gpu4pyscf.pbc.dft.multi_grid import multi_grid
-import sys
-import cProfile, pstats, io
+from gpu4pyscf.pbc import dft as pbcdft
+from pyscf.pbc import dft as cpu_pbcdft
+from gpu4pyscf.pbc.dft import multi_grid
+from pyscf.pbc.dft import multigrid as cpu_multi_grid
+
 cell=pbcgto.Cell()
 
 #Molecule
@@ -28,7 +25,7 @@ H 0 1 0
 """
 cell.basis = 'gth-tzv2p'
 cell.ke_cutoff = 200  # kinetic energy cutoff in a.u.
-cell.max_memory = 8000 # in MB
+#cell.max_memory = 8000 # in MB
 cell.precision = 1e-6 # integral precision
 cell.pseudo = 'gth-pade'
 cell.verbose = 5
@@ -38,11 +35,19 @@ cell.build()
 
 mf=pbcdft.RKS(cell)
 #mf.xc = "LDA, VWN"
-mf.xc = "PBE,PBE"
-mf.max_cycle = 1
+mf.xc = "LDA"
+# mf.max_cycle = 1
 mf.init_guess = 'atom' # atom guess is fast
-mf.with_df = muligrid_pair.MultiGridFFTDF2(cell)
+mf = multi_grid.fftdf(mf)
 mf.with_df.ngrids = 4 # number of sets of grid points
 mf.kernel()
 
 
+mf=cpu_pbcdft.RKS(cell)
+#mf.xc = "LDA, VWN"
+mf.xc = "LDA"
+# mf.max_cycle = 1
+mf.init_guess = 'atom' # atom guess is fast
+mf = cpu_multi_grid.multigrid.multigrid_fftdf(mf)
+mf.with_df.ngrids = 4 # number of sets of grid points
+mf.kernel()

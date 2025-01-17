@@ -24,7 +24,7 @@ import numpy as np
 import cupy as cp
 from pyscf import lib
 from pyscf.pbc.dft import rks as rks_cpu
-from pyscf.pbc.dft import multigrid
+from gpu4pyscf.pbc.dft import multi_grid
 from gpu4pyscf.lib import logger, utils
 from gpu4pyscf.dft import rks as mol_ks
 from gpu4pyscf.pbc.scf import hf as pbchf, khf
@@ -60,9 +60,16 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
     ni = ks._numint
     hybrid = ni.libxc.is_hybrid_xc(ks.xc)
 
-    if isinstance(ks.with_df, multigrid.MultiGridFFTDF):
+    if isinstance(ks.with_df, multi_grid.FFTDF):
         if ks.do_nlc():
             raise NotImplementedError(f'MultiGrid for NLC functional {ks.xc} + {ks.nlc}')
+
+        n, exc, vxc = multi_grid.nr_rks(ks.with_df, ks.xc, dm, hermi,
+                                       kpt.reshape(1, 3), kpts_band,
+                                       with_j=True, return_j=False)
+        logger.info(ks, 'nelec by numeric integration = %s', n)
+        t0 = logger.timer(ks, 'vxc', *t0)
+        return vxc
 
     ground_state = (isinstance(dm, cp.ndarray) and dm.ndim == 2
                     and kpts_band is None)
