@@ -142,9 +142,9 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     return out
 
 
-def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
-             mesh=None, offset=None, submesh=None, ignore_imag=False,
-             out=None):
+def evaluate_density(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
+                     mesh=None, offset=None, submesh=None, ignore_imag=False,
+                     out=None):
     '''Collocate the *real* density (opt. gradients) on the real-space grid.
 
     Kwargs:
@@ -158,10 +158,11 @@ def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
     weight_penalty = np.prod(mesh) / vol
     exp_min = np.hstack(cell.bas_exps()).min()
     theta_ij = exp_min / 2
-    lattice_sum_fac = max(2 * np.pi * cell.rcut / (vol * theta_ij), 1)
-    precision = cell.precision / weight_penalty / lattice_sum_fac
+    lattice_summation_factor = max(2 * np.pi * cell.rcut / (vol * theta_ij), 1)
+    precision = cell.precision / weight_penalty / lattice_summation_factor
     if xctype != 'LDA':
         precision *= .1
+    # concatenate two molecules
     atm, bas, env = gto.conc_env(cell._atm, cell._bas, cell._env,
                                  cell._atm, cell._bas, cell._env)
     env[multigrid.PTR_EXPDROP] = min(precision * multigrid.EXTRA_PREC, multigrid.EXPDROP)
@@ -311,29 +312,27 @@ def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
     return rho
 
 
-def _eval_rho_bra(cell, dms, shls_slice, hermi, xctype, kpts, grids,
-                  ignore_imag, log):
-    a = cp.asarray(cell.lattice_vectors())
-    rmax = a.max()
+def _eval_rho_bra(cell, dms, shls_slice, hermi, xctype, kpts, grids, ignore_imag, log):
+    lattice_vectors = cp.asarray(cell.lattice_vectors())
+    max_element = lattice_vectors.max()
     mesh = np.asarray(grids.mesh)
-    rcut = grids.cell.rcut
+    real_space_cutoff = grids.cell.rcut
     nset = dms.shape[0]
     if xctype == 'LDA':
         rho_slices = 1
     else:
         rho_slices = 4
 
-    if rcut > rmax * multigrid.R_RATIO_SUBLOOP:
-        rho = eval_rho(cell, dms, shls_slice, hermi, xctype, kpts,
-                       mesh, ignore_imag=ignore_imag)
-        return cp.reshape(rho, (nset, rho_slices, np.prod(mesh)))
+    if real_space_cutoff > max_element * multigrid.R_RATIO_SUBLOOP:
+        density = evaluate_density(cell, dms, shls_slice, hermi, xctype, kpts, mesh, ignore_imag=ignore_imag)
+        return cp.reshape(density, (nset, rho_slices, np.prod(mesh)))
 
     if hermi == 1 or ignore_imag:
-        rho = cp.zeros((nset, rho_slices) + tuple(mesh))
+        density = cp.zeros((nset, rho_slices) + tuple(mesh))
     else:
-        rho = cp.zeros((nset, rho_slices) + tuple(mesh), dtype=cp.complex128)
+        density = cp.zeros((nset, rho_slices) + tuple(mesh), dtype=cp.complex128)
 
-    b = cp.linalg.inv(a.T)
+    b = cp.linalg.inv(lattice_vectors.T)
     ish0, ish1, jsh0, jsh1 = shls_slice
     nshells_j = jsh1 - jsh0
     pcell = cell.copy(deep=False)
@@ -348,8 +347,8 @@ def _eval_rho_bra(cell, dms, shls_slice, hermi, xctype, kpts, grids,
         sub_dms = dms[:, :, i0:i1]
 
         atom_position = cp.asarray(cell.atom_coord(atm_id))
-        frac_edge0 = b.dot(atom_position - rcut)
-        frac_edge1 = b.dot(atom_position + rcut)
+        frac_edge0 = b.dot(atom_position - real_space_cutoff)
+        frac_edge1 = b.dot(atom_position + real_space_cutoff)
 
         if (np.all(0 < frac_edge0) and np.all(frac_edge1 < 1)):
             pcell._bas = np.vstack((_bas_i, cell._bas[jsh0:jsh1]))
@@ -360,18 +359,18 @@ def _eval_rho_bra(cell, dms, shls_slice, hermi, xctype, kpts, grids,
             mesh1 = np.ceil(frac_edge1 * mesh).astype(int)
             submesh = mesh1 - offset
             log.debug1('atm %d  rcut %f  offset %s submesh %s',
-                       atm_id, rcut, offset, submesh)
-            rho1 = eval_rho(pcell, sub_dms, sub_slice, hermi, xctype, kpts,
-                            mesh, offset, submesh, ignore_imag=ignore_imag)
+                       atm_id, real_space_cutoff, offset, submesh)
+            rho1 = evaluate_density(pcell, sub_dms, sub_slice, hermi, xctype, kpts,
+                                    mesh, offset, submesh, ignore_imag=ignore_imag)
             #:rho[:,:,offset[0]:mesh1[0],offset[1]:mesh1[1],offset[2]:mesh1[2]] += \
             #:        numpy.reshape(rho1, (nset, rhodim) + tuple(submesh))
             gx = np.arange(offset[0], mesh1[0], dtype=np.int32)
             gy = np.arange(offset[1], mesh1[1], dtype=np.int32)
             gz = np.arange(offset[2], mesh1[2], dtype=np.int32)
-            multigrid._takebak_5d(rho, np.reshape(rho1, (nset, rho_slices) + tuple(submesh)),
+            multigrid._takebak_5d(density, np.reshape(rho1, (nset, rho_slices) + tuple(submesh)),
                                   (None, None, gx, gy, gz))
         else:
-            log.debug1('atm %d  rcut %f  over 2 images', atm_id, rcut)
+            log.debug1('atm %d  rcut %f  over 2 images', atm_id, real_space_cutoff)
             #:rho1 = eval_rho(pcell, sub_dms, sub_slice, hermi, xctype, kpts,
             #:                mesh, ignore_imag=ignore_imag)
             #:rho += numpy.reshape(rho1, rho.shape)
@@ -386,18 +385,18 @@ def _eval_rho_bra(cell, dms, shls_slice, hermi, xctype, kpts, grids,
         sub_slice = (0, nshells_i, nshells_i, nshells_i + nshells_j)
         sub_dms = np.concatenate(rest_dms, axis=2)
         # Update rho inplace
-        eval_rho(pcell, sub_dms, sub_slice, hermi, xctype, kpts,
-                 mesh, ignore_imag=ignore_imag, out=rho)
-    return rho.reshape((nset, rho_slices, np.prod(mesh)))
+        evaluate_density(pcell, sub_dms, sub_slice, hermi, xctype, kpts,
+                         mesh, ignore_imag=ignore_imag, out=density)
+    return density.reshape((nset, rho_slices, np.prod(mesh)))
 
 
-def _eval_rhoG(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
+def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
     log = logger.Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
 
     dm_kpts = cp.asarray(dm_kpts, order='C')
     dms = fft_jk._format_dms(dm_kpts, kpts)
-    nset, nkpts, nao = dms.shape[:3]
+    n_channels, n_k_points, nao = dms.shape[:3]
 
     tasks = getattr(mydf, 'tasks', None)
     if tasks is None:
@@ -407,9 +406,9 @@ def _eval_rhoG(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_hig
     assert (deriv < 1)
     # hermi = hermi and abs(dms - dms.transpose(0,1,3,2).conj()).max() < 1e-9
     gga_high_order = False
+    density_slices = 1  # Presumably
     if deriv == 0:
         xctype = 'LDA'
-        rho_slices = 1  # Presumably
 
     elif deriv == 1:
         if rho_g_high_order is not None:
@@ -418,97 +417,104 @@ def _eval_rhoG(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_hig
     elif deriv == 2:  # meta-GGA
         raise NotImplementedError
 
-    ignore_imag = (hermi == 1)
-
     nx, ny, nz = mydf.mesh
-    rhoG = cp.zeros((nset * rho_slices, nx, ny, nz), dtype=cp.complex128)
+    density_on_g_mesh = cp.zeros((n_channels * density_slices, nx, ny, nz), dtype=cp.complex128)
     for grids_dense, grids_sparse in tasks:
-        h_cell = grids_dense.cell
+        subcell_in_dense_region = grids_dense.cell
         mesh = tuple(grids_dense.mesh)
-        ngrids = np.prod(mesh)
-        log.debug('mesh %s  rcut %g', mesh, h_cell.rcut)
+        n_grid_points = np.prod(mesh)
+        log.debug('mesh %s  rcut %g', mesh, subcell_in_dense_region.rcut)
 
         if grids_sparse is None:
             # The first pass handles all diffused functions using the regular
             # matrix multiplication code.
-            rho = cp.zeros((nset, rho_slices, ngrids), dtype=cp.complex128)
-            idx_h = grids_dense.ao_idx
-            dms_hh = cp.asarray(dms[:, :, idx_h[:, None], idx_h], order='C')
-            for ao_h_etc, p0, p1 in mydf.aoR_loop(grids_dense, kpts, deriv):
-                ao_h, mask = ao_h_etc[0], ao_h_etc[2]
-                for k in range(nkpts):
-                    for i in range(nset):
+            density = cp.zeros((n_channels, density_slices, n_grid_points), dtype=cp.complex128)
+            ao_indices_in_dense = grids_dense.ao_idx
+            density_matrix_in_dense_region = cp.asarray(dms[:, :, ao_indices_in_dense[:, None], ao_indices_in_dense],
+                                                        order='C')
+            for ao_on_sliced_grid_in_dense, grid_begin, grid_end in mydf.aoR_loop(grids_dense, kpts, deriv):
+                ao_values, mask = ao_on_sliced_grid_in_dense[0], ao_on_sliced_grid_in_dense[2]
+                for k in range(n_k_points):
+                    for i in range(n_channels):
                         if xctype == 'LDA':
-                            ao_dm = cp.dot(ao_h[k], dms_hh[i, k])
-                            rho_sub = cp.einsum('xi,xi->x', ao_dm, ao_h[k].conj())
+                            ao_dot_dm = cp.dot(ao_values[k], density_matrix_in_dense_region[i, k])
+                            density_subblock = cp.einsum('xi,xi->x', ao_dot_dm, ao_values[k].conj())
                         else:
-                            rho_sub = numint.eval_rho(h_cell, ao_h[k], dms_hh[i, k],
-                                                      mask, xctype, hermi)
-                        rho[i, :, p0:p1] += rho_sub
-                ao_h = ao_h_etc = ao_dm = None
-            if ignore_imag:
-                rho = rho.real
+                            density_subblock = numint.eval_rho(subcell_in_dense_region, ao_values[k],
+                                                               density_matrix_in_dense_region[i, k],
+                                                               mask, xctype, hermi)
+                        density[i, :, grid_begin:grid_end] += density_subblock
+                ao_values = ao_on_sliced_grid_in_dense = ao_dot_dm = None
+            if hermi:
+                density = density.real
         else:
-            idx_h = grids_dense.ao_idx
-            idx_l = grids_sparse.ao_idx
-            idx_t = cp.append(idx_h, idx_l)
-            dms_ht = cp.asarray(dms[:, :, idx_h[:, None], idx_t], order='C')
-            dms_lh = cp.asarray(dms[:, :, idx_l[:, None], idx_h], order='C')
+            ao_indices_in_dense = grids_dense.ao_idx
+            ao_indices_in_sparse = grids_sparse.ao_idx
+            concatenated_ao_indices = cp.append(ao_indices_in_dense, ao_indices_in_sparse)
 
-            l_cell = grids_sparse.cell
-            h_pcell, h_coeff = h_cell.decontract_basis(to_cart=True, aggregate=True)
-            l_pcell, l_coeff = l_cell.decontract_basis(to_cart=True, aggregate=True)
-            t_cell = h_pcell + l_pcell
-            t_coeff = scipy.linalg.block_diag(h_coeff, l_coeff)
+            density_matrix_block_from_dense_rows = cp.asarray(
+                dms[:, :, ao_indices_in_dense[:, None], concatenated_ao_indices], order='C')
+            density_matrix_block_from_sparse_rows = cp.asarray(
+                dms[:, :, ao_indices_in_sparse[:, None], ao_indices_in_dense], order='C')
 
-            nshells_h = multigrid._pgto_shells(h_cell)
-            nshells_t = multigrid._pgto_shells(t_cell)
+            # guessing density matrix that have both AOs from sparse region is neglected
+
+            subcell_in_sparse_region = grids_sparse.cell
+            equivalent_cell_in_dense, primitive_coeff_in_dense = subcell_in_dense_region.decontract_basis(to_cart=True,
+                                                                                                          aggregate=True)
+            equivalent_cell_in_sparse, primitive_coeff_in_sparse = subcell_in_sparse_region.decontract_basis(
+                to_cart=True, aggregate=True)
+            concatenated_cell = equivalent_cell_in_dense + equivalent_cell_in_sparse
+            concatenated_coeff = scipy.linalg.block_diag(primitive_coeff_in_dense, primitive_coeff_in_sparse)
+
+            n_primitive_gtos_in_dense = multigrid._pgto_shells(subcell_in_dense_region)
+            n_primitive_gtos_in_two_regions = multigrid._pgto_shells(concatenated_cell)
 
             if deriv == 0:
-                if hermi == 1:
-                    naol, naoh = dms_lh.shape[2:]
-                    dms_ht[:, :, :, naoh:] += dms_lh.transpose(0, 1, 3, 2)
-                    pgto_dms = cp.einsum('nkij,pi,qj->nkpq', dms_ht, h_coeff, t_coeff)
-                    shls_slice = (0, nshells_h, 0, nshells_t)
+                if hermi:
+                    n_ao_in_sparse, n_ao_in_dense = density_matrix_block_from_sparse_rows.shape[2:]
+                    density_matrix_block_from_dense_rows[:, :, :,
+                    n_ao_in_dense:] += density_matrix_block_from_sparse_rows.transpose(0, 1, 3, 2)
+                    coeff_sandwiched_density_matrix = cp.einsum('nkij,pi,qj->nkpq',
+                                                                density_matrix_block_from_dense_rows,
+                                                                primitive_coeff_in_dense, concatenated_coeff)
+                    shells_slice = (0, n_primitive_gtos_in_dense, 0, n_primitive_gtos_in_two_regions)
                     #:rho = eval_rho(t_cell, pgto_dms, shls_slice, 0, 'LDA', kpts,
                     #:               offset=None, submesh=None, ignore_imag=True)
-                    rho = _eval_rho_bra(t_cell, pgto_dms, shls_slice, 0,
-                                        'LDA', kpts, grids_dense, True, log)
+                    density = _eval_rho_bra(concatenated_cell, coeff_sandwiched_density_matrix, shells_slice, 0,
+                                            'LDA', kpts, grids_dense, True, log)
                 else:
                     raise NotImplementedError
 
             elif deriv == 1:
                 raise NotImplementedError
 
-        weight = 1. / nkpts * cell.vol / ngrids
-        rho_freq = tools.fft(rho.reshape(nset * rho_slices, -1), mesh)
-        rho_freq *= weight
-        gx = cp.fft.fftfreq(mesh[0], 1. / mesh[0]).astype(cp.int32)
-        gy = cp.fft.fftfreq(mesh[1], 1. / mesh[1]).astype(cp.int32)
-        gz = cp.fft.fftfreq(mesh[2], 1. / mesh[2]).astype(cp.int32)
+        weight_per_grid_point = 1. / n_k_points * cell.vol / n_grid_points
+        density_on_g_mesh = tools.fft(density.reshape(n_channels * density_slices, -1), mesh)
+        density_on_g_mesh *= weight_per_grid_point
+        fft_grids = map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh)
         #:rhoG[:,gx[:,None,None],gy[:,None],gz] += rho_freq.reshape((-1,)+mesh)
 
-        reshaped_rho_freq = rho_freq.reshape((-1,) + mesh)
+        reshaped_density_on_g_mesh = density_on_g_mesh.reshape((-1,) + mesh)
 
-        rhoG[cp.ix_(cp.arange(nset * rho_slices), gx, gy, gz)] += reshaped_rho_freq
+        density_on_g_mesh[cp.ix_(cp.arange(n_channels * density_slices), *fft_grids)] += reshaped_density_on_g_mesh
 
-    rhoG = rhoG.reshape(nset, rho_slices, -1)
+    density_on_g_mesh = density_on_g_mesh.reshape(n_channels, density_slices, -1)
 
     if gga_high_order:
-        Gv = cell.get_Gv(mydf.mesh)
-        rhoG1 = cp.einsum('np,px->nxp', 1j * rhoG[:, 0], Gv)
-        rhoG = cp.concatenate([rhoG, rhoG1], axis=1)
-    return rhoG
+        g_vectors = cell.get_Gv(mydf.mesh)
+        vector_density_on_g_mesh = cp.einsum('np,px->nxp', 1j * density_on_g_mesh[:, 0], g_vectors)
+        density_on_g_mesh = cp.concatenate([density_on_g_mesh, vector_density_on_g_mesh], axis=1)
+    return density_on_g_mesh
 
 
-def _get_j_pass2(mydf, vG, hermi=1, kpts=np.zeros((1, 3)), verbose=None):
+def convert_veff_on_g_mesh_to_matrix(mydf, veff_on_g_mesh, hermi=1, kpts=np.zeros((1, 3)), verbose=None):
     log = logger.new_logger(mydf, verbose)
     cell = mydf.cell
     nkpts = len(kpts)
     nao = cell.nao_nr()
-    nx, ny, nz = mydf.mesh
-    vG = vG.reshape(-1, nx, ny, nz)
-    nset = vG.shape[0]
+    veff_on_g_mesh = veff_on_g_mesh.reshape(-1, *mydf.mesh)
+    nset = veff_on_g_mesh.shape[0]
 
     tasks = getattr(mydf, 'tasks', None)
     if tasks is None:
@@ -526,74 +532,74 @@ def _get_j_pass2(mydf, vG, hermi=1, kpts=np.zeros((1, 3)), verbose=None):
         ngrids = cp.prod(mesh)
         log.debug('mesh %s', mesh)
 
-        gx = np.fft.fftfreq(mesh[0], 1. / mesh[0]).astype(np.int32)
-        gy = np.fft.fftfreq(mesh[1], 1. / mesh[1]).astype(np.int32)
-        gz = np.fft.fftfreq(mesh[2], 1. / mesh[2]).astype(np.int32)
+        fft_grids = map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh)
         #:sub_vG = vG[:,gx[:,None,None],gy[:,None],gz].reshape(nset,ngrids)
-        sub_vG = vG[cp.ix_(cp.arange(vG.shape[0]), gx, gy, gz)].reshape(nset, ngrids)
+        reordered_veff_on_g_mesh = veff_on_g_mesh[cp.ix_(cp.arange(veff_on_g_mesh.shape[0]), *fft_grids)].reshape(nset,
+                                                                                                                  ngrids)
 
-        v_rs = tools.ifft(sub_vG, mesh).reshape(nset, ngrids)
-        vR = cp.asarray(v_rs.real, order='C')
-        vI = cp.asarray(v_rs.imag, order='C')
-        ignore_vG_imag = hermi == 1 or abs(vI.sum()) < multigrid.IMAG_TOL
+        reordered_veff_on_real_mesh = tools.ifft(reordered_veff_on_g_mesh, mesh).reshape(nset, ngrids)
+        veff_real_part = cp.asarray(reordered_veff_on_real_mesh.real, order='C')
+        veff_imag_part = cp.asarray(reordered_veff_on_real_mesh.imag, order='C')
+        ignore_vG_imag = hermi == 1 or abs(veff_imag_part.sum()) < multigrid.IMAG_TOL
         if ignore_vG_imag:
-            v_rs = vR
+            reordered_veff_on_real_mesh = veff_real_part
         elif vj_kpts.dtype == cp.double:
             # ensure result complex array if tddft amplitudes are complex while
             # at gamma point
             vj_kpts = vj_kpts.astype(cp.complex128)
 
-        idx_h = grids_dense.ao_idx
+        ao_index_in_dense = grids_dense.ao_idx
         if grids_sparse is None:
-            for ao_h_etc, p0, p1 in mydf.aoR_loop(grids_dense, kpts):
-                ao_h = ao_h_etc[0]
+            # ao_on_sliced_grid_in_dense, grid_begin, grid_end
+            for ao_on_sliced_grid_in_dense, p0, p1 in mydf.aoR_loop(grids_dense, kpts):
+                ao_values = ao_on_sliced_grid_in_dense[0]
                 for k in range(nkpts):
                     for i in range(nset):
-                        aow = numint._scale_ao(ao_h[k], v_rs[i, p0:p1])
-                        vj_sub = cp.dot(ao_h[k].conj().T, aow)
-                        vj_kpts[i, k, idx_h[:, None], idx_h] += vj_sub
-                ao_h = ao_h_etc = None
+                        veff_scaled_ao = numint._scale_ao(ao_values[k], reordered_veff_on_real_mesh[i, p0:p1])
+                        veff_sub_block = cp.dot(ao_values[k].conj().T, veff_scaled_ao)
+                        vj_kpts[i, k, ao_index_in_dense[:, None], ao_index_in_dense] += veff_sub_block
+                ao_values = ao_on_sliced_grid_in_dense = None
         else:
-            idx_h = grids_dense.ao_idx
-            idx_l = grids_sparse.ao_idx
+            ao_index_in_dense = grids_dense.ao_idx
+            ao_index_in_sparse = grids_sparse.ao_idx
             # idx_t = numpy.append(idx_h, idx_l)
-            naoh = len(idx_h)
+            n_ao_in_sparse = len(ao_index_in_dense)
 
-            h_cell = grids_dense.cell
-            l_cell = grids_sparse.cell
-            h_pcell, h_coeff = h_cell.decontract_basis(to_cart=True, aggregate=True)
-            l_pcell, l_coeff = l_cell.decontract_basis(to_cart=True, aggregate=True)
-            t_cell = h_pcell + l_pcell
-            t_coeff = scipy.linalg.block_diag(h_coeff, l_coeff)
+            subcell_in_dense = grids_dense.cell
+            subcell_in_sparse = grids_sparse.cell
+            decontracted_subcell_in_dense, decontracted_coeff_in_dense = subcell_in_dense.decontract_basis(
+                to_cart=True, aggregate=True)
+            decontracted_subcell_in_sparse, decontracted_coeff_in_sparse = subcell_in_sparse.decontract_basis(
+                to_cart=True, aggregate=True)
+            concatenated_cell = decontracted_subcell_in_dense + decontracted_subcell_in_sparse
+            concatenated_coeff = scipy.linalg.block_diag(decontracted_coeff_in_dense, decontracted_coeff_in_sparse)
 
-            nshells_h = multigrid._pgto_shells(h_cell)
-            nshells_t = multigrid._pgto_shells(t_cell)
-            shls_slice = (0, nshells_h, 0, nshells_t)
-            vp = eval_mat(t_cell, vR, shls_slice, 1, 0, 'LDA', kpts)
+            n_shells_in_dense = multigrid._pgto_shells(subcell_in_dense)
+            n_shells_in_total = multigrid._pgto_shells(concatenated_cell)
+            shells_indices = (0, n_shells_in_dense, 0, n_shells_in_total)
+            veff_slice = eval_mat(concatenated_cell, veff_real_part, shells_indices, 1, 0, 'LDA', kpts)
             # Imaginary part may contribute
             if not ignore_vG_imag:
-                vpI = eval_mat(t_cell, vI, shls_slice, 1, 0, 'LDA', kpts)
-                vp = cp.asarray(vp) + cp.asarray(vpI) * 1j
-                vpI = None
+                veff_slice += eval_mat(concatenated_cell, veff_imag_part, shells_indices, 1, 0, 'LDA', kpts) * 1j
 
-            vp = cp.einsum('nkpq,pi,qj->nkij', cp.asarray(vp), cp.asarray(h_coeff), cp.asarray(t_coeff))
+            veff_slice = cp.einsum('nkpq,pi,qj->nkij', cp.asarray(veff_slice),
+                                   cp.asarray(decontracted_coeff_in_dense), cp.asarray(concatenated_coeff))
 
-            vj_kpts[:, :, idx_h[:, None], idx_h] += vp[:, :, :, :naoh]
-            vj_kpts[:, :, idx_h[:, None], idx_l] += vp[:, :, :, naoh:]
+            vj_kpts[:, :, ao_index_in_dense[:, None], ao_index_in_dense] += veff_slice[:, :, :, :n_ao_in_sparse]
+            vj_kpts[:, :, ao_index_in_dense[:, None], ao_index_in_sparse] += veff_slice[:, :, :, n_ao_in_sparse:]
 
             if hermi == 1:
-                vj_kpts[:, :, idx_l[:, None], idx_h] += \
-                    vp[:, :, :, naoh:].transpose(0, 1, 3, 2).conj()
+                vj_kpts[:, :, ao_index_in_sparse[:, None], ao_index_in_dense] += \
+                    veff_slice[:, :, :, n_ao_in_sparse:].transpose(0, 1, 3, 2).conj()
             else:
-                shls_slice = (nshells_h, nshells_t, 0, nshells_h)
-                vp = eval_mat(t_cell, vR, shls_slice, 1, 0, 'LDA', kpts)
+                shells_indices = (n_shells_in_dense, n_shells_in_total, 0, n_shells_in_dense)
+                veff_slice = eval_mat(concatenated_cell, veff_real_part, shells_indices, 1, 0, 'LDA', kpts)
                 # Imaginary part may contribute
                 if not ignore_vG_imag:
-                    vpI = eval_mat(t_cell, vI, shls_slice, 1, 0, 'LDA', kpts)
-                    vp = cp.asarray(vp) + cp.asarray(vpI) * 1j
-                    vpI = None
-                vp = cp.einsum('nkpq,pi,qj->nkij', vp, l_coeff, h_coeff)
-                vj_kpts[:, :, idx_l[:, None], idx_h] += vp
+                    veff_slice += eval_mat(concatenated_cell, veff_imag_part, shells_indices, 1, 0, 'LDA', kpts) * 1j
+                veff_slice = cp.einsum('nkpq,pi,qj->nkij', veff_slice, decontracted_coeff_in_sparse,
+                                       decontracted_coeff_in_dense)
+                vj_kpts[:, :, ao_index_in_sparse[:, None], ao_index_in_dense] += veff_slice
 
     return vj_kpts
 
@@ -628,72 +634,72 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     nset, nkpts, nao = dms.shape[:3]
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
 
-    ni = mydf._numint
-    xctype = ni._xc_type(xc_code)
+    numerical_integrator = mydf._numint
+    xctype = numerical_integrator._xc_type(xc_code)
 
     if xctype == 'LDA':
-        deriv = 0
+        derivative_order = 0
     else:
         raise NotImplementedError
 
-    rhoG = _eval_rhoG(mydf, dm_kpts, hermi, kpts, deriv)
+    density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
 
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
-    coulG = tools.get_coulG(cell, mesh=mesh)
-    vG = cp.einsum('ng,g->ng', rhoG[:, 0], coulG)
-    ecoul = .5 * cp.einsum('ng,ng->n', rhoG[:, 0].real, vG.real)
-    ecoul += .5 * cp.einsum('ng,ng->n', rhoG[:, 0].imag, vG.imag)
-    ecoul /= cell.vol
-    log.debug('Multigrid Coulomb energy %s', ecoul)
+    coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
+    coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
+    coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)
+    coulomb_energy += .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].imag, coulomb_on_g_mesh.imag)
+    coulomb_energy /= cell.vol
+    log.debug('Multigrid Coulomb energy %s', coulomb_energy)
 
     weight = cell.vol / ngrids
     # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
     # computing rhoR with IFFT, the weight factor is not needed.
-    rhoR = tools.ifft(rhoG.reshape(-1, ngrids), mesh).real * (1. / weight)
-    rhoR = rhoR.reshape(nset, -1, ngrids)
-    nelec = rhoR[:, 0].sum(axis=1) * weight
+    density_in_real_space = tools.ifft(density_on_G_mesh.reshape(-1, ngrids), mesh).real * (1. / weight)
+    density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
+    n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight
 
-    wv_freq = []
-    excsum = cp.zeros(nset)
+    weighted_exchange_on_g_mesh = cp.ndarray((nset, *density_in_real_space.shape))
+    xc_energy_sum = cp.zeros(nset)
     for i in range(nset):
         if xctype == 'LDA':
-            exc, vxc = ni.eval_xc_eff(xc_code, rhoR[i, 0], deriv=1, xctype=xctype)[:2]
+            xc_energy, exchange = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i, 0], deriv=1,
+                                                                   xctype=xctype)[:2]
         else:
-            exc, vxc = ni.eval_xc_eff(xc_code, rhoR[i], deriv=1, xctype=xctype)[:2]
+            xc_energy, exchange = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i], deriv=1,
+                                                                   xctype=xctype)[:2]
 
-        excsum[i] += (rhoR[i, 0] * exc.flatten()).sum() * weight
-        wv = weight * vxc
-        wv_freq.append(tools.fft(wv, mesh))
-    wv_freq = cp.asarray(wv_freq).reshape(nset, -1, *mesh)
-    rhoR = rhoG = None
+        xc_energy_sum[i] += (density_in_real_space[i, 0] * xc_energy.flatten()).sum() * weight
+        weighted_exchange_on_g_mesh[i] = tools.fft(weight * exchange, mesh)
+    density_in_real_space = density_on_G_mesh = None
 
     if nset == 1:
-        ecoul = ecoul[0]
-        nelec = nelec[0]
-        excsum = excsum[0]
-    log.debug('Multigrid exc %s  nelec %s', excsum, nelec)
+        coulomb_energy = coulomb_energy[0]
+        n_electrons = n_electrons[0]
+        xc_energy_sum = xc_energy_sum[0]
+    log.debug('Multigrid exc %s  nelec %s', xc_energy_sum, n_electrons)
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     if xctype == 'LDA':
         if with_j:
-            wv_freq[:, 0] += vG.reshape(nset, *mesh)
-        veff = _get_j_pass2(mydf, wv_freq, hermi, kpts_band, verbose=log)
+            weighted_exchange_on_g_mesh[:, 0] += coulomb_on_g_mesh.reshape(nset, *mesh)
+        exchange = convert_veff_on_g_mesh_to_matrix(mydf, weighted_exchange_on_g_mesh, hermi, kpts_band, verbose=log)
     elif xctype == 'GGA':
         raise NotImplementedError
 
     if return_j:
-        vj = _get_j_pass2(mydf, vG, hermi, kpts_band, verbose=log)
-        vj = fft_jk._format_jks(veff, dm_kpts, input_band, kpts)
+        vj = convert_veff_on_g_mesh_to_matrix(mydf, coulomb_on_g_mesh, hermi, kpts_band, verbose=log)
+        vj = fft_jk._format_jks(exchange, dm_kpts, input_band, kpts)
     else:
         vj = None
 
     shape = list(dm_kpts.shape)
     if len(shape) == 3 and shape[0] != kpts_band.shape[0]:
         shape[0] = kpts_band.shape[0]
-    veff = veff.reshape(shape)
-    veff = cupy_helper.tag_array(veff, ecoul=ecoul, exc=excsum, vj=vj, vk=None)
-    return nelec, excsum, veff
+    exchange = exchange.reshape(shape)
+    exchange = cupy_helper.tag_array(exchange, ecoul=coulomb_energy, exc=xc_energy_sum, vj=vj, vk=None)
+    return n_electrons, xc_energy_sum, exchange
 
 
 class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
