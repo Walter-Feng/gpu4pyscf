@@ -18,37 +18,35 @@ from pyscf.pbc.dft import multigrid as cpu_multi_grid
 
 cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
 
-with cupy.cuda.Device(3):
+diamond_cell = bulk('C', 'diamond', a=3.5668)
 
-    diamond_cell = bulk('C', 'diamond', a=3.5668)
+lattice_vectors = diamond_cell.cell
+cell = gto.M(
+    h=np.array(lattice_vectors),
+    atom=ase_atoms_to_pyscf(bulk('C', 'diamond', a=3.5668)),
+    basis='gth-dzvp-molopt-sr',
+    pseudo='gth-pade',
+    verbose=6,
+    unit='aa',
+    ke_cutoff=200
+)
+cell.exp_to_discard = 0.1
 
-    lattice_vectors = diamond_cell.cell
-    cell = gto.M(
-        h=np.array(lattice_vectors),
-        atom=ase_atoms_to_pyscf(bulk('C', 'diamond', a=3.5668)),
-        basis='gth-dzvp-molopt-sr',
-        pseudo='gth-pade',
-        verbose=6,
-        unit='aa',
-        ke_cutoff=200
-    )
-    cell.exp_to_discard = 0.1
+cell = tools.super_cell(cell, [5, 1, 1])
 
-    cell = tools.super_cell(cell, [1, 1, 1])
-
-    mf=pbcdft.RKS(cell)
-    #mf.xc = "LDA, VWN"
-    mf.xc = "LDA"
-    mf.max_cycle = 1
-    mf = multi_grid.fftdf(mf)
-    mf.with_df.ngrids = 4 # number of sets of grid points
-    mf.kernel()
+mf=pbcdft.RKS(cell)
+#mf.xc = "LDA, VWN"
+mf.xc = "LDA"
+mf.max_cycle = 1
+mf = multi_grid.fftdf(mf)
+mf.with_df.ngrids = 4 # number of sets of grid points
+mf.kernel()
 
 
-    mf=cpu_pbcdft.RKS(cell)
-    #mf.xc = "LDA, VWN"
-    mf.xc = "LDA"
-    mf.max_cycle = 1
-    mf = cpu_multi_grid.multigrid.multigrid_fftdf(mf)
-    mf.with_df.ngrids = 4 # number of sets of grid points
-    mf.kernel()
+# mf=cpu_pbcdft.RKS(cell)
+# #mf.xc = "LDA, VWN"
+# mf.xc = "LDA"
+# mf.max_cycle = 1
+# mf = cpu_multi_grid.multigrid.multigrid_fftdf(mf)
+# mf.with_df.ngrids = 4 # number of sets of grid points
+# mf.kernel()

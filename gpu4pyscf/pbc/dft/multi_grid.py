@@ -179,13 +179,13 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     dm = cp.asarray(dm, order='C')
     assert (dm.shape[-2:] == (naoi, naoj))
 
-    vectors_to_nearest_images = gto.eval_gto.get_lattice_Ls(cell)
+    vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(cell)
 
     if cell.dimension == 0 or kpts is None or multigrid.gamma_point(kpts):
-        n_k_points, n_images = 1, vectors_to_nearest_images.shape[0]
+        n_k_points, n_images = 1, vectors_to_neighboring_images.shape[0]
         dm = dm.reshape(-1, 1, naoi, naoj).transpose(0, 1, 3, 2)
     else:
-        phase_diff_among_images = np.exp(1j * kpts.reshape(-1, 3).dot(vectors_to_nearest_images.T))
+        phase_diff_among_images = np.exp(1j * kpts.reshape(-1, 3).dot(vectors_to_neighboring_images.T))
         n_k_points, n_images = phase_diff_among_images.shape
         dm = dm.reshape(-1, n_k_points, naoi, naoj).transpose(0, 1, 3, 2)
     n_dm = dm.shape[0]
@@ -219,6 +219,17 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     driver = libdft.NUMINT_rho_drv
 
     def driver_wrapper(density_shape, dm, hermi):
+        print("n_images: ", n_images)
+        print("atoms: ", len(atm))
+        print("basis: ", len(bas))
+        print("shell slices: ", shells_slice)
+        print("inside shell slices: ", (i0, i1, j0, j1))
+        print("density shape: ", density_shape)
+        print("density matrix shape", dm.shape)
+        print("offset: ", offset)
+        print("lattice_sum_mesh: ", lattice_sum_mesh)
+        print("global mesh: ", mesh)
+        assert (1 == 2)
         density = np.zeros(density_shape, order='C')
         driver(getattr(libdft, kernel_name),
                density.ctypes.data_as(ctypes.c_void_p),
@@ -229,7 +240,7 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                ctypes.c_double(precision_in_log),
                ctypes.c_int(cell.dimension),
                ctypes.c_int(n_images),
-               vectors_to_nearest_images.ctypes.data_as(ctypes.c_void_p),
+               vectors_to_neighboring_images.ctypes.data_as(ctypes.c_void_p),
                lattice_vector.ctypes.data_as(ctypes.c_void_p),
                reciprocal_lattice_vector.ctypes.data_as(ctypes.c_void_p),
                (ctypes.c_int * 3)(*offset), (ctypes.c_int * 3)(*lattice_sum_mesh),
@@ -313,7 +324,7 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
 
 
 def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_imag, log):
-    lattice_vectors = cp.asarray(cell.lattice_vectors())
+    lattice_vectors = np.asarray(cell.lattice_vectors())
     max_element = lattice_vectors.max()
     mesh = np.asarray(grids.mesh)
     real_space_cutoff = grids.cell.rcut
@@ -332,7 +343,7 @@ def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_i
     else:
         density = cp.zeros((nset, rho_slices) + tuple(mesh), dtype=cp.complex128)
 
-    b = cp.linalg.inv(lattice_vectors.T)
+    b = np.linalg.inv(lattice_vectors.T)
     row_shell_begin, row_shell_end, col_shell_begin, col_shell_end = shell_ranges
     n_col_shells = col_shell_end - col_shell_begin
     copied_cell = cell.copy(deep=False)
@@ -346,7 +357,7 @@ def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_i
         i0, i1 = i1, i1 + sum((l + 1) * (l + 2) // 2)
         density_matrix_subblock = dms[:, :, i0:i1]
 
-        atom_position = cp.asarray(cell.atom_coord(atom))
+        atom_position = cell.atom_coord(atom)
         lattice_sum_begin = b.dot(atom_position - real_space_cutoff)
         lattice_sum_end = b.dot(atom_position + real_space_cutoff)
 
@@ -383,7 +394,7 @@ def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_i
         copied_cell._bas = np.vstack(rest_bas + [cell._bas[col_shell_begin:col_shell_end]])
         n_row_shells = sum(len(x) for x in rest_bas)
         sub_slice = (0, n_row_shells, n_row_shells, n_row_shells + n_col_shells)
-        density_matrix_subblock = np.concatenate(rest_dms, axis=2)
+        density_matrix_subblock = cp.concatenate(rest_dms, axis=2)
         # Update density matrix in place
         evaluate_density(copied_cell, density_matrix_subblock, sub_slice, hermi, xc_type, kpts,
                          mesh, ignore_imag=ignore_imag, out=density)
@@ -419,7 +430,13 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
 
     nx, ny, nz = mydf.mesh
     density_on_g_mesh = cp.zeros((n_channels * density_slices, nx, ny, nz), dtype=cp.complex128)
+    skip_count = 0
+    skip_threshold = 3
+    print(len(tasks))
     for grids_dense, grids_sparse in tasks:
+        if skip_count < skip_threshold:
+            skip_count += 1
+            continue
         subcell_in_dense_region = grids_dense.cell
         mesh = tuple(grids_dense.mesh)
         n_grid_points = np.prod(mesh)
@@ -490,14 +507,14 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
                 raise NotImplementedError
 
         weight_per_grid_point = 1. / n_k_points * cell.vol / n_grid_points
-        density_on_g_mesh = tools.fft(density.reshape(n_channels * density_slices, -1), mesh)
-        density_on_g_mesh *= weight_per_grid_point
+        density_contribution_on_g_mesh = tools.fft(density.reshape(n_channels * density_slices, -1), mesh)
+        density_contribution_on_g_mesh *= weight_per_grid_point
         fft_grids = map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh)
         #:rhoG[:,gx[:,None,None],gy[:,None],gz] += rho_freq.reshape((-1,)+mesh)
 
-        reshaped_density_on_g_mesh = density_on_g_mesh.reshape((-1,) + mesh)
-
-        density_on_g_mesh[cp.ix_(cp.arange(n_channels * density_slices), *fft_grids)] += reshaped_density_on_g_mesh
+        density_on_g_mesh[
+            cp.ix_(cp.arange(n_channels * density_slices), *fft_grids)] += density_contribution_on_g_mesh.reshape(
+            (-1,) + mesh)
 
     density_on_g_mesh = density_on_g_mesh.reshape(n_channels, density_slices, -1)
 
@@ -527,7 +544,9 @@ def convert_veff_on_g_mesh_to_matrix(mydf, veff_on_g_mesh, hermi=1, kpts=np.zero
     else:
         vj_kpts = cp.zeros((nset, nkpts, nao, nao), dtype=cp.complex128)
 
+    skip = True
     for grids_dense, grids_sparse in tasks:
+
         mesh = grids_dense.mesh
         ngrids = cp.prod(mesh)
         log.debug('mesh %s', mesh)
