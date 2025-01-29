@@ -19,6 +19,7 @@ import scipy
 import ctypes
 
 libgdft = cupy_helper.load_library('libgdft')
+libgpbc = cupy_helper.load_library('libgpbc')
 
 
 def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
@@ -178,6 +179,7 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     naoj = ao_loc[j1] - ao_loc[j0]
     dm = cp.asarray(dm, order='C')
     assert (dm.shape[-2:] == (naoi, naoj))
+    print("nao pair: ", (naoi, naoj))
 
     vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(cell)
 
@@ -218,18 +220,9 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     kernel_name = 'NUMINTrho_' + xc_type.lower() + lattice_type
     driver = libdft.NUMINT_rho_drv
 
+    new_driver = libgpbc.evaluate_density_driver
+
     def driver_wrapper(density_shape, dm, hermi):
-        print("n_images: ", n_images)
-        print("atoms: ", len(atm))
-        print("basis: ", len(bas))
-        print("shell slices: ", shells_slice)
-        print("inside shell slices: ", (i0, i1, j0, j1))
-        print("density shape: ", density_shape)
-        print("density matrix shape", dm.shape)
-        print("offset: ", offset)
-        print("lattice_sum_mesh: ", lattice_sum_mesh)
-        print("global mesh: ", mesh)
-        assert (1 == 2)
         density = np.zeros(density_shape, order='C')
         driver(getattr(libdft, kernel_name),
                density.ctypes.data_as(ctypes.c_void_p),
@@ -249,6 +242,37 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(bas)),
                env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(env)))
         return cp.asarray(density)
+
+    atm_on_gpu = cp.asarray(atm)
+    bas_on_gpu = cp.asarray(bas)
+    env_on_gpu = cp.asarray(env)
+    ao_loc_on_gpu = cp.asarray(ao_loc)
+    import sys
+    cp.set_printoptions(threshold=sys.maxsize)
+    vectors_to_neighboring_images_on_gpu = cp.asarray(vectors_to_neighboring_images)
+    lattice_vector_on_gpu = cp.asarray(lattice_vector)
+    shell_slice_on_gpu = cp.asarray([i0, i1, j0, j1])
+    print("shell_slice_on_gpu", shell_slice_on_gpu)
+    print("lattice_vector_on_gpu", lattice_vector_on_gpu)
+    print("offset: ", offset)
+    print("hermi: ", hermi)
+
+    def new_driver_wrapper(density, dm, hermi):
+        assert isinstance(density, cp.ndarray)
+        new_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
+                   ctypes.cast(dm.data.ptr, ctypes.c_void_p),
+                   ctypes.c_int(hermi),
+                   (ctypes.c_int * 4)(*[i0, i1, j0, j1]),
+                   ctypes.cast(ao_loc_on_gpu.data.ptr, ctypes.c_void_p),
+                   ctypes.c_int(0), ctypes.c_int(0),
+                   ctypes.c_int(n_images),
+                   ctypes.cast(vectors_to_neighboring_images_on_gpu.data.ptr, ctypes.c_void_p),
+                   ctypes.cast(lattice_vector_on_gpu.data.ptr, ctypes.c_void_p),
+                   (ctypes.c_int * 3)(*offset),
+                   (ctypes.c_int * 3)(*lattice_sum_mesh),
+                   ctypes.cast(atm_on_gpu.data.ptr, ctypes.c_void_p),
+                   ctypes.cast(bas_on_gpu.data.ptr, ctypes.c_void_p),
+                   ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
 
     rho = []
     for i, dm_i in enumerate(dm):
@@ -294,6 +318,8 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                     has_imag = False
             dm_L = None
 
+        print("has_imag: ", has_imag)
+
         if has_imag:
             # complex density cannot be updated inplace directly by
             # function NUMINT_rho_drv
@@ -310,11 +336,25 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
             if out is None:
                 # rho_i needs to be initialized to 0 because rho_i is updated
                 # inplace in function NUMINT_rho_drv
-                rho_i = driver_wrapper(shape, dmR, hermi)
+                # rho_i = driver_wrapper(shape, dmR, hermi)
+                rho_i = cp.zeros(shape)
             else:
                 assert out[i].dtype == cp.double
                 rho_i = out[i].reshape(shape)
                 rho_i += driver_wrapper(rho_i.shape, dmR, hermi)
+            print("cpu max: ", np.max(np.abs(rho_i)))
+            print("arrived here")
+
+            copy = cp.zeros(shape)
+            new_driver_wrapper(copy, dmR, hermi)
+            print("gpu max: ", cp.max(cp.abs(copy)))
+            print("diff: ", cp.max(cp.abs(cp.asarray(rho_i) - copy)))
+            rho_i = rho_i.reshape(*lattice_sum_mesh)
+            copy = copy.reshape(*lattice_sum_mesh)
+            # print("cpu: ", rho_i[0])
+            print("ratio: ", copy[0] / rho_i[0])
+            assert 0
+
         dmR = dmI = None
         rho.append(rho_i)
 
@@ -432,11 +472,11 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
     density_on_g_mesh = cp.zeros((n_channels * density_slices, nx, ny, nz), dtype=cp.complex128)
     skip_count = 0
     skip_threshold = 3
-    print(len(tasks))
+    # print(len(tasks))
     for grids_dense, grids_sparse in tasks:
-        if skip_count < skip_threshold:
-            skip_count += 1
-            continue
+        # if skip_count < skip_threshold:
+        #     skip_count += 1
+        #     continue
         subcell_in_dense_region = grids_dense.cell
         mesh = tuple(grids_dense.mesh)
         n_grid_points = np.prod(mesh)
@@ -525,13 +565,13 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
     return density_on_g_mesh
 
 
-def convert_veff_on_g_mesh_to_matrix(mydf, veff_on_g_mesh, hermi=1, kpts=np.zeros((1, 3)), verbose=None):
+def convert_veff_on_g_mesh_to_matrix(mydf, xc_for_fock_on_g_mesh, hermi=1, kpts=np.zeros((1, 3)), verbose=None):
     log = logger.new_logger(mydf, verbose)
     cell = mydf.cell
     nkpts = len(kpts)
     nao = cell.nao_nr()
-    veff_on_g_mesh = veff_on_g_mesh.reshape(-1, *mydf.mesh)
-    nset = veff_on_g_mesh.shape[0]
+    xc_for_fock_on_g_mesh = xc_for_fock_on_g_mesh.reshape(-1, *mydf.mesh)
+    nset = xc_for_fock_on_g_mesh.shape[0]
 
     tasks = getattr(mydf, 'tasks', None)
     if tasks is None:
@@ -553,10 +593,10 @@ def convert_veff_on_g_mesh_to_matrix(mydf, veff_on_g_mesh, hermi=1, kpts=np.zero
 
         fft_grids = map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh)
         #:sub_vG = vG[:,gx[:,None,None],gy[:,None],gz].reshape(nset,ngrids)
-        reordered_veff_on_g_mesh = veff_on_g_mesh[cp.ix_(cp.arange(veff_on_g_mesh.shape[0]), *fft_grids)].reshape(nset,
-                                                                                                                  ngrids)
+        interpolated_xc_for_fock_on_gmesh = xc_for_fock_on_g_mesh[
+            cp.ix_(cp.arange(xc_for_fock_on_g_mesh.shape[0]), *fft_grids)].reshape(nset, ngrids)
 
-        reordered_veff_on_real_mesh = tools.ifft(reordered_veff_on_g_mesh, mesh).reshape(nset, ngrids)
+        reordered_veff_on_real_mesh = tools.ifft(interpolated_xc_for_fock_on_gmesh, mesh).reshape(nset, ngrids)
         veff_real_part = cp.asarray(reordered_veff_on_real_mesh.real, order='C')
         veff_imag_part = cp.asarray(reordered_veff_on_real_mesh.imag, order='C')
         ignore_vG_imag = hermi == 1 or abs(veff_imag_part.sum()) < multigrid.IMAG_TOL
@@ -679,18 +719,18 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
     n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight
 
-    weighted_exchange_on_g_mesh = cp.ndarray((nset, *density_in_real_space.shape))
+    weighted_xc_for_fock_on_g_mesh = cp.ndarray((nset, *density_in_real_space.shape))
     xc_energy_sum = cp.zeros(nset)
     for i in range(nset):
         if xc_type == 'LDA':
-            xc_energy, exchange = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i, 0], deriv=1,
-                                                                   xc_type=xc_type)[:2]
+            xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i, 0], deriv=1,
+                                                                          xctype=xc_type)[:2]
         else:
-            xc_energy, exchange = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i], deriv=1,
-                                                                   xc_type=xc_type)[:2]
+            xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i], deriv=1,
+                                                                          xctype=xc_type)[:2]
 
-        xc_energy_sum[i] += (density_in_real_space[i, 0] * xc_energy.flatten()).sum() * weight
-        weighted_exchange_on_g_mesh[i] = tools.fft(weight * exchange, mesh)
+        xc_energy_sum[i] += (density_in_real_space[i, 0] * xc_for_energy.flatten()).sum() * weight
+        weighted_xc_for_fock_on_g_mesh[i] = tools.fft(weight * xc_for_fock, mesh)
     density_in_real_space = density_on_G_mesh = None
 
     if nset == 1:
@@ -702,23 +742,24 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     if xc_type == 'LDA':
         if with_j:
-            weighted_exchange_on_g_mesh[:, 0] += coulomb_on_g_mesh.reshape(nset, *mesh)
-        exchange = convert_veff_on_g_mesh_to_matrix(mydf, weighted_exchange_on_g_mesh, hermi, kpts_band, verbose=log)
+            weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh.reshape(nset, *mesh)
+        xc_for_fock = convert_veff_on_g_mesh_to_matrix(mydf, weighted_xc_for_fock_on_g_mesh, hermi, kpts_band,
+                                                       verbose=log)
     elif xc_type == 'GGA':
         raise NotImplementedError
 
     if return_j:
         vj = convert_veff_on_g_mesh_to_matrix(mydf, coulomb_on_g_mesh, hermi, kpts_band, verbose=log)
-        vj = fft_jk._format_jks(exchange, dm_kpts, input_band, kpts)
+        vj = fft_jk._format_jks(xc_for_fock, dm_kpts, input_band, kpts)
     else:
         vj = None
 
     shape = list(dm_kpts.shape)
     if len(shape) == 3 and shape[0] != kpts_band.shape[0]:
         shape[0] = kpts_band.shape[0]
-    exchange = exchange.reshape(shape)
-    exchange = cupy_helper.tag_array(exchange, ecoul=coulomb_energy, exc=xc_energy_sum, vj=vj, vk=None)
-    return n_electrons, xc_energy_sum, exchange
+    xc_for_fock = xc_for_fock.reshape(shape)
+    xc_for_fock = cupy_helper.tag_array(xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=vj, vk=None)
+    return n_electrons, xc_energy_sum, xc_for_fock
 
 
 class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):

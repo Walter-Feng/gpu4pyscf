@@ -13,7 +13,7 @@
 # limitations under the License.
 
 cmake_minimum_required (VERSION 3.19 FATAL_ERROR) # 3.19 is required by cutlass
-project (gpu4pyscf C CXX CUDA Fortran)
+project (gpu4pyscf C CXX CUDA)
 
 set(CMAKE_C_STANDARD "99")
 set(CMAKE_CXX_STANDARD 17)
