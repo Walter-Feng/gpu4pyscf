@@ -5,20 +5,24 @@
 #include <cassert>
 #include <gint/cuda_alloc.cuh>
 
-#define atm(SLOT,I)     atm[ATM_SLOTS * (I) + (SLOT)]
-#define bas(SLOT,I)     bas[BAS_SLOTS * (I) + (SLOT)]
+#define atm(SLOT, I)     atm[ATM_SLOTS * (I) + (SLOT)]
+#define bas(SLOT, I)     bas[BAS_SLOTS * (I) + (SLOT)]
 
 #define EIJCUTOFF       60
 #define PTR_EXPDROP     16
 
+__host__ __device__ double distance_squared(double x, double y, double z) {
+    return x * x + y * y + z * z;
+}
 
 __global__ void evaluate_density_kernel_ss(
-    double *density, const double *density_matrices,
-    const int hermi, const int i_shell_begin, const int i_shell_end, const int j_shell_begin, const int j_shell_end,
-    const int *shell_to_function,
-    const int n_images, const double *vectors_to_neighboring_images, const double *lattice_vector,
-    const int offset_x, const int offset_y, const int offset_z, const int mesh_x, const int mesh_y, const int mesh_z,
-    const int *atm, const int *bas, const double *env) {
+        double *density, const double *density_matrices,
+        const int hermi, const int i_shell_begin, const int i_shell_end, const int j_shell_begin, const int j_shell_end,
+        const int *shell_to_function,
+        const int n_images, const double *vectors_to_neighboring_images, const double *lattice_vector,
+        const int offset_x, const int offset_y, const int offset_z, const int mesh_x, const int mesh_y,
+        const int mesh_z,
+        const int *atm, const int *bas, const double *env) {
     const uint a_index = threadIdx.x + blockDim.x * blockIdx.x + offset_x;
     const uint b_index = threadIdx.y + blockDim.y * blockIdx.y + offset_y;
     const uint c_index = threadIdx.z + blockDim.z * blockIdx.z + offset_z;
@@ -35,17 +39,17 @@ __global__ void evaluate_density_kernel_ss(
         return;
     }
 
-
-    const double position_x = lattice_vector[0] * a_fractional + lattice_vector[1] * b_fractional + lattice_vector[2] *
-                              c_fractional;
-    const double position_y = lattice_vector[3] * a_fractional + lattice_vector[4] * b_fractional + lattice_vector[5] *
-                              c_fractional;
-    const double position_z = lattice_vector[6] * a_fractional + lattice_vector[7] * b_fractional + lattice_vector[8] *
-                              c_fractional;
+    const double position_x = lattice_vector[0] * a_fractional + lattice_vector[3] * b_fractional + lattice_vector[6] *
+                                                                                                    c_fractional;
+    const double position_y = lattice_vector[1] * a_fractional + lattice_vector[4] * b_fractional + lattice_vector[7] *
+                                                                                                    c_fractional;
+    const double position_z = lattice_vector[2] * a_fractional + lattice_vector[5] * b_fractional + lattice_vector[8] *
+                                                                                                    c_fractional;
 
     double density_value = 0;
 
     for (int i_shell = i_shell_begin; i_shell < i_shell_end; i_shell++) {
+
         const double i_exponent = env[bas(PTR_EXP, i_shell)];
         const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
         const double i_x = env[i_coord_offset];
@@ -53,10 +57,9 @@ __global__ void evaluate_density_kernel_ss(
         const double i_z = env[i_coord_offset + 2];
         const double i_coeff = env[bas(PTR_COEFF, i_shell)];
         const int i_function_index = shell_to_function[i_shell] - i_function_begin;
+
         for (int j_shell = j_shell_begin; j_shell < j_shell_end; j_shell++) {
-            // if (hermi == 1 && i_shell > j_shell) {
-            //     continue;
-            // }
+
             const double j_exponent = env[bas(PTR_EXP, j_shell)];
             const int j_coord_offset = atm(PTR_COORD, bas(ATOM_OF, j_shell));
             const double j_x = env[j_coord_offset];
@@ -65,56 +68,73 @@ __global__ void evaluate_density_kernel_ss(
             const double j_coeff = env[bas(PTR_COEFF, j_shell)];
             const int j_function_index = shell_to_function[j_shell] - j_function_begin;
 
-            const double ij_norm_squared = (i_x - j_x) * (i_x - j_x) + (i_y - j_y) * (i_y - j_y) + (i_z - j_z) * (
-                                               i_z - j_z);
             const double ij_exponent = i_exponent + j_exponent;
-            const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * ij_norm_squared;
-            if (ij_exponent_in_prefactor > EIJCUTOFF) {
-                continue;
-            }
-            // CINTcommon_fac_sp unknown
-            const double prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff * 0.282094791773878143 * 0.282094791773878143;
-            if (prefactor < env[PTR_EXPDROP]) {
-                continue;
-            }
-            const double ij_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
-            const double ij_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
-            const double ij_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
-            const double x_diff = position_x - ij_x;
-            const double y_diff = position_y - ij_y;
-            const double z_diff = position_z - ij_z;
 
             for (int i_image = 0; i_image < n_images; i_image++) {
-                const double density_matrix_element = density_matrices[
-                    i_image * density_matrix_stride + j_function_index * n_ao_i + i_function_index];
-                const double image_x = vectors_to_neighboring_images[i_image * 3];
-                const double image_y = vectors_to_neighboring_images[i_image * 3 + 1];
-                const double image_z = vectors_to_neighboring_images[i_image * 3 + 2];
-                const double x = x_diff - image_x;
-                const double y = y_diff - image_y;
-                const double z = z_diff - image_z;
-                const double r_squared = x * x + y * y + z * z;
+                const double i_image_x = vectors_to_neighboring_images[i_image * 3];
+                const double i_image_y = vectors_to_neighboring_images[i_image * 3 + 1];
+                const double i_image_z = vectors_to_neighboring_images[i_image * 3 + 2];
 
-                if (ij_exponent * r_squared > EIJCUTOFF) {
+                const double shifted_i_x = i_x - i_image_x;
+                const double shifted_i_y = i_y - i_image_y;
+                const double shifted_i_z = i_z - i_image_z;
+
+                const double ij_norm_squared = distance_squared(shifted_i_x - j_x,
+                                                                shifted_i_y - j_y,
+                                                                shifted_i_z - j_z);
+
+                const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * ij_norm_squared;
+
+                if (ij_exponent_in_prefactor > EIJCUTOFF) {
                     continue;
                 }
 
-                const double gaussian = density_matrix_element * prefactor * exp(-ij_exponent * r_squared);
-                density_value += gaussian;
+                const double ij_x = (i_exponent * shifted_i_x + j_exponent * j_x) / ij_exponent;
+                const double ij_y = (i_exponent * shifted_i_y + j_exponent * j_y) / ij_exponent;
+                const double ij_z = (i_exponent * shifted_i_z + j_exponent * j_z) / ij_exponent;
+
+                // CINTcommon_fac_sp unknown
+                const double prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff * 0.282094791773878143 *
+                                         0.282094791773878143;
+
+                if (prefactor < env[PTR_EXPDROP]) {
+                    continue;
+                }
+
+
+                double density_value_per_block = 0;
+                for (int j_image = 0; j_image < n_images; j_image++) {
+                    const double x = position_x - ij_x - vectors_to_neighboring_images[j_image * 3];
+                    const double y = position_y - ij_y - vectors_to_neighboring_images[j_image * 3 + 1];
+                    const double z = position_z - ij_z - vectors_to_neighboring_images[j_image * 3 + 2];
+                    const double r_squared = distance_squared(x, y, z);
+                    if (ij_exponent * r_squared > EIJCUTOFF) {
+                        continue;
+                    }
+
+                    const double gaussian = prefactor * exp(-ij_exponent * r_squared);
+                    density_value_per_block += gaussian;
+                }
+
+                if (abs(density_value_per_block) > 1e-16) {
+                    density_value += density_matrices[i_image * density_matrix_stride + j_function_index * n_ao_i +
+                                                      i_function_index] * density_value_per_block;
+                }
+
             }
         }
     }
-    density[a_index * mesh_z * mesh_y + b_index * mesh_z + c_index] = density_value;
+    density[a_index * mesh_y * mesh_z + b_index * mesh_z + c_index] = density_value;
 }
 
 extern "C" {
 void evaluate_density_driver(
-    double *density, const double *density_matrices,
-    const int hermi, const int *shells_slice, const int *shell_to_function,
-    const int left_angular, const int right_angular,
-    const int n_images, const double *vectors_to_neighboring_images,
-    const double *lattice_vector, const int *offset, const int *lattice_sum_mesh,
-    const int *atm, const int *bas, const double *env) {
+        double *density, const double *density_matrices,
+        const int hermi, const int *shells_slice, const int *shell_to_function,
+        const int left_angular, const int right_angular,
+        const int n_images, const double *vectors_to_neighboring_images,
+        const double *lattice_vector, const int *offset, const int *lattice_sum_mesh,
+        const int *atm, const int *bas, const double *env) {
     dim3 block_size(4, 4, 4);
     int mesh_x = lattice_sum_mesh[0];
     int mesh_y = lattice_sum_mesh[1];

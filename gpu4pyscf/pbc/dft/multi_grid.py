@@ -221,15 +221,9 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     driver = libdft.NUMINT_rho_drv
 
     new_driver = libgpbc.evaluate_density_driver
-    # n_images = 1
-    # vectors_to_neighboring_images = np.zeros((1, 3), dtype=np.float64)
-
-
 
     def driver_wrapper(density_shape, dm, hermi):
         density = np.zeros(density_shape, order='C')
-        vectors_to_neighboring_images = np.array([[0, 0, 0]])
-        n_images = 1
         driver(getattr(libdft, kernel_name),
                density.ctypes.data_as(ctypes.c_void_p),
                dm.get().ctypes.data_as(ctypes.c_void_p),
@@ -262,6 +256,9 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     print("lattice_vector_on_gpu", lattice_vector_on_gpu)
     print("offset: ", offset)
     print("hermi: ", hermi)
+    print("atm", atm)
+    print("bas", bas)
+    print("env", env)
 
     def new_driver_wrapper(density, dm, hermi):
         assert isinstance(density, cp.ndarray)
@@ -325,8 +322,8 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
             dm_L = None
 
         print("has_imag: ", has_imag)
-        # dmR = 0 * dmR + 1
 
+        dmR = 0 * dmR  + 1
         if has_imag:
             # complex density cannot be updated inplace directly by
             # function NUMINT_rho_drv
@@ -344,11 +341,12 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                 # rho_i needs to be initialized to 0 because rho_i is updated
                 # inplace in function NUMINT_rho_drv
                 # rho_i = driver_wrapper(shape, dmR, hermi)
-                rho_i = cp.zeros(shape)
+                rho_i = driver_wrapper(shape, dmR, hermi)
             else:
                 assert out[i].dtype == cp.double
                 rho_i = out[i].reshape(shape)
-                rho_i += driver_wrapper(rho_i.shape, dmR, hermi)
+                rho_i += driver_wrapper(shape, dmR, hermi)
+
             print("cpu max: ", np.max(np.abs(rho_i)))
             print("arrived here")
 
@@ -358,7 +356,7 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
             print("diff: ", cp.max(cp.abs(cp.asarray(rho_i) - copy)))
             rho_i = rho_i.reshape(*lattice_sum_mesh)
             copy = copy.reshape(*lattice_sum_mesh)
-            print("cpu: ", rho_i[0])
+            print("cpu:", rho_i[0])
             print("gpu: ", copy[0])
             print("ratio: ", copy[0] / rho_i[0])
             assert 0
