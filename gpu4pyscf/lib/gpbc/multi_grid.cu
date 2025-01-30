@@ -90,9 +90,9 @@ __global__ void evaluate_density_kernel_ss(
                 const double image_x = vectors_to_neighboring_images[i_image * 3];
                 const double image_y = vectors_to_neighboring_images[i_image * 3 + 1];
                 const double image_z = vectors_to_neighboring_images[i_image * 3 + 2];
-                const double x = x_diff + image_x;
-                const double y = y_diff + image_y;
-                const double z = z_diff + image_z;
+                const double x = x_diff - image_x;
+                const double y = y_diff - image_y;
+                const double z = z_diff - image_z;
                 const double r_squared = x * x + y * y + z * z;
 
                 if (ij_exponent * r_squared > EIJCUTOFF) {
@@ -104,7 +104,7 @@ __global__ void evaluate_density_kernel_ss(
             }
         }
     }
-    density[a_index * mesh_y * mesh_z + b_index * mesh_z + c_index] = density_value;
+    density[a_index * mesh_z * mesh_y + b_index * mesh_z + c_index] = density_value;
 }
 
 extern "C" {
