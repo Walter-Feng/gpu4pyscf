@@ -11,45 +11,43 @@
 #define EIJCUTOFF       60
 #define PTR_EXPDROP     16
 
-__host__ __device__ double distance_squared(double x, double y, double z) {
+__host__ __device__ double distance_squared(const double x, const double y, const double z)
+{
     return x * x + y * y + z * z;
 }
 
-__global__ void evaluate_density_kernel_ss(
-        double *density, const double *density_matrices,
-        const int hermi, const int i_shell_begin, const int i_shell_end, const int j_shell_begin, const int j_shell_end,
-        const int *shell_to_function,
-        const int n_images, const double *vectors_to_neighboring_images, const double *lattice_vector,
-        const int offset_x, const int offset_y, const int offset_z, const int mesh_x, const int mesh_y,
-        const int mesh_z,
-        const int *atm, const int *bas, const double *env) {
-    const uint a_index = threadIdx.x + blockDim.x * blockIdx.x + offset_x;
-    const uint b_index = threadIdx.y + blockDim.y * blockIdx.y + offset_y;
-    const uint c_index = threadIdx.z + blockDim.z * blockIdx.z + offset_z;
-    const double a_fractional = static_cast<double>(a_index) / mesh_x;
-    const double b_fractional = static_cast<double>(b_index) / mesh_y;
-    const double c_fractional = static_cast<double>(c_index) / mesh_z;
+__global__ void evaluate_density_kernel_ss_orthogonal(
+    double* density, const double* density_matrices,
+    const int i_shell_begin, const int i_shell_end,
+    const int j_shell_begin, const int j_shell_end,
+    const int* shell_to_function,
+    const int n_images, const double* vectors_to_neighboring_images,
+    const double a, const double b, const double c,
+    const int offset_a, const int offset_b, const int offset_c, const int mesh_a, const int mesh_b,
+    const int mesh_c,
+    const int* atm, const int* bas, const double* env)
+{
+    const uint a_index = threadIdx.z + blockDim.z * blockIdx.z + offset_a;
+    const uint b_index = threadIdx.y + blockDim.y * blockIdx.y + offset_b;
+    const uint c_index = threadIdx.x + blockDim.x * blockIdx.x + offset_c;
+
+    if (a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c)
+    {
+        return;
+    }
+
+    const double position_x = a * a_index / mesh_a;
+    const double position_y = b * b_index / mesh_b;
+    const double position_z = c * c_index / mesh_c;
     const int i_function_begin = shell_to_function[i_shell_begin];
     const int j_function_begin = shell_to_function[j_shell_begin];
     const int n_ao_i = shell_to_function[i_shell_end] - i_function_begin;
     const int n_ao_j = shell_to_function[j_shell_end] - j_function_begin;
     const int density_matrix_stride = n_ao_i * n_ao_j;
-
-    if (a_index >= mesh_x || b_index >= mesh_y || c_index >= mesh_z) {
-        return;
-    }
-
-    const double position_x = lattice_vector[0] * a_fractional + lattice_vector[3] * b_fractional + lattice_vector[6] *
-                                                                                                    c_fractional;
-    const double position_y = lattice_vector[1] * a_fractional + lattice_vector[4] * b_fractional + lattice_vector[7] *
-                                                                                                    c_fractional;
-    const double position_z = lattice_vector[2] * a_fractional + lattice_vector[5] * b_fractional + lattice_vector[8] *
-                                                                                                    c_fractional;
-
     double density_value = 0;
 
-    for (int i_shell = i_shell_begin; i_shell < i_shell_end; i_shell++) {
-
+    for (int i_shell = i_shell_begin; i_shell < i_shell_end; i_shell++)
+    {
         const double i_exponent = env[bas(PTR_EXP, i_shell)];
         const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
         const double i_x = env[i_coord_offset];
@@ -58,8 +56,8 @@ __global__ void evaluate_density_kernel_ss(
         const double i_coeff = env[bas(PTR_COEFF, i_shell)];
         const int i_function_index = shell_to_function[i_shell] - i_function_begin;
 
-        for (int j_shell = j_shell_begin; j_shell < j_shell_end; j_shell++) {
-
+        for (int j_shell = j_shell_begin; j_shell < j_shell_end; j_shell++)
+        {
             const double j_exponent = env[bas(PTR_EXP, j_shell)];
             const int j_coord_offset = atm(PTR_COORD, bas(ATOM_OF, j_shell));
             const double j_x = env[j_coord_offset];
@@ -70,7 +68,8 @@ __global__ void evaluate_density_kernel_ss(
 
             const double ij_exponent = i_exponent + j_exponent;
 
-            for (int i_image = 0; i_image < n_images; i_image++) {
+            for (int i_image = 0; i_image < n_images; i_image++)
+            {
                 const double i_image_x = vectors_to_neighboring_images[i_image * 3];
                 const double i_image_y = vectors_to_neighboring_images[i_image * 3 + 1];
                 const double i_image_z = vectors_to_neighboring_images[i_image * 3 + 2];
@@ -85,72 +84,89 @@ __global__ void evaluate_density_kernel_ss(
 
                 const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * ij_norm_squared;
 
-                if (ij_exponent_in_prefactor > EIJCUTOFF) {
+                if (ij_exponent_in_prefactor > EIJCUTOFF)
+                {
                     continue;
                 }
 
-                const double ij_x = (i_exponent * shifted_i_x + j_exponent * j_x) / ij_exponent;
-                const double ij_y = (i_exponent * shifted_i_y + j_exponent * j_y) / ij_exponent;
-                const double ij_z = (i_exponent * shifted_i_z + j_exponent * j_z) / ij_exponent;
+                const double x = position_x - (i_exponent * shifted_i_x + j_exponent * j_x) / ij_exponent;
+                const double y = position_y - (i_exponent * shifted_i_y + j_exponent * j_y) / ij_exponent;
+                const double z = position_z - (i_exponent * shifted_i_z + j_exponent * j_z) / ij_exponent;
 
-                // CINTcommon_fac_sp unknown
-                const double prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff * 0.282094791773878143 *
-                                         0.282094791773878143;
+                const double real_space_cutoff = sqrt(EIJCUTOFF / ij_exponent);
 
-                if (prefactor < env[PTR_EXPDROP]) {
-                    continue;
-                }
+                const int lower_a_index = ceil((x - real_space_cutoff) / a);
+                const int upper_a_index = floor((x + real_space_cutoff) / a);
+                const int lower_b_index = ceil((y - real_space_cutoff) / b);
+                const int upper_b_index = floor((y + real_space_cutoff) / b);
+                const int lower_c_index = ceil((z - real_space_cutoff) / c);
+                const int upper_c_index = floor((z + real_space_cutoff) / c);
 
 
-                double density_value_per_block = 0;
-                for (int j_image = 0; j_image < n_images; j_image++) {
-                    const double x = position_x - ij_x - vectors_to_neighboring_images[j_image * 3];
-                    const double y = position_y - ij_y - vectors_to_neighboring_images[j_image * 3 + 1];
-                    const double z = position_z - ij_z - vectors_to_neighboring_images[j_image * 3 + 2];
-                    const double r_squared = distance_squared(x, y, z);
-                    if (ij_exponent * r_squared > EIJCUTOFF) {
-                        continue;
+                if (upper_a_index >= lower_a_index && upper_b_index >= lower_b_index && upper_c_index >= lower_c_index)
+                {
+                    double neighboring_gaussian_sum = 0;
+
+                    for (int a_cell = lower_a_index; a_cell <= upper_a_index; a_cell++)
+                    {
+                        for (int b_cell = lower_b_index; b_cell <= upper_b_index; b_cell++)
+                        {
+                            for (int c_cell = lower_c_index; c_cell <= upper_c_index; c_cell++)
+                            {
+                                const double r_squared = distance_squared(
+                                    x - a_cell * a, y - b_cell * b, z - c_cell * c);
+
+                                neighboring_gaussian_sum += exp(-ij_exponent * r_squared);
+                            }
+                        }
                     }
 
-                    const double gaussian = prefactor * exp(-ij_exponent * r_squared);
-                    density_value_per_block += gaussian;
-                }
+                    const double prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff
+                        * 0.282094791773878143 * 0.282094791773878143 *
+                        density_matrices[i_image * density_matrix_stride + j_function_index * n_ao_i +
+                            i_function_index];
 
-                if (abs(density_value_per_block) > 1e-16) {
-                    density_value += density_matrices[i_image * density_matrix_stride + j_function_index * n_ao_i +
-                                                      i_function_index] * density_value_per_block;
+                    density_value += prefactor * neighboring_gaussian_sum;
                 }
-
             }
         }
     }
-    density[a_index * mesh_y * mesh_z + b_index * mesh_z + c_index] = density_value;
+    density[a_index * mesh_b * mesh_c + b_index * mesh_c + c_index] = density_value;
 }
 
 extern "C" {
 void evaluate_density_driver(
-        double *density, const double *density_matrices,
-        const int hermi, const int *shells_slice, const int *shell_to_function,
-        const int left_angular, const int right_angular,
-        const int n_images, const double *vectors_to_neighboring_images,
-        const double *lattice_vector, const int *offset, const int *lattice_sum_mesh,
-        const int *atm, const int *bas, const double *env) {
+    double* density, const double* density_matrices, const int* shells_slice, const int* shell_to_function,
+    const int left_angular, const int right_angular,
+    const int n_images, const double* vectors_to_neighboring_images,
+    const double* lattice_vector, const int* offset, const int* lattice_sum_mesh,
+    const int* atm, const int* bas, const double* env)
+{
     dim3 block_size(4, 4, 4);
     int mesh_x = lattice_sum_mesh[0];
     int mesh_y = lattice_sum_mesh[1];
     int mesh_z = lattice_sum_mesh[2];
-    dim3 block_grid((mesh_x + 3) / 4, (mesh_y + 3) / 4, (mesh_z + 3) / 4);
-    if (left_angular == 0 && right_angular == 0) {
-        evaluate_density_kernel_ss<<<block_grid, block_size>>>(density, density_matrices, hermi, shells_slice[0],
-                                                               shells_slice[1], shells_slice[2], shells_slice[3],
-                                                               shell_to_function,
-                                                               n_images, vectors_to_neighboring_images, lattice_vector,
-                                                               offset[0], offset[1], offset[2],
-                                                               mesh_x, mesh_y, mesh_z,
-                                                               atm, bas, env);
+    dim3 block_grid((mesh_z + 3) / 4, (mesh_y + 3) / 4, (mesh_x + 3) / 4);
+
+    const double a = lattice_vector[0];
+    const double b = lattice_vector[4];
+    const double c = lattice_vector[8];
+
+    if (left_angular == 0 && right_angular == 0)
+    {
+        evaluate_density_kernel_ss_orthogonal<<<block_grid, block_size>>>(density, density_matrices, shells_slice[0],
+                                                                          shells_slice[1], shells_slice[2],
+                                                                          shells_slice[3],
+                                                                          shell_to_function,
+                                                                          n_images, vectors_to_neighboring_images,
+                                                                          a, b, c,
+                                                                          offset[0], offset[1], offset[2],
+                                                                          mesh_x, mesh_y, mesh_z,
+                                                                          atm, bas, env);
     }
 
     checkCudaErrors(cudaPeekAtLastError());
+    // checkCudaErrors(cudaDeviceSynchronize());
 }
 }
 

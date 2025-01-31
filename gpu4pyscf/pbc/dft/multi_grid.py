@@ -222,6 +222,11 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
 
     new_driver = libgpbc.evaluate_density_driver
 
+    print("lattice sum mesh: ", lattice_sum_mesh)
+    print("mesh: ", mesh)
+    print("n_images: ", n_images)
+    print(vectors_to_neighboring_images)
+
     def driver_wrapper(density_shape, dm, hermi):
         density = np.zeros(density_shape, order='C')
         driver(getattr(libdft, kernel_name),
@@ -256,21 +261,17 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     print("lattice_vector_on_gpu", lattice_vector_on_gpu)
     print("offset: ", offset)
     print("hermi: ", hermi)
-    print("atm", atm)
-    print("bas", bas)
-    print("env", env)
 
-    def new_driver_wrapper(density, dm, hermi):
+    def new_driver_wrapper(density, dm):
         assert isinstance(density, cp.ndarray)
         new_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
                    ctypes.cast(dm.data.ptr, ctypes.c_void_p),
-                   ctypes.c_int(hermi),
                    (ctypes.c_int * 4)(*[i0, i1, j0, j1]),
                    ctypes.cast(ao_loc_on_gpu.data.ptr, ctypes.c_void_p),
                    ctypes.c_int(0), ctypes.c_int(0),
                    ctypes.c_int(n_images),
                    ctypes.cast(vectors_to_neighboring_images_on_gpu.data.ptr, ctypes.c_void_p),
-                   ctypes.cast(lattice_vector_on_gpu.data.ptr, ctypes.c_void_p),
+                   lattice_vector.ctypes.data_as(ctypes.c_void_p),
                    (ctypes.c_int * 3)(*offset),
                    (ctypes.c_int * 3)(*lattice_sum_mesh),
                    ctypes.cast(atm_on_gpu.data.ptr, ctypes.c_void_p),
@@ -278,6 +279,7 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                    ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
 
     rho = []
+    print("density shape: ", shape)
     for i, dm_i in enumerate(dm):
         if cell.dimension == 0:
             if ignore_imag:
@@ -320,10 +322,8 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                         abs(dm_i - dm_i.conj().transpose(0, 2, 1)).max() < 1e-8):
                     has_imag = False
             dm_L = None
-
+        print("dmR shape: ", dmR.shape)
         print("has_imag: ", has_imag)
-
-        dmR = 0 * dmR  + 1
         if has_imag:
             # complex density cannot be updated inplace directly by
             # function NUMINT_rho_drv
@@ -347,20 +347,21 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                 rho_i = out[i].reshape(shape)
                 rho_i += driver_wrapper(shape, dmR, hermi)
 
+            cpu = driver_wrapper(shape, dmR, hermi)
             print("cpu max: ", np.max(np.abs(rho_i)))
             print("arrived here")
 
-            copy = cp.zeros(shape)
-            new_driver_wrapper(copy, dmR, hermi)
-            print("gpu max: ", cp.max(cp.abs(copy)))
-            print("diff: ", cp.max(cp.abs(cp.asarray(rho_i) - copy)))
-            rho_i = rho_i.reshape(*lattice_sum_mesh)
-            copy = copy.reshape(*lattice_sum_mesh)
-            print("cpu:", rho_i[0])
-            print("gpu: ", copy[0])
-            print("ratio: ", copy[0] / rho_i[0])
-            assert 0
-
+            gpu = cp.zeros(shape)
+            new_driver_wrapper(gpu, dmR)
+            print("gpu max: ", cp.max(cp.abs(gpu)))
+            print("diff: ", cp.max(cp.abs(cp.asarray(cpu) - gpu)))
+            cpu = cpu.reshape(*lattice_sum_mesh)
+            gpu = gpu.reshape(*lattice_sum_mesh)
+            # print("cpu:", cpu[0])
+            # print("gpu: ", gpu[0])
+            # print("ratio: ", gpu[0] / cpu[0])
+            # assert 0
+            quit()
         dmR = dmI = None
         rho.append(rho_i)
 
