@@ -24,7 +24,7 @@ with cupy.cuda.Device(0):
     cell = gto.M(
         h=np.array(lattice_vectors),
         atom=ase_atoms_to_pyscf(bulk('H', 'sc', a=2)),
-        basis='minao',
+        basis='6-31g',
         verbose=6,
         unit='aa',
         ke_cutoff=200

@@ -23,7 +23,7 @@ libgpbc = cupy_helper.load_library('libgpbc')
 
 
 def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
-             xctype='LDA', kpts=None, mesh=None, offset=None, submesh=None):
+             xctype='LDA', kpts=None, mesh=None, offset=None, lattice_sum_mesh=None):
     assert (all(cell._bas[:, multigrid.NPRIM_OF] == 1))
     if mesh is None:
         mesh = cell.mesh
@@ -47,11 +47,9 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     naoi = ao_loc[i1] - ao_loc[i0]
     naoj = ao_loc[j1] - ao_loc[j0]
 
-    Ls = gto.eval_gto.get_lattice_Ls(cell)
-    nimgs = len(Ls)
+    vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(cell)
+    nimgs = len(vectors_to_neighboring_images)
 
-    weights = weights.get()
-    assert (weights.dtype == np.double)
     xctype = xctype.upper()
     n_mat = None
     if xctype == 'LDA':
@@ -69,45 +67,79 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     else:
         raise NotImplementedError
 
-    a = cell.lattice_vectors()
-    b = np.linalg.inv(a.T)
+    lattice_vector = cell.lattice_vectors()
+    b = np.linalg.inv(lattice_vector.T)
     if offset is None:
         offset = (0, 0, 0)
-    if submesh is None:
-        submesh = mesh
+    if lattice_sum_mesh is None:
+        lattice_sum_mesh = mesh
     # log_prec is used to estimate the gto_rcut. Add EXTRA_PREC to count
     # other possible factors and coefficients in the integral.
     log_prec = np.log(precision * multigrid.EXTRA_PREC)
 
-    if abs(a - np.diag(a.diagonal())).max() < 1e-12:
+    if abs(lattice_vector - np.diag(lattice_vector.diagonal())).max() < 1e-12:
         lattice_type = '_orth'
     else:
         lattice_type = '_nonorth'
     eval_fn = 'NUMINTeval_' + xctype.lower() + lattice_type
     drv = libdft.NUMINT_fill2c
 
-    def make_mat(weights):
-        mat = np.zeros((nimgs, comp, naoj, naoi))
+    atm_on_gpu = cp.asarray(atm)
+    bas_on_gpu = cp.asarray(bas)
+    env_on_gpu = cp.asarray(env)
+    ao_loc_on_gpu = cp.asarray(ao_loc)
+    vectors_to_neighboring_images_on_gpu = cp.asarray(vectors_to_neighboring_images)
+    new_driver = libgpbc.evaluate_xc_driver
+
+    def make_mat(xc_weights):
+        fock = np.zeros((nimgs, comp, naoj, naoi))
         drv(getattr(libdft, eval_fn),
-            weights.ctypes.data_as(ctypes.c_void_p),
-            mat.ctypes.data_as(ctypes.c_void_p),
+            xc_weights.get().ctypes.data_as(ctypes.c_void_p),
+            fock.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(comp), ctypes.c_int(hermi),
             (ctypes.c_int * 4)(i0, i1, j0, j1),
             ao_loc.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_double(log_prec),
             ctypes.c_int(cell.dimension),
             ctypes.c_int(nimgs),
-            Ls.ctypes.data_as(ctypes.c_void_p),
-            a.ctypes.data_as(ctypes.c_void_p),
+            vectors_to_neighboring_images.ctypes.data_as(ctypes.c_void_p),
+            lattice_vector.ctypes.data_as(ctypes.c_void_p),
             b.ctypes.data_as(ctypes.c_void_p),
-            (ctypes.c_int * 3)(*offset), (ctypes.c_int * 3)(*submesh),
+            (ctypes.c_int * 3)(*offset), (ctypes.c_int * 3)(*lattice_sum_mesh),
             (ctypes.c_int * 3)(*mesh),
             atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(atm)),
             bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(bas)),
             env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(env)))
-        return cp.asarray(mat)
+        return cp.asarray(fock)
+
+    def new_driver_wrapper(xc_weights):
+        fock = cp.zeros((nimgs, comp, naoj, naoi))
+        assert isinstance(xc_weights, cp.ndarray)
+        new_driver(ctypes.cast(mat.data.ptr, ctypes.c_void_p),
+                   ctypes.cast(xc_weights.data.ptr, ctypes.c_void_p),
+                   (ctypes.c_int * 4)(i0, i1, j0, j1),
+                   ctypes.cast(ao_loc_on_gpu.data.ptr, ctypes.c_void_p),
+                   ctypes.c_int(0), ctypes.c_int(0),
+                   ctypes.c_int(nimgs),
+                   ctypes.cast(vectors_to_neighboring_images_on_gpu.data.ptr, ctypes.c_void_p),
+                   lattice_vector.ctypes.data_as(ctypes.c_void_p),
+                   (ctypes.c_int * 3)(*offset),
+                   (ctypes.c_int * 3)(*lattice_sum_mesh),
+                   ctypes.cast(atm_on_gpu.data.ptr, ctypes.c_void_p),
+                   ctypes.cast(bas_on_gpu.data.ptr, ctypes.c_void_p),
+                   ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
+
+        return fock
 
     out = []
+
+    cpu = make_mat(weights)
+    gpu = new_driver_wrapper(weights)
+    print("cpu max: ", np.amax(cpu))
+    print("gpu max: ", cp.amax(gpu))
+    print("diff: ", cp.amax((cp.asarray(cpu) - gpu)))
+
+    assert 0
     for wv in weights:
         if cell.dimension == 0:
             mat = make_mat(wv)[0].transpose(0, 2, 1)
@@ -127,7 +159,7 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
                 mat = mat[None, :]
         else:
             mat = make_mat(wv)
-            expkL = cp.exp(1j * kpts.reshape(-1, 3).dot(Ls.T))
+            expkL = cp.exp(1j * kpts.reshape(-1, 3).dot(vectors_to_neighboring_images.T))
             mat = cp.einsum('kr,rcij->kcij', expkL, mat)
             if hermi == 1:
                 for i in range(comp):
@@ -222,11 +254,6 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
 
     new_driver = libgpbc.evaluate_density_driver
 
-    print("lattice sum mesh: ", lattice_sum_mesh)
-    print("mesh: ", mesh)
-    print("n_images: ", n_images)
-    print(vectors_to_neighboring_images)
-
     def driver_wrapper(density_shape, dm, hermi):
         density = np.zeros(density_shape, order='C')
         driver(getattr(libdft, kernel_name),
@@ -252,21 +279,13 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     bas_on_gpu = cp.asarray(bas)
     env_on_gpu = cp.asarray(env)
     ao_loc_on_gpu = cp.asarray(ao_loc)
-    import sys
-    cp.set_printoptions(threshold=sys.maxsize)
     vectors_to_neighboring_images_on_gpu = cp.asarray(vectors_to_neighboring_images)
-    lattice_vector_on_gpu = cp.asarray(lattice_vector)
-    shell_slice_on_gpu = cp.asarray([i0, i1, j0, j1])
-    print("shell_slice_on_gpu", shell_slice_on_gpu)
-    print("lattice_vector_on_gpu", lattice_vector_on_gpu)
-    print("offset: ", offset)
-    print("hermi: ", hermi)
 
     def new_driver_wrapper(density, dm):
         assert isinstance(density, cp.ndarray)
         new_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
                    ctypes.cast(dm.data.ptr, ctypes.c_void_p),
-                   (ctypes.c_int * 4)(*[i0, i1, j0, j1]),
+                   (ctypes.c_int * 4)(i0, i1, j0, j1),
                    ctypes.cast(ao_loc_on_gpu.data.ptr, ctypes.c_void_p),
                    ctypes.c_int(0), ctypes.c_int(0),
                    ctypes.c_int(n_images),
@@ -279,7 +298,6 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                    ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
 
     rho = []
-    print("density shape: ", shape)
     for i, dm_i in enumerate(dm):
         if cell.dimension == 0:
             if ignore_imag:
@@ -322,8 +340,6 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                         abs(dm_i - dm_i.conj().transpose(0, 2, 1)).max() < 1e-8):
                     has_imag = False
             dm_L = None
-        print("dmR shape: ", dmR.shape)
-        print("has_imag: ", has_imag)
         if has_imag:
             # complex density cannot be updated inplace directly by
             # function NUMINT_rho_drv
@@ -347,21 +363,6 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                 rho_i = out[i].reshape(shape)
                 rho_i += driver_wrapper(shape, dmR, hermi)
 
-            cpu = driver_wrapper(shape, dmR, hermi)
-            print("cpu max: ", np.max(np.abs(rho_i)))
-            print("arrived here")
-
-            gpu = cp.zeros(shape)
-            new_driver_wrapper(gpu, dmR)
-            print("gpu max: ", cp.max(cp.abs(gpu)))
-            print("diff: ", cp.max(cp.abs(cp.asarray(cpu) - gpu)))
-            cpu = cpu.reshape(*lattice_sum_mesh)
-            gpu = gpu.reshape(*lattice_sum_mesh)
-            # print("cpu:", cpu[0])
-            # print("gpu: ", gpu[0])
-            # print("ratio: ", gpu[0] / cpu[0])
-            # assert 0
-            quit()
         dmR = dmI = None
         rho.append(rho_i)
 
@@ -418,15 +419,18 @@ def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_i
             lattice_sum_mesh = tail - head
             log.debug1('atm %d  rcut %f  offset %s submesh %s',
                        atom, real_space_cutoff, head, lattice_sum_mesh)
-            density = evaluate_density(copied_cell, density_matrix_subblock, sub_slice, hermi, xc_type, kpts,
-                                       mesh, head, lattice_sum_mesh, ignore_imag=ignore_imag)
+            evaluated_density = evaluate_density(copied_cell, density_matrix_subblock, sub_slice, hermi, xc_type, kpts,
+                                                 mesh, head, lattice_sum_mesh, ignore_imag=ignore_imag)
             #:rho[:,:,offset[0]:mesh1[0],offset[1]:mesh1[1],offset[2]:mesh1[2]] += \
             #:        numpy.reshape(rho1, (nset, rhodim) + tuple(submesh))
-            gx = cp.arange(head[0], tail[0], dtype=np.int32)
-            gy = cp.arange(head[1], tail[1], dtype=np.int32)
-            gz = cp.arange(head[2], tail[2], dtype=np.int32)
-            multigrid._takebak_5d(density, np.reshape(density, (nset, rho_slices) + tuple(lattice_sum_mesh)),
-                                  (None, None, gx, gy, gz))
+            gx = cp.arange(head[0], tail[0], dtype=cp.int32)
+            gy = cp.arange(head[1], tail[1], dtype=cp.int32)
+            gz = cp.arange(head[2], tail[2], dtype=cp.int32)
+            print("mesh: ", mesh)
+            print("lattice_sum_mesh: ", lattice_sum_mesh)
+
+            density[cp.ix_(cp.arange(nset), cp.arange(rho_slices), gx, gy, gz)] += evaluated_density.reshape(
+                (-1,) + lattice_sum_mesh)
         else:
             log.debug1('atm %d  rcut %f  over 2 images', atom, real_space_cutoff)
             #:rho1 = eval_rho(pcell, sub_dms, sub_slice, hermi, xc_type, kpts,
