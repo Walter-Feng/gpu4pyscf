@@ -1,3 +1,6 @@
+import line_profiler
+profile = line_profiler.LineProfiler()
+
 import pyscf.pbc.gto as gto
 import gpu4pyscf.pbc.df.fft as fft
 import gpu4pyscf.pbc.df.fft_jk as fft_jk
@@ -21,14 +24,14 @@ import ctypes
 libgdft = cupy_helper.load_library('libgdft')
 libgpbc = cupy_helper.load_library('libgpbc')
 
-
-def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
-             xctype='LDA', kpts=None, mesh=None, offset=None, lattice_sum_mesh=None):
+@profile
+def eval_mat(cell, weights, shls_slice=None, comp=1,
+             xctype='LDA', kpts=None, global_mesh=None, offset=None, local_mesh=None):
     assert (all(cell._bas[:, multigrid.NPRIM_OF] == 1))
-    if mesh is None:
-        mesh = cell.mesh
+    if global_mesh is None:
+        global_mesh = cell.mesh
     vol = cell.vol
-    weight_penalty = np.prod(mesh) / vol
+    weight_penalty = np.prod(global_mesh) / vol
     exp_min = np.hstack(cell.bas_exps()).min()
     theta_ij = exp_min / 2
     lattice_sum_fac = max(2 * np.pi * cell.rcut / (vol * theta_ij), 1)
@@ -54,14 +57,12 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     n_mat = None
     if xctype == 'LDA':
         if weights.ndim == 1:
-            weights = weights.reshape(-1, np.prod(mesh))
+            weights = weights.reshape(-1, np.prod(global_mesh))
         else:
             n_mat = weights.shape[0]
     elif xctype == 'GGA':
-        if hermi == 1:
-            raise RuntimeError('hermi=1 is not supported for GGA functional')
         if weights.ndim == 2:
-            weights = weights.reshape(-1, 4, np.prod(mesh))
+            weights = weights.reshape(-1, 4, np.prod(global_mesh))
         else:
             n_mat = weights.shape[0]
     else:
@@ -71,8 +72,8 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     b = np.linalg.inv(lattice_vector.T)
     if offset is None:
         offset = (0, 0, 0)
-    if lattice_sum_mesh is None:
-        lattice_sum_mesh = mesh
+    if local_mesh is None:
+        local_mesh = global_mesh
     # log_prec is used to estimate the gto_rcut. Add EXTRA_PREC to count
     # other possible factors and coefficients in the integral.
     log_prec = np.log(precision * multigrid.EXTRA_PREC)
@@ -96,7 +97,7 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
         drv(getattr(libdft, eval_fn),
             xc_weights.get().ctypes.data_as(ctypes.c_void_p),
             fock.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(comp), ctypes.c_int(hermi),
+            ctypes.c_int(comp), ctypes.c_int(0),
             (ctypes.c_int * 4)(i0, i1, j0, j1),
             ao_loc.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_double(log_prec),
@@ -105,8 +106,8 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
             vectors_to_neighboring_images.ctypes.data_as(ctypes.c_void_p),
             lattice_vector.ctypes.data_as(ctypes.c_void_p),
             b.ctypes.data_as(ctypes.c_void_p),
-            (ctypes.c_int * 3)(*offset), (ctypes.c_int * 3)(*lattice_sum_mesh),
-            (ctypes.c_int * 3)(*mesh),
+            (ctypes.c_int * 3)(*offset), (ctypes.c_int * 3)(*local_mesh),
+            (ctypes.c_int * 3)(*global_mesh),
             atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(atm)),
             bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(bas)),
             env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(env)))
@@ -115,7 +116,7 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     def new_driver_wrapper(xc_weights):
         fock = cp.zeros((nimgs, comp, naoj, naoi))
         assert isinstance(xc_weights, cp.ndarray)
-        new_driver(ctypes.cast(mat.data.ptr, ctypes.c_void_p),
+        new_driver(ctypes.cast(fock.data.ptr, ctypes.c_void_p),
                    ctypes.cast(xc_weights.data.ptr, ctypes.c_void_p),
                    (ctypes.c_int * 4)(i0, i1, j0, j1),
                    ctypes.cast(ao_loc_on_gpu.data.ptr, ctypes.c_void_p),
@@ -124,7 +125,8 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
                    ctypes.cast(vectors_to_neighboring_images_on_gpu.data.ptr, ctypes.c_void_p),
                    lattice_vector.ctypes.data_as(ctypes.c_void_p),
                    (ctypes.c_int * 3)(*offset),
-                   (ctypes.c_int * 3)(*lattice_sum_mesh),
+                   (ctypes.c_int * 3)(*local_mesh),
+                   (ctypes.c_int * 3)(*global_mesh),
                    ctypes.cast(atm_on_gpu.data.ptr, ctypes.c_void_p),
                    ctypes.cast(bas_on_gpu.data.ptr, ctypes.c_void_p),
                    ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
@@ -132,40 +134,19 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
         return fock
 
     out = []
-
-    cpu = make_mat(weights)
-    gpu = new_driver_wrapper(weights)
-    print("cpu max: ", np.amax(cpu))
-    print("gpu max: ", cp.amax(gpu))
-    print("diff: ", cp.amax((cp.asarray(cpu) - gpu)))
-
-    assert 0
     for wv in weights:
         if cell.dimension == 0:
-            mat = make_mat(wv)[0].transpose(0, 2, 1)
-            if hermi == 1:
-                for i in range(comp):
-                    cupy_helper.hermi_triu(mat[i], inplace=True)
-            if comp == 1:
-                mat = mat[0]
+            raise NotImplementedError
         elif kpts is None or multigrid.gamma_point(kpts):
-            mat = make_mat(wv).sum(axis=0).transpose(0, 2, 1)
-            if hermi == 1:
-                for i in range(comp):
-                    cupy_helper.hermi_triu(mat[i], inplace=True)
+            mat = new_driver_wrapper(wv).sum(axis=0).transpose(0, 2, 1)
             if comp == 1:
                 mat = mat[0]
             if getattr(kpts, 'ndim', None) == 2:
                 mat = mat[None, :]
         else:
-            mat = make_mat(wv)
+            mat = new_driver_wrapper(wv)
             expkL = cp.exp(1j * kpts.reshape(-1, 3).dot(vectors_to_neighboring_images.T))
-            mat = cp.einsum('kr,rcij->kcij', expkL, mat)
-            if hermi == 1:
-                for i in range(comp):
-                    for k in range(len(kpts)):
-                        cp.hermi_triu(mat[k, i], inplace=True)
-            mat = mat.transpose(0, 1, 3, 2)
+            mat = cp.einsum('kr,rcij->kcji', expkL, mat)
             if comp == 1:
                 mat = mat[:, 0]
         out.append(mat)
@@ -174,9 +155,9 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
         out = out[0]
     return out
 
-
-def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=None,
-                     mesh=None, offset=None, lattice_sum_mesh=None, ignore_imag=False,
+@profile
+def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
+                     global_mesh=None, offset=None, local_mesh=None, ignore_imag=False,
                      out=None):
     '''Collocate the *real* density (opt. gradients) on the real-space grid.
 
@@ -185,10 +166,10 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
             The output density is assumed to be real if ignore_imag=True.
     '''
     assert (all(cell._bas[:, multigrid.NPRIM_OF] == 1))
-    if mesh is None:
-        mesh = cell.mesh
+    if global_mesh is None:
+        global_mesh = cell.mesh
     vol = cell.vol
-    weight_penalty = np.prod(mesh) / vol
+    weight_penalty = np.prod(global_mesh) / vol
     minimum_exponent = np.hstack(cell.bas_exps()).min()
     theta_ij = minimum_exponent / 2
     lattice_summation_factor = max(2 * np.pi * cell.rcut / (vol * theta_ij), 1)
@@ -203,15 +184,12 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     if shells_slice is None:
         shells_slice = (0, cell.nbas, 0, cell.nbas)
     i0, i1, j0, j1 = shells_slice
-    if hermi == 1:
-        assert (i0 == j0 and i1 == j1)
     j0 += cell.nbas
     j1 += cell.nbas
     naoi = ao_loc[i1] - ao_loc[i0]
     naoj = ao_loc[j1] - ao_loc[j0]
     dm = cp.asarray(dm, order='C')
     assert (dm.shape[-2:] == (naoi, naoj))
-    print("nao pair: ", (naoi, naoj))
 
     vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(cell)
 
@@ -228,8 +206,8 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     reciprocal_lattice_vector = np.linalg.inv(lattice_vector.T)
     if offset is None:
         offset = (0, 0, 0)
-    if lattice_sum_mesh is None:
-        lattice_sum_mesh = mesh
+    if local_mesh is None:
+        local_mesh = global_mesh
     precision_in_log = np.log(precision * multigrid.EXTRA_PREC)
 
     if abs(lattice_vector - np.diag(lattice_vector.diagonal())).max() < 1e-12:
@@ -240,26 +218,24 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
     if xc_type == 'LDA':
         n_components = 1
     elif xc_type == 'GGA':
-        if hermi == 1:
-            raise RuntimeError('hermi=1 is not supported for GGA functional')
         n_components = 4
     else:
         raise NotImplementedError('meta-GGA')
     if n_components == 1:
-        shape = (np.prod(lattice_sum_mesh),)
+        denstiy_shape = (np.prod(local_mesh),)
     else:
-        shape = (n_components, np.prod(lattice_sum_mesh))
+        denstiy_shape = (n_components, np.prod(local_mesh))
     kernel_name = 'NUMINTrho_' + xc_type.lower() + lattice_type
     driver = libdft.NUMINT_rho_drv
 
     new_driver = libgpbc.evaluate_density_driver
 
-    def driver_wrapper(density_shape, dm, hermi):
+    def driver_wrapper(density_shape, dm):
         density = np.zeros(density_shape, order='C')
         driver(getattr(libdft, kernel_name),
                density.ctypes.data_as(ctypes.c_void_p),
                dm.get().ctypes.data_as(ctypes.c_void_p),
-               ctypes.c_int(n_components), ctypes.c_int(hermi),
+               ctypes.c_int(n_components), ctypes.c_int(0),
                (ctypes.c_int * 4)(i0, i1, j0, j1),
                ao_loc.ctypes.data_as(ctypes.c_void_p),
                ctypes.c_double(precision_in_log),
@@ -268,8 +244,8 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                vectors_to_neighboring_images.ctypes.data_as(ctypes.c_void_p),
                lattice_vector.ctypes.data_as(ctypes.c_void_p),
                reciprocal_lattice_vector.ctypes.data_as(ctypes.c_void_p),
-               (ctypes.c_int * 3)(*offset), (ctypes.c_int * 3)(*lattice_sum_mesh),
-               (ctypes.c_int * 3)(*mesh),
+               (ctypes.c_int * 3)(*offset), (ctypes.c_int * 3)(*local_mesh),
+               (ctypes.c_int * 3)(*global_mesh),
                atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(atm)),
                bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(bas)),
                env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(env)))
@@ -292,10 +268,13 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                    ctypes.cast(vectors_to_neighboring_images_on_gpu.data.ptr, ctypes.c_void_p),
                    lattice_vector.ctypes.data_as(ctypes.c_void_p),
                    (ctypes.c_int * 3)(*offset),
-                   (ctypes.c_int * 3)(*lattice_sum_mesh),
+                   (ctypes.c_int * 3)(*local_mesh),
+                   (ctypes.c_int * 3)(*global_mesh),
                    ctypes.cast(atm_on_gpu.data.ptr, ctypes.c_void_p),
                    ctypes.cast(bas_on_gpu.data.ptr, ctypes.c_void_p),
                    ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
+
+        return density
 
     rho = []
     for i, dm_i in enumerate(dm):
@@ -331,7 +310,7 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
                 has_imag = False
             else:
                 dmI = cp.asarray(dm_L.imag, order='C')
-                has_imag = (hermi == 0 and abs(dmI).max() > 1e-8)
+                has_imag = (abs(dmI).max() > 1e-8)
                 if (has_imag and xc_type == 'LDA' and
                         naoi == naoj and
                         # For hermitian density matrices, the anti-symmetry
@@ -344,24 +323,22 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
             # complex density cannot be updated inplace directly by
             # function NUMINT_rho_drv
             if out is None:
-                rho_i = cp.empty(shape, cp.complex128)
-                rho_i.real = driver_wrapper(shape, dmR, 0)
-                rho_i.imag = driver_wrapper(shape, dmI, 0)
+                rho_i = cp.empty(denstiy_shape, cp.complex128)
+                new_driver_wrapper(rho_i.real, dmR)
+                new_driver_wrapper(rho_i.imag, dmI)
             else:
                 assert out[i].dtype == cp.complex128
-                rho_i = out[i].reshape(shape)
-                rho_i.real += driver_wrapper(shape, dmR, 0)
-                rho_i.imag += driver_wrapper(shape, dmI, 0)
+                new_driver_wrapper(out[i].real, dmR)
+                new_driver_wrapper(out[i].imag, dmI)
         else:
             if out is None:
                 # rho_i needs to be initialized to 0 because rho_i is updated
                 # inplace in function NUMINT_rho_drv
                 # rho_i = driver_wrapper(shape, dmR, hermi)
-                rho_i = driver_wrapper(shape, dmR, hermi)
+                rho_i = driver_wrapper(denstiy_shape, dmR)
             else:
                 assert out[i].dtype == cp.double
-                rho_i = out[i].reshape(shape)
-                rho_i += driver_wrapper(shape, dmR, hermi)
+                rho_i = new_driver_wrapper(out[i], dmR)
 
         dmR = dmI = None
         rho.append(rho_i)
@@ -370,11 +347,11 @@ def evaluate_density(cell, dm, shells_slice=None, hermi=0, xc_type='LDA', kpts=N
         rho = rho[0]
     return cp.asarray(rho)
 
-
-def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_imag, log):
+@profile
+def _eval_rho_bra(cell, dms, shell_ranges, xc_type, kpts, grids, ignore_imag, log):
     lattice_vectors = np.asarray(cell.lattice_vectors())
     max_element = lattice_vectors.max()
-    mesh = np.asarray(grids.mesh)
+    global_mesh = np.asarray(grids.mesh)
     real_space_cutoff = grids.cell.rcut
     nset = dms.shape[0]
     if xc_type == 'LDA':
@@ -383,13 +360,13 @@ def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_i
         rho_slices = 4
 
     if real_space_cutoff > max_element * multigrid.R_RATIO_SUBLOOP:
-        density = evaluate_density(cell, dms, shell_ranges, hermi, xc_type, kpts, mesh, ignore_imag=ignore_imag)
-        return cp.reshape(density, (nset, rho_slices, np.prod(mesh)))
+        density = evaluate_density(cell, dms, shell_ranges, xc_type, kpts, global_mesh, ignore_imag=ignore_imag)
+        return cp.reshape(density, (nset, rho_slices, np.prod(global_mesh)))
 
-    if hermi == 1 or ignore_imag:
-        density = cp.zeros((nset, rho_slices) + tuple(mesh))
+    if ignore_imag:
+        density = cp.zeros((nset, rho_slices) + tuple(global_mesh))
     else:
-        density = cp.zeros((nset, rho_slices) + tuple(mesh), dtype=cp.complex128)
+        density = cp.zeros((nset, rho_slices) + tuple(global_mesh), dtype=cp.complex128)
 
     b = np.linalg.inv(lattice_vectors.T)
     row_shell_begin, row_shell_end, col_shell_begin, col_shell_end = shell_ranges
@@ -406,31 +383,29 @@ def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_i
         density_matrix_subblock = dms[:, :, i0:i1]
 
         atom_position = cell.atom_coord(atom)
-        lattice_sum_begin = b.dot(atom_position - real_space_cutoff)
-        lattice_sum_end = b.dot(atom_position + real_space_cutoff)
+        local_mesh_begin_fractional = b.dot(atom_position - real_space_cutoff)
+        local_mesh_end_fractional = b.dot(atom_position + real_space_cutoff)
 
-        if (np.all(0 < lattice_sum_begin) and np.all(lattice_sum_end < 1)):
+        if (np.all(0 < local_mesh_begin_fractional) and np.all(local_mesh_end_fractional < 1)):
             copied_cell._bas = np.vstack((row_basis, cell._bas[col_shell_begin:col_shell_end]))
             n_row_shells = len(row_shells)
             sub_slice = (0, n_row_shells, n_row_shells, n_row_shells + n_col_shells)
 
-            head = (lattice_sum_begin * mesh).astype(int)
-            tail = np.ceil(lattice_sum_end * mesh).astype(int)
-            lattice_sum_mesh = tail - head
+            head = (local_mesh_begin_fractional * global_mesh).astype(int)
+            tail = np.ceil(local_mesh_end_fractional * global_mesh).astype(int)
+            local_mesh = tail - head
             log.debug1('atm %d  rcut %f  offset %s submesh %s',
-                       atom, real_space_cutoff, head, lattice_sum_mesh)
-            evaluated_density = evaluate_density(copied_cell, density_matrix_subblock, sub_slice, hermi, xc_type, kpts,
-                                                 mesh, head, lattice_sum_mesh, ignore_imag=ignore_imag)
+                       atom, real_space_cutoff, head, local_mesh)
+            evaluated_density = evaluate_density(copied_cell, density_matrix_subblock, sub_slice, xc_type, kpts,
+                                                 global_mesh, head, local_mesh, ignore_imag=ignore_imag)
             #:rho[:,:,offset[0]:mesh1[0],offset[1]:mesh1[1],offset[2]:mesh1[2]] += \
             #:        numpy.reshape(rho1, (nset, rhodim) + tuple(submesh))
             gx = cp.arange(head[0], tail[0], dtype=cp.int32)
             gy = cp.arange(head[1], tail[1], dtype=cp.int32)
             gz = cp.arange(head[2], tail[2], dtype=cp.int32)
-            print("mesh: ", mesh)
-            print("lattice_sum_mesh: ", lattice_sum_mesh)
 
             density[cp.ix_(cp.arange(nset), cp.arange(rho_slices), gx, gy, gz)] += evaluated_density.reshape(
-                (-1,) + lattice_sum_mesh)
+                -1, rho_slices, *local_mesh)
         else:
             log.debug1('atm %d  rcut %f  over 2 images', atom, real_space_cutoff)
             #:rho1 = eval_rho(pcell, sub_dms, sub_slice, hermi, xc_type, kpts,
@@ -447,9 +422,9 @@ def _eval_rho_bra(cell, dms, shell_ranges, hermi, xc_type, kpts, grids, ignore_i
         sub_slice = (0, n_row_shells, n_row_shells, n_row_shells + n_col_shells)
         density_matrix_subblock = cp.concatenate(rest_dms, axis=2)
         # Update density matrix in place
-        evaluate_density(copied_cell, density_matrix_subblock, sub_slice, hermi, xc_type, kpts,
-                         mesh, ignore_imag=ignore_imag, out=density)
-    return density.reshape((nset, rho_slices, np.prod(mesh)))
+        evaluate_density(copied_cell, density_matrix_subblock, sub_slice, xc_type, kpts,
+                         global_mesh, ignore_imag=ignore_imag, out=density)
+    return density.reshape((nset, rho_slices, np.prod(global_mesh)))
 
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
@@ -481,13 +456,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
 
     nx, ny, nz = mydf.mesh
     density_on_g_mesh = cp.zeros((n_channels * density_slices, nx, ny, nz), dtype=cp.complex128)
-    skip_count = 0
-    skip_threshold = 3
-    # print(len(tasks))
     for grids_dense, grids_sparse in tasks:
-        # if skip_count < skip_threshold:
-        #     skip_count += 1
-        #     continue
         subcell_in_dense_region = grids_dense.cell
         mesh = tuple(grids_dense.mesh)
         n_grid_points = np.prod(mesh)
@@ -549,7 +518,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
                     shells_slice = (0, n_primitive_gtos_in_dense, 0, n_primitive_gtos_in_two_regions)
                     #:rho = eval_rho(t_cell, pgto_dms, shls_slice, 0, 'LDA', kpts,
                     #:               offset=None, submesh=None, ignore_imag=True)
-                    density = _eval_rho_bra(concatenated_cell, coeff_sandwiched_density_matrix, shells_slice, 0,
+                    density = _eval_rho_bra(concatenated_cell, coeff_sandwiched_density_matrix, shells_slice,
                                             'LDA', kpts, grids_dense, True, log)
                 else:
                     raise NotImplementedError
@@ -647,10 +616,10 @@ def convert_veff_on_g_mesh_to_matrix(mydf, xc_for_fock_on_g_mesh, hermi=1, kpts=
             n_shells_in_dense = multigrid._pgto_shells(subcell_in_dense)
             n_shells_in_total = multigrid._pgto_shells(concatenated_cell)
             shells_indices = (0, n_shells_in_dense, 0, n_shells_in_total)
-            veff_slice = eval_mat(concatenated_cell, veff_real_part, shells_indices, 1, 0, 'LDA', kpts)
+            veff_slice = eval_mat(concatenated_cell, veff_real_part, shells_indices, 1, 'LDA', kpts)
             # Imaginary part may contribute
             if not ignore_vG_imag:
-                veff_slice += eval_mat(concatenated_cell, veff_imag_part, shells_indices, 1, 0, 'LDA', kpts) * 1j
+                veff_slice += eval_mat(concatenated_cell, veff_imag_part, shells_indices, 1, 'LDA', kpts) * 1j
 
             veff_slice = cp.einsum('nkpq,pi,qj->nkij', cp.asarray(veff_slice),
                                    cp.asarray(decontracted_coeff_in_dense), cp.asarray(concatenated_coeff))
@@ -663,17 +632,17 @@ def convert_veff_on_g_mesh_to_matrix(mydf, xc_for_fock_on_g_mesh, hermi=1, kpts=
                     veff_slice[:, :, :, n_ao_in_sparse:].transpose(0, 1, 3, 2).conj()
             else:
                 shells_indices = (n_shells_in_dense, n_shells_in_total, 0, n_shells_in_dense)
-                veff_slice = eval_mat(concatenated_cell, veff_real_part, shells_indices, 1, 0, 'LDA', kpts)
+                veff_slice = eval_mat(concatenated_cell, veff_real_part, shells_indices, 1, 'LDA', kpts)
                 # Imaginary part may contribute
                 if not ignore_vG_imag:
-                    veff_slice += eval_mat(concatenated_cell, veff_imag_part, shells_indices, 1, 0, 'LDA', kpts) * 1j
+                    veff_slice += eval_mat(concatenated_cell, veff_imag_part, shells_indices, 1, 'LDA', kpts) * 1j
                 veff_slice = cp.einsum('nkpq,pi,qj->nkij', veff_slice, decontracted_coeff_in_sparse,
                                        decontracted_coeff_in_dense)
                 vj_kpts[:, :, ao_index_in_sparse[:, None], ao_index_in_dense] += veff_slice
 
     return vj_kpts
 
-
+@profile
 def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
            kpts_band=None, with_j=False, return_j=False, verbose=None):
     '''Compute the XC energy and RKS XC matrix at sampled k-points.
@@ -712,10 +681,11 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     else:
         raise NotImplementedError
 
-    density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
-
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
+
+    # density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+    density_on_G_mesh = cp.zeros((nset, 1, ngrids), dtype=cp.complex128)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
     coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)
@@ -724,13 +694,14 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     log.debug('Multigrid Coulomb energy %s', coulomb_energy)
 
     weight = cell.vol / ngrids
+
     # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
     # computing rhoR with IFFT, the weight factor is not needed.
     density_in_real_space = tools.ifft(density_on_G_mesh.reshape(-1, ngrids), mesh).real * (1. / weight)
     density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
     n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight
 
-    weighted_xc_for_fock_on_g_mesh = cp.ndarray((nset, *density_in_real_space.shape))
+    weighted_xc_for_fock_on_g_mesh = cp.ndarray((nset, *density_in_real_space.shape), dtype=cp.complex128)
     xc_energy_sum = cp.zeros(nset)
     for i in range(nset):
         if xc_type == 'LDA':
@@ -740,8 +711,11 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
             xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i], deriv=1,
                                                                           xctype=xc_type)[:2]
 
+        xc_for_fock *= weight
+
         xc_energy_sum[i] += (density_in_real_space[i, 0] * xc_for_energy.flatten()).sum() * weight
-        weighted_xc_for_fock_on_g_mesh[i] = tools.fft(weight * xc_for_fock, mesh)
+
+        weighted_xc_for_fock_on_g_mesh[i] = tools.fft(xc_for_fock * weight, mesh)
     density_in_real_space = density_on_G_mesh = None
 
     if nset == 1:
@@ -753,7 +727,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     if xc_type == 'LDA':
         if with_j:
-            weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh.reshape(nset, *mesh)
+            weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
         xc_for_fock = convert_veff_on_g_mesh_to_matrix(mydf, weighted_xc_for_fock_on_g_mesh, hermi, kpts_band,
                                                        verbose=log)
     elif xc_type == 'GGA':
