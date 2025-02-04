@@ -151,6 +151,7 @@ def eval_mat(cell, weights, shls_slice=None, comp=1,
                 mat = mat[:, 0]
         out.append(mat)
 
+
     if n_mat is None:
         out = out[0]
     return out
@@ -222,9 +223,9 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
     else:
         raise NotImplementedError('meta-GGA')
     if n_components == 1:
-        denstiy_shape = (np.prod(local_mesh),)
+        density_shape = (np.prod(local_mesh),)
     else:
-        denstiy_shape = (n_components, np.prod(local_mesh))
+        density_shape = (n_components, np.prod(local_mesh))
     kernel_name = 'NUMINTrho_' + xc_type.lower() + lattice_type
     driver = libdft.NUMINT_rho_drv
 
@@ -323,7 +324,7 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
             # complex density cannot be updated inplace directly by
             # function NUMINT_rho_drv
             if out is None:
-                rho_i = cp.empty(denstiy_shape, cp.complex128)
+                rho_i = cp.empty(density_shape, cp.complex128)
                 new_driver_wrapper(rho_i.real, dmR)
                 new_driver_wrapper(rho_i.imag, dmI)
             else:
@@ -335,12 +336,16 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                 # rho_i needs to be initialized to 0 because rho_i is updated
                 # inplace in function NUMINT_rho_drv
                 # rho_i = driver_wrapper(shape, dmR, hermi)
-                rho_i = driver_wrapper(denstiy_shape, dmR)
+                rho_i = new_driver_wrapper(cp.empty(density_shape, cp.float64), dmR)
             else:
                 assert out[i].dtype == cp.double
                 rho_i = new_driver_wrapper(out[i], dmR)
 
+        cpu = driver_wrapper(density_shape, dmR)
+        gpu = new_driver_wrapper(cp.empty(density_shape, cp.float64), dmR)
+        print('max diff', cp.amax(gpu - cpu))
         dmR = dmI = None
+
         rho.append(rho_i)
 
     if n_dm == 1:
@@ -349,7 +354,7 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
 
 @profile
 def _eval_rho_bra(cell, dms, shell_ranges, xc_type, kpts, grids, ignore_imag, log):
-    lattice_vectors = np.asarray(cell.lattice_vectors())
+    lattice_vectors = cell.lattice_vectors()
     max_element = lattice_vectors.max()
     global_mesh = np.asarray(grids.mesh)
     real_space_cutoff = grids.cell.rcut
@@ -508,6 +513,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
             n_primitive_gtos_in_two_regions = multigrid._pgto_shells(concatenated_cell)
 
             if deriv == 0:
+                print("hermi", hermi)
                 if hermi:
                     n_ao_in_sparse, n_ao_in_dense = density_matrix_block_from_sparse_rows.shape[2:]
                     density_matrix_block_from_dense_rows[:, :, :,
@@ -520,6 +526,11 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
                     #:               offset=None, submesh=None, ignore_imag=True)
                     density = _eval_rho_bra(concatenated_cell, coeff_sandwiched_density_matrix, shells_slice,
                                             'LDA', kpts, grids_dense, True, log)
+
+                    density_cpu = multigrid._eval_rho_bra(concatenated_cell, coeff_sandwiched_density_matrix.get(), shells_slice, 0, 'LDA', kpts, grids_dense, True, log)
+
+                    print('per task, max diff', cp.amax(density - cp.asarray(density_cpu)))
+
                 else:
                     raise NotImplementedError
 
@@ -529,7 +540,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
         weight_per_grid_point = 1. / n_k_points * cell.vol / n_grid_points
         density_contribution_on_g_mesh = tools.fft(density.reshape(n_channels * density_slices, -1), mesh)
         density_contribution_on_g_mesh *= weight_per_grid_point
-        fft_grids = map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh)
+        fft_grids = list(map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh))
         #:rhoG[:,gx[:,None,None],gy[:,None],gz] += rho_freq.reshape((-1,)+mesh)
 
         density_on_g_mesh[
@@ -683,9 +694,14 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
+    cpu_df = multigrid.MultiGridFFTDF(mydf.cell)
 
-    # density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
-    density_on_G_mesh = cp.zeros((nset, 1, ngrids), dtype=cp.complex128)
+    density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+
+    density_on_G_mesh_cpu = multigrid._eval_rhoG(cpu_df, dm_kpts.get(), hermi, kpts, derivative_order)
+
+    print("density diff: ", cp.amax(density_on_G_mesh - cp.asarray(density_on_G_mesh_cpu)))
+
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
     coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)
@@ -711,8 +727,6 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
             xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i], deriv=1,
                                                                           xctype=xc_type)[:2]
 
-        xc_for_fock *= weight
-
         xc_energy_sum[i] += (density_in_real_space[i, 0] * xc_for_energy.flatten()).sum() * weight
 
         weighted_xc_for_fock_on_g_mesh[i] = tools.fft(xc_for_fock * weight, mesh)
@@ -730,6 +744,11 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
             weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
         xc_for_fock = convert_veff_on_g_mesh_to_matrix(mydf, weighted_xc_for_fock_on_g_mesh, hermi, kpts_band,
                                                        verbose=log)
+
+        xc_for_fock_cpu = multigrid._get_j_pass2(cpu_df, weighted_xc_for_fock_on_g_mesh.get(), hermi, kpts_band,
+                                                       verbose=log)
+
+        print("xc diff: ", cp.amax(xc_for_fock - cp.asarray(xc_for_fock_cpu)))
     elif xc_type == 'GGA':
         raise NotImplementedError
 

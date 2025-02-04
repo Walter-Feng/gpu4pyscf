@@ -1,0 +1,272 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8
+					],
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						1,
+						8
+					]
+				},
+				{
+					"build" : "gint",
+					"jsonFile" : "directory-gint-Debug-b8fb61b14c215210cad2.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "gint",
+					"targetIndexes" : 
+					[
+						3
+					]
+				},
+				{
+					"build" : "gvhf",
+					"jsonFile" : "directory-gvhf-Debug-6149a0b2344eda8268d8.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "gvhf",
+					"targetIndexes" : 
+					[
+						5
+					]
+				},
+				{
+					"build" : "gdft",
+					"jsonFile" : "directory-gdft-Debug-21c0d757912f37e80cce.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "gdft",
+					"targetIndexes" : 
+					[
+						2
+					]
+				},
+				{
+					"build" : "gpbc",
+					"jsonFile" : "directory-gpbc-Debug-5f1d83d825a84a726526.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "gpbc",
+					"targetIndexes" : 
+					[
+						4
+					]
+				},
+				{
+					"build" : "cupy_helper",
+					"jsonFile" : "directory-cupy_helper-Debug-cc5869ec01d3f5c708e0.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "cupy_helper",
+					"targetIndexes" : 
+					[
+						0
+					]
+				},
+				{
+					"build" : "solvent",
+					"jsonFile" : "directory-solvent-Debug-73d4dc86b6357c8fd9ed.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "solvent",
+					"targetIndexes" : 
+					[
+						9
+					]
+				},
+				{
+					"build" : "gvhf-rys",
+					"jsonFile" : "directory-gvhf-rys-Debug-a6a5f10146bf8fd56451.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "gvhf-rys",
+					"targetIndexes" : 
+					[
+						7
+					]
+				},
+				{
+					"build" : "gvhf-md",
+					"jsonFile" : "directory-gvhf-md-Debug-4288ededbaf436e32c82.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.19"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "gvhf-md",
+					"targetIndexes" : 
+					[
+						6
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8
+					],
+					"name" : "gpu4pyscf",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 5,
+					"id" : "cupy_helper::@df4a7f97fc96d42a30d4",
+					"jsonFile" : "target-cupy_helper-Debug-3115db19ae1451d002f7.json",
+					"name" : "cupy_helper",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "cutlass::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-cutlass-Debug-9ee36904ce0cf7efe61a.json",
+					"name" : "cutlass",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "gdft::@1b85ed9d15b289ea223a",
+					"jsonFile" : "target-gdft-Debug-f63bb7d2f66ef83789c5.json",
+					"name" : "gdft",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "gint::@173a1938638c8b7bb790",
+					"jsonFile" : "target-gint-Debug-149b17c6506c59a12299.json",
+					"name" : "gint",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 4,
+					"id" : "gpbc::@e254a56330ebf1b96aa2",
+					"jsonFile" : "target-gpbc-Debug-b3ab060f75b223061453.json",
+					"name" : "gpbc",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "gvhf::@a175c2abeb45bbe3ce5c",
+					"jsonFile" : "target-gvhf-Debug-18f33ae1beca0d1061d3.json",
+					"name" : "gvhf",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 8,
+					"id" : "gvhf_md::@f7a5a2056302d439b645",
+					"jsonFile" : "target-gvhf_md-Debug-3b006bee7bae7cd2793a.json",
+					"name" : "gvhf_md",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 7,
+					"id" : "gvhf_rys::@68a2ad3a6d20be6573da",
+					"jsonFile" : "target-gvhf_rys-Debug-6b316ad53271dac9a60e.json",
+					"name" : "gvhf_rys",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "libxc::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-libxc-Debug-bcb6dc166df2b4debd88.json",
+					"name" : "libxc",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 6,
+					"id" : "solvent::@cbc9d7a96a14bf43ea80",
+					"jsonFile" : "target-solvent-Debug-2ecd673b35c92f8772c2.json",
+					"name" : "solvent",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug",
+		"source" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 7
+	}
+}

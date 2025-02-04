@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/libxc"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/libxc.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/libxc-complete.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-build.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-configure.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-download.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-install.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-mkdir.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-patch.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"libxc"
+		],
+		"name" : "libxc"
+	}
+}

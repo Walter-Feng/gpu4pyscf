@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/cutlass"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/cutlass.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/cutlass-complete.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/cutlass-prefix/src/cutlass-stamp/cutlass-build.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/cutlass-prefix/src/cutlass-stamp/cutlass-configure.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/cutlass-prefix/src/cutlass-stamp/cutlass-download.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/cutlass-prefix/src/cutlass-stamp/cutlass-install.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/cutlass-prefix/src/cutlass-stamp/cutlass-mkdir.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/cutlass-prefix/src/cutlass-stamp/cutlass-patch.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/cutlass-prefix/src/cutlass-stamp/cutlass-test.rule"
+		},
+		{
+			"file" : "/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/cutlass-prefix/src/cutlass-stamp/cutlass-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"cutlass"
+		],
+		"name" : "cutlass"
+	}
+}

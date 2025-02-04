@@ -1,0 +1,13 @@
+# Target labels
+ libxc
+# Source files and their labels
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/libxc
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/libxc.rule
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/CMakeFiles/libxc-complete.rule
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-build.rule
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-configure.rule
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-download.rule
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-install.rule
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-mkdir.rule
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-patch.rule
+/home/rli3/Documents/git/gpu4pyscf/gpu4pyscf/lib/cmake-build-debug/deps/src/libxc-stamp/libxc-update.rule
