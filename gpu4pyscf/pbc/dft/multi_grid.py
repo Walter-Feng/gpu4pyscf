@@ -1,6 +1,3 @@
-import line_profiler
-profile = line_profiler.LineProfiler()
-
 import pyscf.pbc.gto as gto
 import gpu4pyscf.pbc.df.fft as fft
 import gpu4pyscf.pbc.df.fft_jk as fft_jk
@@ -24,7 +21,10 @@ import ctypes
 libgdft = cupy_helper.load_library('libgdft')
 libgpbc = cupy_helper.load_library('libgpbc')
 
-@profile
+PTR_COORD = 1
+EIJ_CUTOFF = 60
+
+
 def eval_mat(cell, weights, shls_slice=None, comp=1,
              xctype='LDA', kpts=None, global_mesh=None, offset=None, local_mesh=None):
     assert (all(cell._bas[:, multigrid.NPRIM_OF] == 1))
@@ -155,7 +155,7 @@ def eval_mat(cell, weights, shls_slice=None, comp=1,
         out = out[0]
     return out
 
-@profile
+
 def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                      global_mesh=None, offset=None, local_mesh=None, ignore_imag=False,
                      out=None):
@@ -222,9 +222,9 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
     else:
         raise NotImplementedError('meta-GGA')
     if n_components == 1:
-        denstiy_shape = (np.prod(local_mesh),)
+        density_shape = (np.prod(local_mesh),)
     else:
-        denstiy_shape = (n_components, np.prod(local_mesh))
+        density_shape = (n_components, np.prod(local_mesh))
     kernel_name = 'NUMINTrho_' + xc_type.lower() + lattice_type
     driver = libdft.NUMINT_rho_drv
 
@@ -323,7 +323,7 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
             # complex density cannot be updated inplace directly by
             # function NUMINT_rho_drv
             if out is None:
-                rho_i = cp.empty(denstiy_shape, cp.complex128)
+                rho_i = cp.empty(density_shape, cp.complex128)
                 new_driver_wrapper(rho_i.real, dmR)
                 new_driver_wrapper(rho_i.imag, dmI)
             else:
@@ -335,7 +335,7 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                 # rho_i needs to be initialized to 0 because rho_i is updated
                 # inplace in function NUMINT_rho_drv
                 # rho_i = driver_wrapper(shape, dmR, hermi)
-                rho_i = driver_wrapper(denstiy_shape, dmR)
+                rho_i = new_driver_wrapper(cp.zeros(density_shape), dmR)
             else:
                 assert out[i].dtype == cp.double
                 rho_i = new_driver_wrapper(out[i], dmR)
@@ -345,9 +345,10 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
 
     if n_dm == 1:
         rho = rho[0]
+
     return cp.asarray(rho)
 
-@profile
+
 def _eval_rho_bra(cell, dms, shell_ranges, xc_type, kpts, grids, ignore_imag, log):
     lattice_vectors = np.asarray(cell.lattice_vectors())
     max_element = lattice_vectors.max()
@@ -424,7 +425,125 @@ def _eval_rho_bra(cell, dms, shell_ranges, xc_type, kpts, grids, ignore_imag, lo
         # Update density matrix in place
         evaluate_density(copied_cell, density_matrix_subblock, sub_slice, xc_type, kpts,
                          global_mesh, ignore_imag=ignore_imag, out=density)
+
     return density.reshape((nset, rho_slices, np.prod(global_mesh)))
+
+
+def sort_gaussian_pairs(mydf, xc_type="LDA"):
+    log = logger.Logger(mydf.stdout, mydf.verbose)
+    cell = mydf.cell
+    lattice_vectors = np.asarray(cell.lattice_vectors())
+    reciprocal_lattice_vectors = cp.asarray(np.linalg.inv(lattice_vectors.T))
+    n_k_points = mydf.kpts.shape[0]
+    tasks = getattr(mydf, 'tasks', None)
+    if tasks is None:
+        mydf.tasks = tasks = multigrid.multi_grids_tasks(cell, mydf.mesh, log)
+
+    nx, ny, nz = mydf.mesh
+
+    pairs = []
+
+    for grids_dense, grids_sparse in tasks:
+        subcell_in_dense_region = grids_dense.cell
+        mesh = tuple(grids_dense.mesh)
+        n_grid_points = np.prod(mesh)
+        weight_per_grid_point = 1. / n_k_points * cell.vol / n_grid_points
+
+        if grids_sparse is None:
+            # The first pass handles all diffused functions using the regular
+            # matrix multiplication code.
+            pairs.append(None)
+        else:
+            subcell_in_sparse_region = grids_sparse.cell
+            equivalent_cell_in_dense, primitive_coeff_in_dense = subcell_in_dense_region.decontract_basis(to_cart=True,
+                                                                                                          aggregate=True)
+            equivalent_cell_in_sparse, primitive_coeff_in_sparse = subcell_in_sparse_region.decontract_basis(
+                to_cart=True, aggregate=True)
+            grouped_cell = equivalent_cell_in_dense + equivalent_cell_in_sparse
+
+            vol = grouped_cell.vol
+            weight_penalty = np.prod(grouped_cell.mesh) / vol
+            minimum_exponent = np.hstack(grouped_cell.bas_exps()).min()
+            theta_ij = minimum_exponent / 2
+            lattice_summation_factor = max(2 * np.pi * cell.rcut / (vol * theta_ij), 1)
+            precision = grouped_cell.precision / weight_penalty / lattice_summation_factor
+            if xc_type != 'LDA':
+                precision *= .1
+            exp_drop_factor = min(precision * multigrid.EXTRA_PREC, multigrid.EXPDROP)
+
+            n_primitive_gtos_in_dense = multigrid._pgto_shells(subcell_in_dense_region)
+            n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
+            vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(grouped_cell)
+
+            for i_angular in set(grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF]):
+                i_shells = np.where(grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF] == i_angular)[
+                    0]
+                i_basis = grouped_cell._bas[i_shells]
+
+                i_exponents = cp.asarray(grouped_cell._env[i_basis[:, multigrid.PTR_EXP]])
+                i_coord_pointers = np.asarray(grouped_cell._atm[i_basis[:, multigrid.ATOM_OF], PTR_COORD])
+                i_x = cp.asarray(grouped_cell._env[i_coord_pointers])
+                i_y = cp.asarray(grouped_cell._env[i_coord_pointers + 1])
+                i_z = cp.asarray(grouped_cell._env[i_coord_pointers + 2])
+                i_coeff = cp.asarray(grouped_cell._env[i_basis[:, multigrid.PTR_COEFF]])
+
+                for j_angular in set(grouped_cell._bas[0:n_primitive_gtos_in_two_regions, multigrid.ANG_OF]):
+                    j_shells = \
+                        np.where(
+                            grouped_cell._bas[0:n_primitive_gtos_in_two_regions, multigrid.ANG_OF] == j_angular)[
+                            0]
+                    j_basis = grouped_cell._bas[j_shells]
+
+                    j_exponents = cp.asarray(grouped_cell._env[j_basis[:, multigrid.PTR_EXP]])
+                    j_coord_pointers = np.array(grouped_cell._atm[j_basis[:, multigrid.ATOM_OF], PTR_COORD])
+                    j_x = cp.asarray(grouped_cell._env[j_coord_pointers])
+                    j_y = cp.asarray(grouped_cell._env[j_coord_pointers + 1])
+                    j_z = cp.asarray(grouped_cell._env[j_coord_pointers + 2])
+                    j_coeff = cp.asarray(grouped_cell._env[j_basis[:, multigrid.PTR_COEFF]])
+                    pair_exponents = cp.repeat(j_exponents, i_exponents.size) + cp.tile(i_exponents, j_exponents.size)
+                    real_space_cutoff_for_pairs = cp.sqrt(EIJ_CUTOFF / pair_exponents)
+                    pair_coeff = cp.repeat(j_coeff, i_coeff.size) * cp.tile(i_coeff, j_coeff.size)
+
+                    for i_image in vectors_to_neighboring_images:
+                        shifted_j_x = j_x + i_image[0]
+                        shifted_j_y = j_y + i_image[1]
+                        shifted_j_z = j_z + i_image[2]
+
+                        interatomic_distance = cp.square(
+                            cp.repeat(shifted_j_x, i_exponents.size) - cp.tile(i_x, j_exponents.size))
+                        interatomic_distance += cp.square(
+                            cp.repeat(shifted_j_y, i_exponents.size) - cp.tile(i_y, j_exponents.size))
+                        interatomic_distance += cp.square(
+                            cp.repeat(shifted_j_z, i_exponents.size) - cp.tile(i_z, j_exponents.size))
+                        prefactor = pair_coeff * cp.exp(- (cp.repeat(j_exponents, i_exponents.size)
+                                                           + cp.tile(i_exponents, j_exponents.size)) /
+                                                        pair_exponents * interatomic_distance)
+                        non_trivial_pairs = cp.where(prefactor > exp_drop_factor)[0]
+
+                        if len(non_trivial_pairs) == 0:
+                            continue
+
+                        pair_x = (cp.repeat(j_exponents * shifted_j_x, i_exponents.size)
+                                  + cp.tile(i_exponents * i_x, j_exponents.size)) / pair_exponents
+                        pair_x = pair_x[non_trivial_pairs]
+                        pair_y = (cp.repeat(j_exponents * shifted_j_y, i_exponents.size)
+                                  + cp.tile(i_exponents * i_y, j_exponents.size)) / pair_exponents
+                        pair_y = pair_y[non_trivial_pairs]
+                        pair_z = (cp.repeat(j_exponents * shifted_j_z, i_exponents.size)
+                                  + cp.tile(i_exponents * i_z, j_exponents.size)) / pair_exponents
+                        pair_z = pair_z[non_trivial_pairs]
+
+                        real_space_cutoff_for_non_trivial_pairs = real_space_cutoff_for_pairs[non_trivial_pairs]
+                        coordinates = cp.vstack((pair_x, pair_y, pair_z))
+                        mesh_begin = cp.floor(reciprocal_lattice_vectors.dot(
+                            coordinates - real_space_cutoff_for_non_trivial_pairs).T * cp.asarray(mesh))
+                        mesh_end = cp.ceil(reciprocal_lattice_vectors.dot(
+                            coordinates + real_space_cutoff_for_non_trivial_pairs).T * cp.asarray(mesh))
+                        ranges = mesh_end - mesh_begin
+                        print(ranges)
+                        print(mesh)
+
+                        assert 0
 
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
@@ -529,7 +648,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
         weight_per_grid_point = 1. / n_k_points * cell.vol / n_grid_points
         density_contribution_on_g_mesh = tools.fft(density.reshape(n_channels * density_slices, -1), mesh)
         density_contribution_on_g_mesh *= weight_per_grid_point
-        fft_grids = map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh)
+        fft_grids = list(map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh))
         #:rhoG[:,gx[:,None,None],gy[:,None],gz] += rho_freq.reshape((-1,)+mesh)
 
         density_on_g_mesh[
@@ -642,7 +761,7 @@ def convert_veff_on_g_mesh_to_matrix(mydf, xc_for_fock_on_g_mesh, hermi=1, kpts=
 
     return vj_kpts
 
-@profile
+
 def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
            kpts_band=None, with_j=False, return_j=False, verbose=None):
     '''Compute the XC energy and RKS XC matrix at sampled k-points.
@@ -684,8 +803,9 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
 
-    # density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
-    density_on_G_mesh = cp.zeros((nset, 1, ngrids), dtype=cp.complex128)
+    cpu_df = multigrid.MultiGridFFTDF(cell)
+
+    density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
     coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)
@@ -710,8 +830,6 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
         else:
             xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(xc_code, density_in_real_space[i], deriv=1,
                                                                           xctype=xc_type)[:2]
-
-        xc_for_fock *= weight
 
         xc_energy_sum[i] += (density_in_real_space[i, 0] * xc_for_energy.flatten()).sum() * weight
 
@@ -750,6 +868,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
     def __init__(self, cell, kpts=np.zeros((1, 3))):
         fft.FFTDF.__init__(self, cell, kpts)
+        sort_gaussian_pairs(self)
 
 
 def fftdf(mf):
