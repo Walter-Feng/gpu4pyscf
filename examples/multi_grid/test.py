@@ -24,14 +24,14 @@ with cupy.cuda.Device(0):
     cell = gto.M(
         h=np.array(lattice_vectors),
         atom=ase_atoms_to_pyscf(bulk('He', 'sc', a=4)),
-        basis='sto-3g',
-        verbose=0,
+        basis='minao',
+        verbose=6,
         unit='aa',
         ke_cutoff=100
     )
     cell.exp_to_discard = 0.1
 
-    cell = tools.super_cell(cell, [2, 2, 2])
+    cell = tools.super_cell(cell, [3, 3, 3])
 
     mf=pbcdft.RKS(cell)
     #mf.xc = "LDA, VWN"
