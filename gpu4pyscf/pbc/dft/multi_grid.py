@@ -429,7 +429,7 @@ def _eval_rho_bra(cell, dms, shell_ranges, xc_type, kpts, grids, ignore_imag, lo
     return density.reshape((nset, rho_slices, np.prod(global_mesh)))
 
 
-def sort_gaussian_pairs(mydf, xc_type="LDA"):
+def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_size = 4):
     log = logger.Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
     lattice_vectors = np.asarray(cell.lattice_vectors())
@@ -439,21 +439,22 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     if tasks is None:
         mydf.tasks = tasks = multigrid.multi_grids_tasks(cell, mydf.mesh, log)
 
-    nx, ny, nz = mydf.mesh
-
     pairs = []
 
     for grids_dense, grids_sparse in tasks:
         subcell_in_dense_region = grids_dense.cell
-        mesh = tuple(grids_dense.mesh)
-        n_grid_points = np.prod(mesh)
-        weight_per_grid_point = 1. / n_k_points * cell.vol / n_grid_points
 
         if grids_sparse is None:
             # The first pass handles all diffused functions using the regular
             # matrix multiplication code.
             pairs.append(None)
         else:
+            mesh = tuple(np.ceil(np.array(grids_dense.mesh) / blocking_size) * blocking_size)
+
+            print("sorted mesh: ", mesh)
+            subcell_in_dense_region.mesh = mesh
+            n_grid_points = np.prod(mesh)
+            weight_per_grid_point = 1. / n_k_points * cell.vol / n_grid_points
             subcell_in_sparse_region = grids_sparse.cell
             equivalent_cell_in_dense, primitive_coeff_in_dense = subcell_in_dense_region.decontract_basis(to_cart=True,
                                                                                                           aggregate=True)
@@ -473,7 +474,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
 
             n_primitive_gtos_in_dense = multigrid._pgto_shells(subcell_in_dense_region)
             n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
-            vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(grouped_cell)
+            vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(subcell_in_dense_region)
 
             for i_angular in set(grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF]):
                 i_shells = np.where(grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF] == i_angular)[
@@ -504,7 +505,11 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     real_space_cutoff_for_pairs = cp.sqrt(EIJ_CUTOFF / pair_exponents)
                     pair_coeff = cp.repeat(j_coeff, i_coeff.size) * cp.tile(i_coeff, j_coeff.size)
 
-                    for i_image in vectors_to_neighboring_images:
+                    non_trivial_pairs_from_images = []
+                    image_indices = []
+                    mesh_begin_indices_from_images = []
+                    mesh_end_indices_from_images = []
+                    for image_index, i_image in enumerate(vectors_to_neighboring_images):
                         shifted_j_x = j_x + i_image[0]
                         shifted_j_y = j_y + i_image[1]
                         shifted_j_z = j_z + i_image[2]
@@ -540,10 +545,22 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                         mesh_end = cp.ceil(reciprocal_lattice_vectors.dot(
                             coordinates + real_space_cutoff_for_non_trivial_pairs).T * cp.asarray(mesh))
                         ranges = mesh_end - mesh_begin
-                        print(ranges)
-                        print(mesh)
+                        broad_enough_pairs = cp.where(cp.linalg.norm(ranges, axis = 1)> 0)[0]
+                        if len(broad_enough_pairs) == 0:
+                            continue
 
-                        assert 0
+                        non_trivial_pairs_from_images.append(non_trivial_pairs[broad_enough_pairs])
+                        image_indices.append(cp.ones(len(broad_enough_pairs), dtype=cp.int32) * image_index)
+                        mesh_begin_indices_from_images.append(cp.floor(mesh_begin[broad_enough_pairs] / 4) * 4)
+                        mesh_end_indices_from_images.append(cp.ceil(mesh_end[broad_enough_pairs] / 4) * 4)
+
+                    non_trivial_pairs_from_images = cp.concatenate(non_trivial_pairs_from_images)
+                    image_indices = cp.concatenate(image_indices)
+                    mesh_begin_indices_from_images = cp.concatenate(mesh_begin_indices_from_images)
+                    mesh_end_indices_from_images = cp.concatenate(mesh_end_indices_from_images)
+                    # print(mesh_end_indices_from_images - mesh_begin_indices_from_images)
+                    # print(mesh_begin_indices_from_images)
+                    # print(mesh_end_indices_from_images)
 
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
