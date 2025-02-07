@@ -429,7 +429,7 @@ def _eval_rho_bra(cell, dms, shell_ranges, xc_type, kpts, grids, ignore_imag, lo
     return density.reshape((nset, rho_slices, np.prod(global_mesh)))
 
 
-def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_size = 4):
+def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_size=4):
     log = logger.Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
     lattice_vectors = np.asarray(cell.lattice_vectors())
@@ -451,7 +451,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_size = 4):
         else:
             mesh = tuple(np.ceil(np.array(grids_dense.mesh) / blocking_size) * blocking_size)
 
-            print("sorted mesh: ", mesh)
             subcell_in_dense_region.mesh = mesh
             n_grid_points = np.prod(mesh)
             weight_per_grid_point = 1. / n_k_points * cell.vol / n_grid_points
@@ -475,11 +474,18 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_size = 4):
             n_primitive_gtos_in_dense = multigrid._pgto_shells(subcell_in_dense_region)
             n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
             vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(subcell_in_dense_region)
+            shell_to_ao_indices = gto.moleintor.make_loc(grouped_cell._bas, 'cart')
 
+            per_angular_pairs = []
             for i_angular in set(grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF]):
                 i_shells = np.where(grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF] == i_angular)[
                     0]
                 i_basis = grouped_cell._bas[i_shells]
+                n_functions_per_i_shell = (i_angular + 1) * (i_angular + 2) // 2
+                i_functions = cp.repeat(
+                    cp.asarray(shell_to_ao_indices[i_shells]), n_functions_per_i_shell).reshape(
+                    -1, n_functions_per_i_shell) + cp.arange(n_functions_per_i_shell)
+                i_functions = i_functions.flatten()
 
                 i_exponents = cp.asarray(grouped_cell._env[i_basis[:, multigrid.PTR_EXP]])
                 i_coord_pointers = np.asarray(grouped_cell._atm[i_basis[:, multigrid.ATOM_OF], PTR_COORD])
@@ -494,6 +500,11 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_size = 4):
                             grouped_cell._bas[0:n_primitive_gtos_in_two_regions, multigrid.ANG_OF] == j_angular)[
                             0]
                     j_basis = grouped_cell._bas[j_shells]
+                    n_functions_per_j_shell = (j_angular + 1) * (j_angular + 2) // 2
+                    j_functions = cp.repeat(
+                        cp.asarray(shell_to_ao_indices[j_shells]), n_functions_per_j_shell).reshape(
+                        -1, n_functions_per_j_shell) + cp.arange(n_functions_per_j_shell)
+                    j_functions = j_functions.flatten()
 
                     j_exponents = cp.asarray(grouped_cell._env[j_basis[:, multigrid.PTR_EXP]])
                     j_coord_pointers = np.array(grouped_cell._atm[j_basis[:, multigrid.ATOM_OF], PTR_COORD])
@@ -545,7 +556,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_size = 4):
                         mesh_end = cp.ceil(reciprocal_lattice_vectors.dot(
                             coordinates + real_space_cutoff_for_non_trivial_pairs).T * cp.asarray(mesh))
                         ranges = mesh_end - mesh_begin
-                        broad_enough_pairs = cp.where(cp.linalg.norm(ranges, axis = 1)> 0)[0]
+                        broad_enough_pairs = cp.where(cp.all(ranges > 0, axis=1))[0]
                         if len(broad_enough_pairs) == 0:
                             continue
 
@@ -556,11 +567,94 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_size = 4):
 
                     non_trivial_pairs_from_images = cp.concatenate(non_trivial_pairs_from_images)
                     image_indices = cp.concatenate(image_indices)
-                    mesh_begin_indices_from_images = cp.concatenate(mesh_begin_indices_from_images)
-                    mesh_end_indices_from_images = cp.concatenate(mesh_end_indices_from_images)
+
+                    per_angular_pairs.append({
+                        "angular": (i_angular, j_angular),
+                        "non_trivial_pairs": non_trivial_pairs_from_images,
+                        "image_indices": image_indices,
+                        "i_shells": i_shells,
+                        "i_functions": i_functions,
+                        "j_shells": j_shells,
+                        "j_functions": j_functions
+                    })
+
+                    # mesh_begin_indices_from_images = cp.concatenate(mesh_begin_indices_from_images)
+                    # mesh_end_indices_from_images = cp.concatenate(mesh_end_indices_from_images)
                     # print(mesh_end_indices_from_images - mesh_begin_indices_from_images)
                     # print(mesh_begin_indices_from_images)
                     # print(mesh_end_indices_from_images)
+
+            pairs.append({
+                "per_angular_pairs": per_angular_pairs,
+                "neighboring_images": vectors_to_neighboring_images,
+                "grouped_cell": grouped_cell
+            })
+
+    mydf.sorted_gaussian_pairs = pairs
+
+
+def new_evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
+    log = logger.Logger(mydf.stdout, mydf.verbose)
+    cell = mydf.cell
+
+    dm_kpts = cp.asarray(dm_kpts, order='C')
+    dms = fft_jk._format_dms(dm_kpts, kpts)
+    n_channels, n_k_points, nao = dms.shape[:3]
+
+    tasks = getattr(mydf, 'tasks', None)
+    if tasks is None:
+        raise "Tasks should not be None. Let me fix later"
+
+    assert (deriv < 1)
+    gga_high_order = False
+    density_slices = 1  # Presumably
+    if deriv == 0:
+        xc_type = 'LDA'
+
+    nx, ny, nz = mydf.mesh
+    density_on_g_mesh = cp.zeros((n_channels * density_slices, nx, ny, nz), dtype=cp.complex128)
+    for (grids_dense, grids_sparse), pairs in zip(tasks, mydf.sorted_gaussian_pairs):
+
+        subcell_in_dense_region = grids_dense.cell
+        mesh = tuple(grids_dense.mesh)
+        n_grid_points = np.prod(mesh)
+
+        if grids_sparse is None:
+            assert pairs is None
+
+            # The first pass handles all diffused functions using the regular
+            # matrix multiplication code.
+            density = cp.zeros((n_channels, density_slices, n_grid_points), dtype=cp.complex128)
+            ao_indices_in_dense = grids_dense.ao_idx
+            density_matrix_in_dense_region = cp.asarray(dms[:, :, ao_indices_in_dense[:, None], ao_indices_in_dense],
+                                                        order='C')
+            for ao_on_sliced_grid_in_dense, grid_begin, grid_end in mydf.aoR_loop(grids_dense, kpts, deriv):
+                ao_values, mask = ao_on_sliced_grid_in_dense[0], ao_on_sliced_grid_in_dense[2]
+                for k in range(n_k_points):
+                    for i in range(n_channels):
+                        if xc_type == 'LDA':
+                            ao_dot_dm = cp.dot(ao_values[k], density_matrix_in_dense_region[i, k])
+                            density_subblock = cp.einsum('xi,xi->x', ao_dot_dm, ao_values[k].conj())
+                        else:
+                            density_subblock = numint.eval_rho(subcell_in_dense_region, ao_values[k],
+                                                               density_matrix_in_dense_region[i, k],
+                                                               mask, xc_type, hermi)
+                        density[i, :, grid_begin:grid_end] += density_subblock
+                ao_values = ao_on_sliced_grid_in_dense = ao_dot_dm = None
+            if hermi:
+                density = density.real
+
+        else:
+
+            fft_grids = list(
+                map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh))
+            #:rhoG[:,gx[:,None,None],gy[:,None],gz] += rho_freq.reshape((-1,)+mesh)
+
+            density_contribution_on_g_mesh = None
+            density_on_g_mesh[
+                cp.ix_(cp.arange(n_channels * density_slices), *fft_grids)] += density_contribution_on_g_mesh.reshape(
+                (-1,) + mesh)
+            assert 0
 
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
@@ -633,12 +727,12 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
             # guessing density matrix that have both AOs from sparse region is neglected
 
             subcell_in_sparse_region = grids_sparse.cell
-            equivalent_cell_in_dense, primitive_coeff_in_dense = subcell_in_dense_region.decontract_basis(to_cart=True,
+            equivalent_cell_in_dense, coeff_from_decontraction = subcell_in_dense_region.decontract_basis(to_cart=True,
                                                                                                           aggregate=True)
             equivalent_cell_in_sparse, primitive_coeff_in_sparse = subcell_in_sparse_region.decontract_basis(
                 to_cart=True, aggregate=True)
             concatenated_cell = equivalent_cell_in_dense + equivalent_cell_in_sparse
-            concatenated_coeff = scipy.linalg.block_diag(primitive_coeff_in_dense, primitive_coeff_in_sparse)
+            concatenated_coeff = scipy.linalg.block_diag(coeff_from_decontraction, primitive_coeff_in_sparse)
 
             n_primitive_gtos_in_dense = multigrid._pgto_shells(subcell_in_dense_region)
             n_primitive_gtos_in_two_regions = multigrid._pgto_shells(concatenated_cell)
@@ -650,7 +744,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
                     n_ao_in_dense:] += density_matrix_block_from_sparse_rows.transpose(0, 1, 3, 2)
                     coeff_sandwiched_density_matrix = cp.einsum('nkij,pi,qj->nkpq',
                                                                 density_matrix_block_from_dense_rows,
-                                                                primitive_coeff_in_dense, concatenated_coeff)
+                                                                coeff_from_decontraction, concatenated_coeff)
                     shells_slice = (0, n_primitive_gtos_in_dense, 0, n_primitive_gtos_in_two_regions)
                     #:rho = eval_rho(t_cell, pgto_dms, shls_slice, 0, 'LDA', kpts,
                     #:               offset=None, submesh=None, ignore_imag=True)
@@ -822,7 +916,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     cpu_df = multigrid.MultiGridFFTDF(cell)
 
-    density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+    density_on_G_mesh = new_evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
     coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)
