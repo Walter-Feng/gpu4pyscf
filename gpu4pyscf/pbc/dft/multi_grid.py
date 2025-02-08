@@ -13,6 +13,7 @@ from pyscf.pbc.dft.multigrid import multigrid
 from pyscf.pbc.df.df_jk import _format_kpts_band
 
 import numpy as np
+import sys
 import cupy as cp
 import scipy
 
@@ -177,9 +178,12 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
     if xc_type != 'LDA':
         precision *= .1
     # concatenate two molecules
+    print("before concatenation:", cell._bas)
     atm, bas, env = gto.conc_env(cell._atm, cell._bas, cell._env,
                                  cell._atm, cell._bas, cell._env)
-    env[multigrid.PTR_EXPDROP] = min(precision * multigrid.EXTRA_PREC, multigrid.EXPDROP)
+    exp_drop_factor = min(precision * multigrid.EXTRA_PREC, multigrid.EXPDROP)
+    env[multigrid.PTR_EXPDROP] = exp_drop_factor
+    print("after concatenation:", bas)
     ao_loc = gto.moleintor.make_loc(bas, 'cart')
     if shells_slice is None:
         shells_slice = (0, cell.nbas, 0, cell.nbas)
@@ -251,9 +255,9 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(env)))
         return cp.asarray(density)
 
-    atm_on_gpu = cp.asarray(atm)
-    bas_on_gpu = cp.asarray(bas)
-    env_on_gpu = cp.asarray(env)
+    atm_on_gpu = cp.asarray(cell._atm)
+    bas_on_gpu = cp.asarray(cell._bas)
+    env_on_gpu = cp.asarray(cell._env)
     ao_loc_on_gpu = cp.asarray(ao_loc)
     vectors_to_neighboring_images_on_gpu = cp.asarray(vectors_to_neighboring_images)
 
@@ -261,7 +265,7 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
         assert isinstance(density, cp.ndarray)
         new_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
                    ctypes.cast(dm.data.ptr, ctypes.c_void_p),
-                   (ctypes.c_int * 4)(i0, i1, j0, j1),
+                   (ctypes.c_int * 4)(i0, i1, j0 - cell.nbas, j1 - cell.nbas),
                    ctypes.cast(ao_loc_on_gpu.data.ptr, ctypes.c_void_p),
                    ctypes.c_int(0), ctypes.c_int(0),
                    ctypes.c_int(n_images),
@@ -275,6 +279,133 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                    ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
 
         return density
+
+    def another_new_driver_wrapper(density, dm):
+
+        another_new_driver = libgpbc.new_evaluate_density_driver
+
+        lattice_vector_on_gpu = cp.asarray(lattice_vector)
+        reciprocal_lattice_vector_on_gpu = cp.asarray(reciprocal_lattice_vector)
+        dm_copy = dm.transpose(0, 2, 1)
+
+        assert (dm_copy.shape[1:] == (naoi, naoj))
+        print(shells_slice)
+
+        for i_angular in set(cell._bas[shells_slice[0]:shells_slice[1], multigrid.ANG_OF]):
+            i_shells = np.where(cell._bas[shells_slice[0]:shells_slice[1], multigrid.ANG_OF] == i_angular)[0] + \
+                       shells_slice[0]
+            n_i_shells = len(i_shells)
+            i_basis = cell._bas[i_shells]
+            n_functions_per_i_shell = (i_angular + 1) * (i_angular + 2) // 2
+            i_functions = cp.repeat(
+                cp.asarray(ao_loc[i_shells]), n_functions_per_i_shell).reshape(
+                -1, n_functions_per_i_shell) + cp.arange(n_functions_per_i_shell)
+
+            i_exponents = cp.asarray(cell._env[i_basis[:, multigrid.PTR_EXP]])
+            i_coord_pointers = np.array(cell._atm[i_basis[:, multigrid.ATOM_OF], PTR_COORD])
+            i_x = cp.asarray(cell._env[i_coord_pointers])
+            i_y = cp.asarray(cell._env[i_coord_pointers + 1])
+            i_z = cp.asarray(cell._env[i_coord_pointers + 2])
+            i_coeff = cp.asarray(cell._env[i_basis[:, multigrid.PTR_COEFF]])
+
+            for j_angular in set(cell._bas[shells_slice[2]:shells_slice[3], multigrid.ANG_OF]):
+                j_shells = shells_slice[2] + \
+                           np.where(cell._bas[shells_slice[2]:shells_slice[3], multigrid.ANG_OF] == j_angular)[0]
+                n_j_shells = len(j_shells)
+                j_basis = cell._bas[j_shells]
+                n_functions_per_j_shell = (j_angular + 1) * (j_angular + 2) // 2
+
+                j_exponents = cp.asarray(cell._env[j_basis[:, multigrid.PTR_EXP]])
+                j_coord_pointers = np.array(cell._atm[j_basis[:, multigrid.ATOM_OF], PTR_COORD])
+                j_x = cp.asarray(cell._env[j_coord_pointers])
+                j_y = cp.asarray(cell._env[j_coord_pointers + 1])
+                j_z = cp.asarray(cell._env[j_coord_pointers + 2])
+                j_coeff = cp.asarray(cell._env[j_basis[:, multigrid.PTR_COEFF]])
+                pair_exponents = cp.repeat(j_exponents, n_i_shells) + cp.tile(i_exponents, n_j_shells)
+                real_space_cutoff_for_pairs = cp.sqrt(EIJ_CUTOFF / pair_exponents)
+                pair_coeff = cp.repeat(j_coeff, i_coeff.size) * cp.tile(i_coeff, j_coeff.size)
+
+                non_trivial_pairs_from_images = []
+                image_indices = []
+                mesh_begin_indices_from_images = []
+                mesh_end_indices_from_images = []
+
+                for image_index, i_image in enumerate(vectors_to_neighboring_images):
+                    shifted_i_x = i_x - i_image[0]
+                    shifted_i_y = i_y - i_image[1]
+                    shifted_i_z = i_z - i_image[2]
+
+                    interatomic_distance = cp.square(cp.repeat(j_x, n_i_shells) - cp.tile(shifted_i_x, n_j_shells))
+                    interatomic_distance += cp.square(cp.repeat(j_y, n_i_shells) - cp.tile(shifted_i_y, n_j_shells))
+                    interatomic_distance += cp.square(cp.repeat(j_z, n_i_shells) - cp.tile(shifted_i_z, n_j_shells))
+                    prefactor = pair_coeff * cp.exp(- (cp.repeat(j_exponents, n_i_shells)
+                                                       + cp.tile(i_exponents, n_j_shells)) /
+                                                    pair_exponents * interatomic_distance)
+
+                    non_trivial_pairs = cp.where((cp.repeat(j_exponents, n_i_shells)
+                                                       + cp.tile(i_exponents, n_j_shells)) /
+                                                    pair_exponents * interatomic_distance < EIJ_CUTOFF)[0]
+
+                    if len(non_trivial_pairs) == 0:
+                        continue
+
+                    pair_x = (cp.repeat(j_exponents * j_x, n_i_shells)
+                              + cp.tile(i_exponents * shifted_i_x, n_j_shells)) / pair_exponents
+                    pair_x = pair_x[non_trivial_pairs]
+                    pair_y = (cp.repeat(j_exponents * j_y, n_i_shells)
+                              + cp.tile(i_exponents * shifted_i_y, n_j_shells)) / pair_exponents
+                    pair_y = pair_y[non_trivial_pairs]
+                    pair_z = (cp.repeat(j_exponents * j_z, n_i_shells)
+                              + cp.tile(i_exponents * shifted_i_z, n_j_shells)) / pair_exponents
+                    pair_z = pair_z[non_trivial_pairs]
+
+                    real_space_cutoff_for_non_trivial_pairs = real_space_cutoff_for_pairs[non_trivial_pairs]
+                    coordinates = cp.vstack((pair_x, pair_y, pair_z))
+                    mesh_begin = cp.floor(reciprocal_lattice_vector_on_gpu.dot(
+                        coordinates - real_space_cutoff_for_non_trivial_pairs).T * cp.asarray(global_mesh))
+                    mesh_end = cp.ceil(reciprocal_lattice_vector_on_gpu.dot(
+                        coordinates + real_space_cutoff_for_non_trivial_pairs).T * cp.asarray(global_mesh))
+                    ranges = mesh_end - mesh_begin
+                    broad_enough_pairs = cp.where(cp.all(ranges > 0, axis=1))[0]
+                    if len(broad_enough_pairs) == 0:
+                        continue
+
+                    non_trivial_pairs_from_images.append(non_trivial_pairs[broad_enough_pairs])
+                    image_indices.append(cp.repeat(cp.array(image_index,dtype=cp.int32), len(broad_enough_pairs)))
+                    mesh_begin_indices_from_images.append(cp.floor(mesh_begin[broad_enough_pairs] / 4) * 4)
+                    mesh_end_indices_from_images.append(cp.ceil(mesh_end[broad_enough_pairs] / 4) * 4)
+
+                non_trivial_pairs_from_images = cp.asarray(cp.concatenate(non_trivial_pairs_from_images), dtype=cp.int32)
+                image_indices = cp.asarray(cp.concatenate(image_indices), dtype=cp.int32)
+
+                print("non_trivial_pairs: ", non_trivial_pairs_from_images)
+                print("image_indices: ", image_indices)
+                print("global mesh: ", global_mesh)
+
+                i_shells_on_gpu = cp.asarray(i_shells, dtype=cp.int32)
+                j_shells_on_gpu = cp.asarray(j_shells, dtype=cp.int32)
+
+                another_new_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
+                                   ctypes.cast(dm_copy.data.ptr, ctypes.c_void_p),
+                                   ctypes.c_int(i_angular), ctypes.c_int(j_angular),
+                                   ctypes.cast(non_trivial_pairs_from_images.data.ptr, ctypes.c_void_p),
+                                   ctypes.c_int(len(non_trivial_pairs_from_images)),
+                                   ctypes.cast(i_shells_on_gpu.data.ptr, ctypes.c_void_p),
+                                   ctypes.c_int(len(i_shells)),
+                                   ctypes.cast(j_shells_on_gpu.data.ptr, ctypes.c_void_p),
+                                   ctypes.c_int(len(j_shells)),
+                                   ctypes.cast(ao_loc_on_gpu.data.ptr, ctypes.c_void_p),
+                                   ctypes.c_int(naoj),
+                                   ctypes.cast(image_indices.data.ptr, ctypes.c_void_p),
+                                   ctypes.cast(vectors_to_neighboring_images_on_gpu.data.ptr, ctypes.c_void_p),
+                                   ctypes.cast(lattice_vector_on_gpu.data.ptr, ctypes.c_void_p),
+                                   ctypes.cast(reciprocal_lattice_vector_on_gpu.data.ptr, ctypes.c_void_p),
+                                   (ctypes.c_int * 3)(*global_mesh),
+                                   ctypes.cast(atm_on_gpu.data.ptr, ctypes.c_void_p),
+                                   ctypes.cast(bas_on_gpu.data.ptr, ctypes.c_void_p),
+                                   ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
+
+                return density
 
     rho = []
     for i, dm_i in enumerate(dm):
@@ -331,15 +462,28 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                 new_driver_wrapper(out[i].real, dmR)
                 new_driver_wrapper(out[i].imag, dmI)
         else:
-            if out is None:
-                # rho_i needs to be initialized to 0 because rho_i is updated
-                # inplace in function NUMINT_rho_drv
-                # rho_i = driver_wrapper(shape, dmR, hermi)
-                rho_i = new_driver_wrapper(cp.zeros(density_shape), dmR)
-            else:
-                assert out[i].dtype == cp.double
-                rho_i = new_driver_wrapper(out[i], dmR)
+            pass
+            # if out is None:
+            #     # rho_i needs to be initialized to 0 because rho_i is updated
+            #     # inplace in function NUMINT_rho_drv
+            #     # rho_i = driver_wrapper(shape, dmR, hermi)
+            #     rho_i = new_driver_wrapper(cp.zeros(density_shape), dmR)
+            # else:
+            #     assert out[i].dtype == cp.double
+            #     rho_i = new_driver_wrapper(out[i], dmR)
 
+        dmR = dmR * 0 + 1
+        cpu_driver = driver_wrapper(density_shape, dmR)
+        print("from old")
+        from_old_driver = new_driver_wrapper(cp.zeros(density_shape), dmR)
+        print("from new")
+        from_new_driver = another_new_driver_wrapper(cp.zeros(density_shape), dmR)
+        print(shells_slice)
+        print(from_new_driver)
+        print(cpu_driver)
+        print(from_new_driver / from_old_driver)
+
+        assert 0
         dmR = dmI = None
         rho.append(rho_i)
 
@@ -916,7 +1060,8 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     cpu_df = multigrid.MultiGridFFTDF(cell)
 
-    density_on_G_mesh = new_evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+    # density_on_G_mesh = new_evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+    density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
     coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)

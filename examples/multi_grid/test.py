@@ -23,7 +23,7 @@ with cupy.cuda.Device(0):
     lattice_vectors = diamond_cell.cell
     cell = gto.M(
         h=np.array(lattice_vectors),
-        atom=ase_atoms_to_pyscf(bulk('C', 'sc', a=2)),
+        atom=ase_atoms_to_pyscf(bulk('He', 'sc', a=2)),
         basis='sto-3g',
         verbose=6,
         unit='aa',
