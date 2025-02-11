@@ -18,12 +18,12 @@ from pyscf.pbc.dft import multigrid as cpu_multi_grid
 
 # cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
 
-diamond_cell = bulk('He', 'sc', a=2)
+diamond_cell = bulk('He', 'sc', a=3)
 with cupy.cuda.Device(0):
     lattice_vectors = diamond_cell.cell
     cell = gto.M(
         h=np.array(lattice_vectors),
-        atom=ase_atoms_to_pyscf(bulk('He', 'sc', a=2)),
+        atom=ase_atoms_to_pyscf(bulk('He', 'sc', a=3)),
         basis='sto-3g',
         verbose=6,
         unit='aa',
