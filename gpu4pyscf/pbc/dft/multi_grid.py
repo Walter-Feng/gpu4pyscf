@@ -13,7 +13,6 @@ from pyscf.pbc.dft.multigrid import multigrid
 from pyscf.pbc.df.df_jk import _format_kpts_band
 
 import numpy as np
-import sys
 import cupy as cp
 import scipy
 
@@ -24,6 +23,16 @@ libgpbc = cupy_helper.load_library('libgpbc')
 
 PTR_COORD = 1
 EIJ_CUTOFF = 60
+
+
+def accumulate(list):
+    out = [0]
+    for i in range(len(list)):
+        if i == 0:
+            out.append(list[i])
+        else:
+            out.append(out[i] + list[i])
+    return out
 
 
 def eval_mat(cell, weights, shls_slice=None, comp=1,
@@ -169,6 +178,10 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
     assert (all(cell._bas[:, multigrid.NPRIM_OF] == 1))
     if global_mesh is None:
         global_mesh = cell.mesh
+
+    global_mesh = np.asarray(global_mesh) // 4 * 4
+    local_mesh = global_mesh
+    offset = [0, 0, 0]
     vol = cell.vol
     weight_penalty = np.prod(global_mesh) / vol
     minimum_exponent = np.hstack(cell.bas_exps()).min()
@@ -279,7 +292,9 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
         return density
 
     def another_new_driver_wrapper(density, dm):
+        copied_density = cp.copy(density)
         another_new_driver = libgpbc.new_evaluate_density_driver
+        new_driver_with_local_sort = libgpbc.new_evaluate_density_driver_with_local_sort
 
         lattice_vector_on_gpu = cp.asarray(lattice_vector)
         reciprocal_lattice_vector_on_gpu = cp.asarray(reciprocal_lattice_vector)
@@ -385,25 +400,27 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                                                             dtype=cp.int32)
                 mesh_end_indices_from_images = cp.asarray(cp.concatenate(mesh_end_indices_from_images),
                                                           dtype=cp.int32)
-                mesh_size_from_images = cp.asarray(cp.concatenate(mesh_size_from_images), dtype=cp.int32)
                 granularized_mesh_size = cp.array(global_mesh) // cp.array([4, 4, 4])
                 granularized_mesh = cp.asarray(
                     cp.meshgrid(*list(map(cp.arange, granularized_mesh_size)))).reshape(3, -1).transpose()
 
                 non_trivial_pairs_at_local_points = []
                 for granularized_mesh_point in granularized_mesh:
-                    translation_lower = cp.ceil(
+                    translation_lower = cp.floor(
                         (mesh_begin_indices_from_images - granularized_mesh_point) / granularized_mesh_size)
-                    translation_upper = cp.floor(
-                        (mesh_end_indices_from_images - granularized_mesh_point) / granularized_mesh_size - 0.1)
-                    is_within_cell_translation = cp.all(translation_lower <= translation_upper, axis=1)
+                    translation_upper = cp.ceil(
+                        (mesh_end_indices_from_images - granularized_mesh_point) / granularized_mesh_size)
+                    is_within_cell_translation = cp.all(translation_lower < translation_upper, axis=1)
                     non_trivial_pairs_at_local_points.append(cp.where(is_within_cell_translation)[0])
 
                 i_shells_on_gpu = cp.asarray(i_shells, dtype=cp.int32)
                 j_shells_on_gpu = cp.asarray(j_shells, dtype=cp.int32)
-                print(list(map(len, non_trivial_pairs_at_local_points)))
-                print(sum(list(map(len, non_trivial_pairs_at_local_points))))
-                print(non_trivial_pairs_at_local_points[0])
+
+                n_pairs_per_point = list(map(len, non_trivial_pairs_at_local_points))
+                accumulated_n_pairs_per_point = cp.asarray(accumulate(n_pairs_per_point), dtype=cp.int32)
+                non_trivial_pairs_at_local_points = cp.asarray(
+                    cp.concatenate(non_trivial_pairs_at_local_points), dtype=cp.int32)
+                non_trivial_pairs_at_local_points = cp.asarray(non_trivial_pairs_at_local_points, dtype=cp.int32)
 
                 another_new_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
                                    ctypes.cast(dm_copy.data.ptr, ctypes.c_void_p),
@@ -424,6 +441,29 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                                    ctypes.cast(atm_on_gpu.data.ptr, ctypes.c_void_p),
                                    ctypes.cast(bas_on_gpu.data.ptr, ctypes.c_void_p),
                                    ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p))
+
+                new_driver_with_local_sort(ctypes.cast(copied_density.data.ptr, ctypes.c_void_p),
+                                           ctypes.cast(dm_copy.data.ptr, ctypes.c_void_p),
+                                           ctypes.c_int(i_angular), ctypes.c_int(j_angular),
+                                           ctypes.cast(non_trivial_pairs_from_images.data.ptr, ctypes.c_void_p),
+                                           ctypes.c_int(len(non_trivial_pairs_from_images)),
+                                           ctypes.cast(i_shells_on_gpu.data.ptr, ctypes.c_void_p),
+                                           ctypes.c_int(len(i_shells)),
+                                           ctypes.cast(j_shells_on_gpu.data.ptr, ctypes.c_void_p),
+                                           ctypes.c_int(len(j_shells)),
+                                           ctypes.cast(ao_loc_on_gpu.data.ptr, ctypes.c_void_p),
+                                           ctypes.c_int(naoj),
+                                           ctypes.cast(non_trivial_pairs_at_local_points.data.ptr, ctypes.c_void_p),
+                                           ctypes.cast(accumulated_n_pairs_per_point.data.ptr, ctypes.c_void_p),
+                                           ctypes.cast(image_indices.data.ptr, ctypes.c_void_p),
+                                           ctypes.cast(vectors_to_neighboring_images_on_gpu.data.ptr, ctypes.c_void_p),
+                                           ctypes.cast(lattice_vector_on_gpu.data.ptr, ctypes.c_void_p),
+                                           ctypes.cast(reciprocal_lattice_vector_on_gpu.data.ptr, ctypes.c_void_p),
+                                           (ctypes.c_int * 3)(*global_mesh),
+                                           ctypes.cast(atm_on_gpu.data.ptr, ctypes.c_void_p),
+                                           ctypes.cast(bas_on_gpu.data.ptr, ctypes.c_void_p),
+                                           ctypes.cast(env_on_gpu.data.ptr, ctypes.c_void_p),
+                                           ctypes.c_int(4), ctypes.c_int(4), ctypes.c_int(4))
 
                 return density
 
@@ -497,6 +537,8 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
         from_old_driver = new_driver_wrapper(cp.zeros(density_shape), dmR)
         from_new_driver = another_new_driver_wrapper(cp.zeros(density_shape), dmR)
 
+        print("max diff: ", cp.max(cp.abs(cpu_driver - from_old_driver)))
+        print("max diff: ", cp.max(cp.abs(from_new_driver - from_old_driver)))
         assert 0
         dmR = dmI = None
         rho.append(rho_i)
