@@ -250,10 +250,8 @@ __global__ void evaluate_density_new_kernel_ss(
 }
 
 __global__ void evaluate_density_new_kernel_ss(
-        double *density, const double *density_matrices,
-        const int *non_trivial_pairs, const int n_pairs,
+        double *density, const double *density_matrices, const int *non_trivial_pairs,
         const int *i_shells, const int n_i_shells, const int *j_shells, const int n_j_shells,
-        const int *shell_to_function, const int n_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images,
         const double *lattice_vectors, const double *reciprocal_lattice_vectors,
@@ -293,9 +291,9 @@ __global__ void evaluate_density_new_kernel_ss(
         const int j_shell_index = pair_index / n_i_shells;
         const int i_shell_index = pair_index % n_i_shells;
         const int i_shell = i_shells[i_shell_index];
-        const int i_function = shell_to_function[i_shell] - shell_to_function[i_shells[0]];
+        const int i_function = i_shell;
         const int j_shell = j_shells[j_shell_index];
-        const int j_function = shell_to_function[j_shell] - shell_to_function[j_shells[0]];
+        const int j_function = j_shell;
 
         const double i_exponent = env[bas(PTR_EXP, i_shell)];
         const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
@@ -315,7 +313,7 @@ __global__ void evaluate_density_new_kernel_ss(
         const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * distance_squared(
                 i_x - j_x, i_y - j_y, i_z - j_z);
         const double density_matrix_value = density_matrices[image_index * density_matrix_stride +
-                                                             i_function * n_functions + j_function];
+                                                             i_function * n_j_shells + j_function];
         const double prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff * 0.282094791773878143 *
                                  0.282094791773878143 * density_matrix_value;
 
@@ -373,9 +371,6 @@ __global__ void evaluate_density_new_kernel_ss(
         }
 
         density_value += prefactor * neighboring_gaussian_sum;
-    }
-    for (int i_pair = 0; i_pair < n_pairs; i_pair++) {
-
     }
 
     density[a_index * mesh_b * mesh_c + b_index * mesh_c + c_index] += density_value;
@@ -597,16 +592,14 @@ void new_evaluate_density_driver(
 }
 
 void new_evaluate_density_driver_with_local_sort(
-        double *density, const double *density_matrices, const int left_angular, const int right_angular,
-        const int *non_trivial_pairs, const int n_pairs,
+        double *density, const double *density_matrices,
+        const int left_angular, const int right_angular, const int *non_trivial_pairs,
         const int *i_shells, const int n_i_shells, const int *j_shells, const int n_j_shells,
-        const int *shell_to_function, const int n_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images,
         const double *lattice_vectors, const double *reciprocal_lattice_vectors,
-        const int *mesh, const int *atm, const int *bas, const double *env, const int block_size_a,
-        const int block_size_b, const int block_size_c) {
-    dim3 block_size(block_size_c, block_size_b, block_size_a);
+        const int *mesh, const int *atm, const int *bas, const double *env, const int blocking_sizes[3]) {
+    dim3 block_size(blocking_sizes[2], blocking_sizes[1], blocking_sizes[0]);
     int mesh_a = mesh[0];
     int mesh_b = mesh[1];
     int mesh_c = mesh[2];
@@ -617,9 +610,7 @@ void new_evaluate_density_driver_with_local_sort(
 
     if (left_angular == 0 && right_angular == 0) {
         evaluate_density_new_kernel_ss<<<block_grid, block_size>>>(density, density_matrices, non_trivial_pairs,
-                                                                   n_pairs,
                                                                    i_shells, n_i_shells, j_shells, n_j_shells,
-                                                                   shell_to_function, n_functions,
                                                                    sorted_pairs_per_local_grid,
                                                                    accumulated_n_pairs_per_local_grid,
                                                                    image_indices, vectors_to_neighboring_images,
