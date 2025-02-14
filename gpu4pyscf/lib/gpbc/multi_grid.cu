@@ -249,18 +249,21 @@ __global__ void evaluate_density_new_kernel_ss(
     density[a_index * mesh_b * mesh_c + b_index * mesh_c + c_index] += density_value;
 }
 
+template<int n_channels>
 __global__ void evaluate_density_new_kernel_ss(
         double *density, const double *density_matrices, const int *non_trivial_pairs,
-        const int *i_shells, const int n_i_shells, const int *j_shells, const int n_j_shells,
+        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
-        const int *image_indices, const double *vectors_to_neighboring_images,
+        const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
         const double *lattice_vectors, const double *reciprocal_lattice_vectors,
         const int mesh_a, const int mesh_b, const int mesh_c,
         const int *atm, const int *bas, const double *env) {
     const uint a_index = threadIdx.z + blockDim.z * blockIdx.z;
     const uint b_index = threadIdx.y + blockDim.y * blockIdx.y;
     const uint c_index = threadIdx.x + blockDim.x * blockIdx.x;
-    const int density_matrix_stride = n_i_shells * n_j_shells; // needs to fix to n_i_functions * n_j_functions
+    const int density_matrix_stride = n_i_functions * n_j_functions; // needs to fix to n_i_functions * n_j_functions
+    const int density_matrix_channel_stride = density_matrix_stride * n_images;
 
     if (a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c) {
         return;
@@ -273,7 +276,14 @@ __global__ void evaluate_density_new_kernel_ss(
     const double position_z = lattice_vectors[2] * a_index / mesh_a + lattice_vectors[5] * b_index / mesh_b +
                               lattice_vectors[8] * c_index / mesh_c;
 
-    double density_value = 0;
+    double density_value[n_channels];
+    double prefactor[n_channels];
+
+#pragma unroll
+    for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+        density_value[i_channel] = 0;
+    }
+
 
     const int local_grid_index = blockIdx.z + gridDim.z * blockIdx.y + gridDim.z * gridDim.y * blockIdx.x;
     const int pairs_offset = accumulated_n_pairs_per_local_grid[local_grid_index];
@@ -291,9 +301,9 @@ __global__ void evaluate_density_new_kernel_ss(
         const int j_shell_index = pair_index / n_i_shells;
         const int i_shell_index = pair_index % n_i_shells;
         const int i_shell = i_shells[i_shell_index];
-        const int i_function = i_shell;
+        const int i_function = shell_to_ao_indices[i_shell];
         const int j_shell = j_shells[j_shell_index];
-        const int j_function = j_shell;
+        const int j_function = shell_to_ao_indices[j_shell];
 
         const double i_exponent = env[bas(PTR_EXP, i_shell)];
         const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
@@ -312,10 +322,16 @@ __global__ void evaluate_density_new_kernel_ss(
         const double ij_exponent = i_exponent + j_exponent;
         const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * distance_squared(
                 i_x - j_x, i_y - j_y, i_z - j_z);
-        const double density_matrix_value = density_matrices[image_index * density_matrix_stride +
-                                                             i_function * n_j_shells + j_function];
-        const double prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff * 0.282094791773878143 *
-                                 0.282094791773878143 * density_matrix_value;
+
+        const double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff
+                                      * 0.282094791773878143 * 0.282094791773878143;
+
+#pragma unroll
+        for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+            prefactor[i_channel] = pair_prefactor * density_matrices[density_matrix_channel_stride * i_channel +
+                                                                     image_index * density_matrix_stride +
+                                                                     i_function * n_j_functions + j_function];
+        }
 
         const double real_space_cutoff = sqrt(EIJCUTOFF / ij_exponent);
 
@@ -357,23 +373,28 @@ __global__ void evaluate_density_new_kernel_ss(
             for (int b_cell = lower_b_index; b_cell <= upper_b_index; b_cell++) {
                 for (int c_cell = lower_c_index; c_cell <= upper_c_index; c_cell++) {
                     const double r_squared = distance_squared(
-                            x - a_cell * lattice_vectors[0] - b_cell * lattice_vectors[3] -
-                            c_cell * lattice_vectors[6],
-                            y - a_cell * lattice_vectors[1] - b_cell * lattice_vectors[4] -
-                            c_cell * lattice_vectors[7],
+                            x - a_cell * lattice_vectors[0] - b_cell * lattice_vectors[3] - c_cell * lattice_vectors[6],
+                            y - a_cell * lattice_vectors[1] - b_cell * lattice_vectors[4] - c_cell * lattice_vectors[7],
                             z - a_cell * lattice_vectors[2] - b_cell * lattice_vectors[5] -
-                            c_cell * lattice_vectors[
-                                    8]);
+                            c_cell * lattice_vectors[8]);
 
                     neighboring_gaussian_sum += exp(-ij_exponent * r_squared);
                 }
             }
         }
 
-        density_value += prefactor * neighboring_gaussian_sum;
+#pragma unroll
+        for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+            density_value[i_channel] += prefactor[i_channel] * neighboring_gaussian_sum;
+        }
+
     }
 
-    density[a_index * mesh_b * mesh_c + b_index * mesh_c + c_index] += density_value;
+#pragma unroll
+    for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+        density[i_channel * mesh_a * mesh_b * mesh_c
+                + a_index * mesh_b * mesh_c + b_index * mesh_c + c_index] += density_value[i_channel];
+    }
 }
 
 
@@ -487,6 +508,40 @@ __global__ void evaluate_density_kernel_ss_orthogonal(
     density[a_index * local_mesh_b * local_mesh_c + b_index * local_mesh_c + c_index] += density_value;
 }
 
+template<int n_channels>
+void new_evaluate_density_driver(
+        double *density, const double *density_matrices,
+        const int left_angular, const int right_angular, const int *non_trivial_pairs,
+        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
+        const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
+        const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
+        const double *lattice_vectors, const double *reciprocal_lattice_vectors,
+        const int *mesh, const int *atm, const int *bas, const double *env, const int blocking_sizes[3]) {
+    dim3 block_size(blocking_sizes[2], blocking_sizes[1], blocking_sizes[0]);
+    int mesh_a = mesh[0];
+    int mesh_b = mesh[1];
+    int mesh_c = mesh[2];
+    dim3 block_grid((mesh_c + blocking_sizes[2] - 1) / blocking_sizes[2],
+                    (mesh_b + blocking_sizes[1] - 1) / blocking_sizes[1],
+                    (mesh_a + blocking_sizes[0] - 1) / blocking_sizes[0]);
+
+    if (left_angular == 0 && right_angular == 0) {
+        evaluate_density_new_kernel_ss<n_channels><<<block_grid, block_size>>>(
+                density, density_matrices, non_trivial_pairs, i_shells, n_i_shells, j_shells,
+                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
+                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
+                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
+    } else {
+        fprintf(stderr,
+                "angular momentum pair %d, %d is not supported in new_evaluate_density_driver\n", left_angular,
+                right_angular);
+    }
+
+    checkCudaErrors(cudaPeekAtLastError());
+
+}
+
 extern "C" {
 void evaluate_xc_driver(
         double *fock, const double *xc_weights, const int *shells_slice, const int *shell_to_function,
@@ -557,7 +612,6 @@ void evaluate_density_driver(
     }
 
     checkCudaErrors(cudaPeekAtLastError());
-    // checkCudaErrors(cudaDeviceSynchronize());
 }
 
 void new_evaluate_density_driver(
@@ -594,36 +648,27 @@ void new_evaluate_density_driver(
 void new_evaluate_density_driver_with_local_sort(
         double *density, const double *density_matrices,
         const int left_angular, const int right_angular, const int *non_trivial_pairs,
-        const int *i_shells, const int n_i_shells, const int *j_shells, const int n_j_shells,
+        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
-        const int *image_indices, const double *vectors_to_neighboring_images,
+        const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
         const double *lattice_vectors, const double *reciprocal_lattice_vectors,
-        const int *mesh, const int *atm, const int *bas, const double *env, const int blocking_sizes[3]) {
-    dim3 block_size(blocking_sizes[2], blocking_sizes[1], blocking_sizes[0]);
-    int mesh_a = mesh[0];
-    int mesh_b = mesh[1];
-    int mesh_c = mesh[2];
-    dim3 block_grid((mesh_c + block_size_c - 1) / block_size_c,
-                    (mesh_b + block_size_b - 1) / block_size_b,
-                    (mesh_a + block_size_a - 1) / block_size_a);
-
-
-    if (left_angular == 0 && right_angular == 0) {
-        evaluate_density_new_kernel_ss<<<block_grid, block_size>>>(density, density_matrices, non_trivial_pairs,
-                                                                   i_shells, n_i_shells, j_shells, n_j_shells,
-                                                                   sorted_pairs_per_local_grid,
-                                                                   accumulated_n_pairs_per_local_grid,
-                                                                   image_indices, vectors_to_neighboring_images,
-                                                                   lattice_vectors, reciprocal_lattice_vectors, mesh_a,
-                                                                   mesh_b, mesh_c, atm, bas, env);
+        const int *mesh, const int *atm, const int *bas, const double *env, const int blocking_sizes[3], const int n_channels) {
+    if (n_channels == 1) {
+        new_evaluate_density_driver<1>(
+                density, density_matrices, left_angular, right_angular, non_trivial_pairs, i_shells, n_i_shells, j_shells,
+                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
+                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
+                lattice_vectors, reciprocal_lattice_vectors, mesh, atm, bas, env, blocking_sizes);
+    } else if(n_channels == 2) {
+        new_evaluate_density_driver<2>(
+                density, density_matrices, left_angular, right_angular, non_trivial_pairs, i_shells, n_i_shells, j_shells,
+                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
+                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
+                lattice_vectors, reciprocal_lattice_vectors,  mesh, atm, bas, env, blocking_sizes);
     } else {
-        fprintf(stderr,
-                "angular momentum pair %d, %d is not supported in new_evaluate_density_driver\n", left_angular,
-                right_angular);
+        fprintf(stderr, "n_channels more than 2 is not supported.\n");
     }
-
-    checkCudaErrors(cudaPeekAtLastError());
-
 }
 
 }

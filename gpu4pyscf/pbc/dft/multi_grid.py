@@ -1,4 +1,6 @@
 import pyscf.pbc.gto as gto
+from numpy.array_api import complex128
+
 import gpu4pyscf.pbc.df.fft as fft
 import gpu4pyscf.pbc.df.fft_jk as fft_jk
 from pyscf.dft.numint import libdft
@@ -166,38 +168,43 @@ def eval_mat(cell, weights, shls_slice=None, comp=1,
     return out
 
 
-def evaluate_density_wrapper(density_being_updated, pairs_info, dm_slice):
-    new_driver_with_local_sort = libgpbc.new_evaluate_density_driver_with_local_sort
+def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
+    c_driver = libgpbc.new_evaluate_density_driver_with_local_sort
+    density_matrix_with_translation = cp.einsum("kt, ikpq->itpq", pairs_info["phase_diff_among_images"], dm_slice)
+    n_channels, n_images, n_i_functions, n_j_functions = density_matrix_with_translation.shape
 
-    n_k_points, n_images = pairs_info["phase_diff_among_images"]
-    density_matrix_with_translation = cp.einsum("qp, ikqr->ikpr", pairs_info["phase_diff_among_images"], dm_slice)
+    if dm_slice.dtype is cp.complex128:
+        if ignore_imag is False:
+            raise NotImplementedError
+
+        density_matrix_with_translation = density_matrix_with_translation.real
+
+    density = cp.zeros((n_channels,) + pairs_info["mesh"])
 
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
-        new_driver_with_local_sort(ctypes.cast(density_being_updated.data.ptr, ctypes.c_void_p),
-                                   ctypes.cast(dm_slice.data.ptr, ctypes.c_void_p),
-                                   ctypes.c_int(gaussians_per_angular_pair["i_angular"]),
-                                   ctypes.c_int(gaussians_per_angular_pair["j_angular"]),
-                                   ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs"].data.ptr,
-                                               ctypes.c_void_p),
-                                   ctypes.cast(gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p),
-                                   ctypes.c_int(len(gaussians_per_angular_pair["i_shells"])),
-                                   ctypes.cast(gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p),
-                                   ctypes.c_int(len(gaussians_per_angular_pair["i_shells"])),
-                                   ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs_at_local_points"].data.ptr,
-                                               ctypes.c_void_p),
-                                   ctypes.cast(gaussians_per_angular_pair["accumulated_n_pairs_per_point"].data.ptr,
-                                               ctypes.c_void_p),
-                                   ctypes.cast(gaussians_per_angular_pair["image_indices"].data.ptr, ctypes.c_void_p),
-                                   ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p),
-                                   ctypes.cast(pairs_info["lattice_vectors"].data.ptr, ctypes.c_void_p),
-                                   ctypes.cast(pairs_info["reciprocal_lattice_vectors"].data.ptr, ctypes.c_void_p),
-                                   (ctypes.c_int * 3)(*pairs_info["mesh"]),
-                                   ctypes.cast(pairs_info["atm"].data.ptr, ctypes.c_void_p),
-                                   ctypes.cast(pairs_info["bas"].data.ptr, ctypes.c_void_p),
-                                   ctypes.cast(pairs_info["env"].data.ptr, ctypes.c_void_p),
-                                   (ctypes.c_int * 3)(*pairs_info["blocking_sizes"]))
+        (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
+        c_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(density_matrix_with_translation.data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(i_angular), ctypes.c_int(j_angular),
+                 ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(len(gaussians_per_angular_pair["i_shells"])),
+                 ctypes.cast(gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(gaussians_per_angular_pair["shell_to_ao_indices"].data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(n_i_functions), ctypes.c_int(n_j_functions),
+                 ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs_at_local_points"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(gaussians_per_angular_pair["accumulated_n_pairs_per_point"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(gaussians_per_angular_pair["image_indices"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p), ctypes.c_int(n_images),
+                 ctypes.cast(pairs_info["lattice_vectors"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(pairs_info["reciprocal_lattice_vectors"].data.ptr, ctypes.c_void_p),
+                 (ctypes.c_int * 3)(*pairs_info["mesh"]),
+                 ctypes.cast(pairs_info["atm"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(pairs_info["bas"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(pairs_info["env"].data.ptr, ctypes.c_void_p),
+                 (ctypes.c_int * 3)(*pairs_info["blocking_sizes"]), ctypes.c_int(n_channels))
 
-    return density_being_updated
+    return density
 
 
 def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
@@ -342,9 +349,6 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
             n_i_shells = len(i_shells)
             i_basis = cell._bas[i_shells]
             n_functions_per_i_shell = (i_angular + 1) * (i_angular + 2) // 2
-            i_functions = cp.repeat(
-                cp.asarray(ao_loc[i_shells]), n_functions_per_i_shell).reshape(
-                -1, n_functions_per_i_shell) + cp.arange(n_functions_per_i_shell)
 
             i_exponents = cp.asarray(cell._env[i_basis[:, multigrid.PTR_EXP]])
             i_coord_pointers = np.array(cell._atm[i_basis[:, multigrid.ATOM_OF], PTR_COORD])
@@ -359,9 +363,6 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                 n_j_shells = len(j_shells)
                 j_basis = cell._bas[j_shells]
                 n_functions_per_j_shell = (j_angular + 1) * (j_angular + 2) // 2
-                j_functions = cp.repeat(
-                    cp.asarray(ao_loc[j_shells]), n_functions_per_j_shell).reshape(
-                    -1, n_functions_per_j_shell) + cp.arange(n_functions_per_j_shell)
 
                 j_exponents = cp.asarray(cell._env[j_basis[:, multigrid.PTR_EXP]])
                 j_coord_pointers = np.array(cell._atm[j_basis[:, multigrid.ATOM_OF], PTR_COORD])
@@ -555,21 +556,19 @@ def evaluate_density(cell, dm, shells_slice=None, xc_type='LDA', kpts=None,
                 new_driver_wrapper(out[i].imag, dmI)
         else:
             pass
-            # if out is None:
-            #     # rho_i needs to be initialized to 0 because rho_i is updated
-            #     # inplace in function NUMINT_rho_drv
-            #     # rho_i = driver_wrapper(shape, dmR, hermi)
-            #     rho_i = new_driver_wrapper(cp.zeros(density_shape), dmR)
-            # else:
-            #     assert out[i].dtype == cp.double
-            #     rho_i = new_driver_wrapper(out[i], dmR)
+            if out is None:
+                # rho_i needs to be initialized to 0 because rho_i is updated
+                # inplace in function NUMINT_rho_drv
+                # rho_i = driver_wrapper(shape, dmR, hermi)
+                rho_i = new_driver_wrapper(cp.zeros(density_shape), dmR)
+            else:
+                assert out[i].dtype == cp.double
+                rho_i = new_driver_wrapper(out[i], dmR)
 
         cpu_driver = driver_wrapper(density_shape, dmR)
         from_old_driver = new_driver_wrapper(cp.zeros(density_shape), dmR)
         from_new_driver = another_new_driver_wrapper(cp.zeros(density_shape), dmR)
 
-        print("max diff: ", cp.max(cp.abs(cpu_driver - from_old_driver)))
-        print("max diff: ", cp.max(cp.abs(from_new_driver - from_old_driver)))
         assert 0
         dmR = dmI = None
         rho.append(rho_i)
@@ -719,11 +718,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                 i_shells = np.where(grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF] == i_angular)[0]
                 n_i_shells = len(i_shells)
                 i_basis = grouped_cell._bas[i_shells]
-                n_functions_per_i_shell = (i_angular + 1) * (i_angular + 2) // 2
-                i_functions = cp.repeat(
-                    cp.asarray(shell_to_ao_indices[i_shells]), n_functions_per_i_shell).reshape(
-                    -1, n_functions_per_i_shell) + cp.arange(n_functions_per_i_shell)
-                i_functions = i_functions.flatten()
 
                 i_exponents = cp.asarray(grouped_cell._env[i_basis[:, multigrid.PTR_EXP]])
                 i_coord_pointers = np.asarray(grouped_cell._atm[i_basis[:, multigrid.ATOM_OF], PTR_COORD])
@@ -737,11 +731,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         grouped_cell._bas[0:n_primitive_gtos_in_two_regions, multigrid.ANG_OF] == j_angular)[0]
                     n_j_shells = len(j_shells)
                     j_basis = grouped_cell._bas[j_shells]
-                    n_functions_per_j_shell = (j_angular + 1) * (j_angular + 2) // 2
-                    j_functions = cp.repeat(
-                        cp.asarray(shell_to_ao_indices[j_shells]), n_functions_per_j_shell).reshape(
-                        -1, n_functions_per_j_shell) + cp.arange(n_functions_per_j_shell)
-                    j_functions = j_functions.flatten()
 
                     j_exponents = cp.asarray(grouped_cell._env[j_basis[:, multigrid.PTR_EXP]])
                     j_coord_pointers = np.array(grouped_cell._atm[j_basis[:, multigrid.ATOM_OF], PTR_COORD])
@@ -832,12 +821,10 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         "non_trivial_pairs": non_trivial_pairs_from_images,
                         "non_trivial_pairs_at_local_points": non_trivial_pairs_at_local_points,
                         "accumulated_n_pairs_per_point": accumulated_n_pairs_per_point,
-
                         "image_indices": image_indices,
                         "i_shells": cp.asarray(i_shells, dtype=cp.int32),
-                        "i_functions": i_functions,
                         "j_shells": cp.asarray(j_shells, dtype=cp.int32),
-                        "j_functions": j_functions
+                        "shell_to_ao_indices": cp.asarray(shell_to_ao_indices, dtype=cp.int32)
                     })
 
             pairs.append({
@@ -885,6 +872,7 @@ def new_evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3))
         mesh = tuple(grids_dense.mesh)
         n_grid_points = np.prod(mesh)
 
+        density = None
         if grids_sparse is None:
             assert pairs is None
 
@@ -923,15 +911,23 @@ def new_evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3))
                                                             density_matrix_with_rows_in_dense,
                                                             pairs["coeff_in_dense"], pairs["concatenated_coeff"])
 
-            fft_grids = list(
-                map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh))
-            #:rhoG[:,gx[:,None,None],gy[:,None],gz] += rho_freq.reshape((-1,)+mesh)
+                density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
 
-            density_contribution_on_g_mesh = None
-            density_on_g_mesh[
-                cp.ix_(cp.arange(n_channels * density_slices), *fft_grids)] += density_contribution_on_g_mesh.reshape(
-                (-1,) + mesh)
-            assert 0
+            else:
+                raise NotImplementedError
+
+        assert (pairs["mesh"] == mesh)
+        fft_grids = list(map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh))
+
+        weight_per_grid_point = 1. / n_k_points * mydf.cell.vol / n_grid_points
+        density_contribution_on_g_mesh = tools.fft(density.reshape(n_channels * density_slices, -1),
+                                                   mesh) * weight_per_grid_point
+        density_on_g_mesh[
+            cp.ix_(cp.arange(n_channels * density_slices), *fft_grids)] += density_contribution_on_g_mesh.reshape(
+            (-1,) + mesh)
+
+    density_on_g_mesh = density_on_g_mesh.reshape(n_channels, density_slices, -1)
+    return density_on_g_mesh
 
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
@@ -1193,8 +1189,8 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     cpu_df = multigrid.MultiGridFFTDF(cell)
 
-    # density_on_G_mesh = new_evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
-    density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+    density_on_G_mesh = new_evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+    # density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
     coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)
