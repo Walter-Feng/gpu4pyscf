@@ -31,7 +31,7 @@ with cupy.cuda.Device(0):
     )
     cell.exp_to_discard = 0.1
 
-    cell = tools.super_cell(cell, [3, 3, 3])
+    cell = tools.super_cell(cell, [4, 4, 4])
 
     mf=pbcdft.RKS(cell)
     #mf.xc = "LDA, VWN"
@@ -41,10 +41,10 @@ with cupy.cuda.Device(0):
     mf.with_df.ngrids = 4 # number of sets of grid points
     mf.kernel()
     #
-    # mf=cpu_pbcdft.RKS(cell)
-    # #mf.xc = "LDA, VWN"
-    # mf.xc = "LDA"
-    # mf.max_cycle = 1
-    # mf = cpu_multi_grid.multigrid.multigrid_fftdf(mf)
-    # mf.with_df.ngrids = 4 # number of sets of grid points
-    # mf.kernel()
+    mf=cpu_pbcdft.RKS(cell)
+    #mf.xc = "LDA, VWN"
+    mf.xc = "LDA"
+    mf.max_cycle = 1
+    mf = cpu_multi_grid.multigrid.multigrid_fftdf(mf)
+    mf.with_df.ngrids = 4 # number of sets of grid points
+    mf.kernel()
