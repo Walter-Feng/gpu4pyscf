@@ -1,10 +1,10 @@
-#from os.path import expanduser
-#home_dir = expanduser("~")
-#f = open(home_dir+'/.pyscf_conf.py', 'a')
+# from os.path import expanduser
+# home_dir = expanduser("~")
+# f = open(home_dir+'/.pyscf_conf.py', 'a')
 # use FFTW for fft, this requires to compile the FFTW library
 # cmake -DENABLE_FFTW=ON -DBUILD_FFTW=ON
-#f.write('pbc_tools_pbc_fft_engine=\'FFTW\'')
-#f.close()
+# f.write('pbc_tools_pbc_fft_engine=\'FFTW\'')
+# f.close()
 
 import cupy.cuda
 from ase.build import bulk
@@ -18,34 +18,33 @@ from pyscf.pbc.dft import multigrid as cpu_multi_grid
 
 # cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
 
-diamond_cell = bulk('He', 'sc', a=6)
-with cupy.cuda.Device(0):
+diamond_cell = bulk('He', 'sc', a=4)
+with cupy.cuda.Device(3):
     lattice_vectors = diamond_cell.cell
     cell = gto.M(
         h=np.array(lattice_vectors),
-        atom=ase_atoms_to_pyscf(bulk('He', 'sc', a=6)),
+        atom=ase_atoms_to_pyscf(bulk('He', 'sc', a=4)),
         basis='minao',
         verbose=6,
         unit='aa',
-        ke_cutoff=100
+        ke_cutoff=200
     )
     cell.exp_to_discard = 0.1
 
     cell = tools.super_cell(cell, [3, 3, 3])
 
-    mf=pbcdft.RKS(cell)
-    #mf.xc = "LDA, VWN"
+    mf = pbcdft.RKS(cell)
+    # mf.xc = "LDA, VWN"
     mf.xc = "LDA"
     mf.max_cycle = 1
     mf = multi_grid.fftdf(mf)
-    mf.with_df.ngrids = 4 # number of sets of grid points
+    mf.with_df.ngrids = 4  # number of sets of grid points
     mf.kernel()
 
-    #
-    mf=cpu_pbcdft.RKS(cell)
-    #mf.xc = "LDA, VWN"
+    mf = cpu_pbcdft.RKS(cell)
+    # mf.xc = "LDA, VWN"
     mf.xc = "LDA"
     mf.max_cycle = 1
     mf = cpu_multi_grid.multigrid.multigrid_fftdf(mf)
-    mf.with_df.ngrids = 4 # number of sets of grid points
+    mf.with_df.ngrids = 4  # number of sets of grid points
     mf.kernel()
