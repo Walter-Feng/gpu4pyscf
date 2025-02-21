@@ -25,13 +25,13 @@ with cupy.cuda.Device(3):
         h=np.array(lattice_vectors),
         atom=ase_atoms_to_pyscf(bulk('He', 'sc', a=4)),
         basis='minao',
-        verbose=6,
+        verbose=3,
         unit='aa',
         ke_cutoff=200
     )
     cell.exp_to_discard = 0.1
 
-    cell = tools.super_cell(cell, [3, 3, 3])
+    cell = tools.super_cell(cell, [2, 1, 1])
 
     mf = pbcdft.RKS(cell)
     # mf.xc = "LDA, VWN"

@@ -166,6 +166,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                                                                      i_angular + j_angular,
                                                                      prefactors, threshold_in_log)
                         non_trivial_cutoffs = cp.where(gaussian_cutoffs > 0)[0]
+                        # non_trivial_cutoffs = cp.where(gaussian_cutoffs > 0)[0]
                         cutoffs.append(gaussian_cutoffs[non_trivial_cutoffs])
                         non_trivial_pairs = non_trivial_pairs[non_trivial_cutoffs]
 
@@ -201,6 +202,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                             displaced_centers.T + cutoffs).T + (blocking_sizes_on_gpu - 1) / mesh), dtype=cp.int32)
                         is_within_cell_translation = cp.all(translation_lower <= translation_upper, axis=1)
                         non_trivial_pairs_at_local_points.append(cp.where(is_within_cell_translation)[0])
+                        # non_trivial_pairs_at_local_points.append(cp.arange(len(is_within_cell_translation)))
 
                     n_pairs_per_point = list(map(len, non_trivial_pairs_at_local_points))
                     accumulated_n_pairs_per_point = cp.asarray(accumulate(n_pairs_per_point), dtype=cp.int32)
@@ -478,8 +480,12 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
+    cpu_df = multigrid.MultiGridFFTDF(cell)
 
     density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+    # density_on_G_mesh_cpu = multigrid._eval_rhoG(cpu_df, dm_kpts.get(), hermi, kpts, derivative_order)
+    # print(cp.max(cp.abs(density_on_G_mesh - cp.asarray(density_on_G_mesh_cpu))))
+    # assert 0
 
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
