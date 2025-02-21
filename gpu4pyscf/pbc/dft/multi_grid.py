@@ -62,7 +62,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
     blocking_sizes_on_gpu = cp.asarray(blocking_sizes)
     log = logger.Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
-    lattice_vectors = cp.asarray(cell.lattice_vectors())
+    lattice_vectors = cp.asarray(cell.lattice_vectors().T)
     reciprocal_lattice_vectors = cp.linalg.inv(lattice_vectors.T)
 
     tasks = getattr(mydf, 'tasks', None)

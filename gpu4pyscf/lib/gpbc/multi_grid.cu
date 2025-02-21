@@ -266,10 +266,10 @@ __global__ void evaluate_density_kernel(
         const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
         const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
 
-        const int lower_a_index = floor((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[0] +
+        const int lower_a_index = ceil((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[0] +
                                        (position_y - pair_y - cutoff) * reciprocal_lattice_vectors[1] +
                                        (position_z - pair_z - cutoff) * reciprocal_lattice_vectors[2]);
-        const int upper_a_index = ceil((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[0] +
+        const int upper_a_index = floor((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[0] +
                                         (position_y - pair_y + cutoff) * reciprocal_lattice_vectors[1] +
                                         (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[2]);
 
@@ -334,6 +334,13 @@ __global__ void evaluate_density_kernel(
     }
 }
 
+#define density_kernel_macro(li, lj) evaluate_density_kernel<n_channels, li, lj><<<block_grid, block_size>>>( \
+density, density_matrices, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells, \
+shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid, \
+accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images, \
+lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env)
+
+#define density_kernel_case_macro(li, lj) case (li * 10 + lj): density_kernel_macro(li, lj); break
 
 template<int n_channels>
 void evaluate_density_driver(
@@ -352,34 +359,36 @@ void evaluate_density_driver(
     dim3 block_grid((mesh_c + blocking_sizes[2] - 1) / blocking_sizes[2],
                     (mesh_b + blocking_sizes[1] - 1) / blocking_sizes[1],
                     (mesh_a + blocking_sizes[0] - 1) / blocking_sizes[0]);
-    if (left_angular == 0 && right_angular == 0) {
-        evaluate_density_kernel<n_channels, 0, 0><<<block_grid, block_size>>>(
-                density, density_matrices, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-    } else if (left_angular == 0 && right_angular == 1) {
-        evaluate_density_kernel<n_channels, 0, 1><<<block_grid, block_size>>>(
-                density, density_matrices, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-    } else if (left_angular == 1 && right_angular == 0) {
-        evaluate_density_kernel<n_channels, 1, 0><<<block_grid, block_size>>>(
-                density, density_matrices, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-    } else if (left_angular == 1 && right_angular == 1) {
-        evaluate_density_kernel<n_channels, 1, 1><<<block_grid, block_size>>>(
-                density, density_matrices, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-    } else {
-        fprintf(stderr,
-                "angular momentum pair %d, %d is not supported in evaluate_density_driver\n", left_angular,
-                right_angular);
+    switch (left_angular * 10 + right_angular) {
+        density_kernel_case_macro(0, 0);
+        density_kernel_case_macro(0, 1);
+        density_kernel_case_macro(0, 2);
+        density_kernel_case_macro(0, 3);
+        density_kernel_case_macro(0, 4);
+        density_kernel_case_macro(1, 0);
+        density_kernel_case_macro(1, 1);
+        density_kernel_case_macro(1, 2);
+        density_kernel_case_macro(1, 3);
+        density_kernel_case_macro(1, 4);
+        density_kernel_case_macro(2, 0);
+        density_kernel_case_macro(2, 1);
+        density_kernel_case_macro(2, 2);
+        density_kernel_case_macro(2, 3);
+        density_kernel_case_macro(2, 4);
+        density_kernel_case_macro(3, 0);
+        density_kernel_case_macro(3, 1);
+        density_kernel_case_macro(3, 2);
+        density_kernel_case_macro(3, 3);
+        density_kernel_case_macro(3, 4);
+        density_kernel_case_macro(4, 0);
+        density_kernel_case_macro(4, 1);
+        density_kernel_case_macro(4, 2);
+        density_kernel_case_macro(4, 3);
+        density_kernel_case_macro(4, 4);
+        default:
+            fprintf(stderr,
+                    "angular momentum pair %d, %d is not supported in evaluate_density_driver\n", left_angular,
+                    right_angular);
     }
 
     checkCudaErrors(cudaPeekAtLastError());
@@ -553,6 +562,14 @@ __global__ void evaluate_xc_kernel(
     }
 }
 
+#define xc_kernel_macro(li, lj) evaluate_xc_kernel<n_channels, li, lj><<<block_grid, block_size>>>( \
+        fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells, \
+        shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid, \
+        accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images, \
+        lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env)
+
+#define xc_kernel_case_macro(li, lj) case (li * 10 + lj): xc_kernel_macro(li, lj); break
+
 template<int n_channels>
 void evaluate_xc_driver(
         double *fock, const double *xc_weights,
@@ -570,35 +587,67 @@ void evaluate_xc_driver(
     dim3 block_grid((mesh_c + blocking_sizes[2] - 1) / blocking_sizes[2],
                     (mesh_b + blocking_sizes[1] - 1) / blocking_sizes[1],
                     (mesh_a + blocking_sizes[0] - 1) / blocking_sizes[0]);
-    if (left_angular == 0 && right_angular == 0) {
-        evaluate_xc_kernel < n_channels, 0, 0 ><<<block_grid, block_size>>>(
-                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-                        shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-                        accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-                        lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-    } else if (left_angular == 1 && right_angular == 0) {
-        evaluate_xc_kernel < n_channels, 1, 0 ><<<block_grid, block_size>>>(
-                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-                        shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-                        accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-                        lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-    } else if (left_angular == 0 && right_angular == 1) {
-        evaluate_xc_kernel < n_channels, 0, 1 ><<<block_grid, block_size>>>(
-                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-                        shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-                        accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-                        lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-    } else if (left_angular == 1 && right_angular == 1) {
-        evaluate_xc_kernel < n_channels, 1, 1 ><<<block_grid, block_size>>>(
-                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-    } else {
-        fprintf(stderr,
-                "angular momentum pair %d, %d is not supported in evaluate_xc_driver\n", left_angular,
-                right_angular);
+
+    switch (left_angular * 10 + right_angular) {
+        xc_kernel_case_macro(0, 0);
+        xc_kernel_case_macro(0, 1);
+        xc_kernel_case_macro(0, 2);
+        xc_kernel_case_macro(0, 3);
+        xc_kernel_case_macro(0, 4);
+        xc_kernel_case_macro(1, 0);
+        xc_kernel_case_macro(1, 1);
+        xc_kernel_case_macro(1, 2);
+        xc_kernel_case_macro(1, 3);
+        xc_kernel_case_macro(1, 4);
+        xc_kernel_case_macro(2, 0);
+        xc_kernel_case_macro(2, 1);
+        xc_kernel_case_macro(2, 2);
+        xc_kernel_case_macro(2, 3);
+        xc_kernel_case_macro(2, 4);
+        xc_kernel_case_macro(3, 0);
+        xc_kernel_case_macro(3, 1);
+        xc_kernel_case_macro(3, 2);
+        xc_kernel_case_macro(3, 3);
+        xc_kernel_case_macro(3, 4);
+        xc_kernel_case_macro(4, 0);
+        xc_kernel_case_macro(4, 1);
+        xc_kernel_case_macro(4, 2);
+        xc_kernel_case_macro(4, 3);
+        xc_kernel_case_macro(4, 4);
+        default:
+            fprintf(stderr,
+                    "angular momentum pair %d, %d is not supported in evaluate_xc_driver\n", left_angular,
+                    right_angular);
     }
+//    if (left_angular == 0 && right_angular == 0) {
+//        evaluate_xc_kernel<n_channels, 0, 0><<<block_grid, block_size>>>(
+//                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
+//                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
+//                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
+//                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
+//    } else if (left_angular == 1 && right_angular == 0) {
+//        evaluate_xc_kernel<n_channels, 1, 0><<<block_grid, block_size>>>(
+//                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
+//                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
+//                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
+//                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
+//    } else if (left_angular == 0 && right_angular == 1) {
+//        evaluate_xc_kernel<n_channels, 0, 1><<<block_grid, block_size>>>(
+//                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
+//                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
+//                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
+//                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
+//    } else if (left_angular == 1 && right_angular == 1) {
+//        evaluate_xc_kernel<n_channels, 1, 1><<<block_grid, block_size>>>(
+//                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
+//                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
+//                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
+//                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
+//    } else {
+//        fprintf(stderr,
+//                "angular momentum pair %d, %d is not supported in evaluate_xc_driver\n", left_angular,
+//                right_angular);
+//    }
 
     checkCudaErrors(cudaPeekAtLastError());
 }
