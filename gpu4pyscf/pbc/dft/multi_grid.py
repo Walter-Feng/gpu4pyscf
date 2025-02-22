@@ -141,10 +141,10 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     j_z = cp.asarray(grouped_cell._env[j_coord_pointers + 2])
                     j_coeffs = cp.asarray(
                         grouped_cell._env[j_basis[:, multigrid.PTR_COEFF]]) * CINTcommon_fac_sp(j_angular)
-                    pair_exponents = cp.repeat(j_exponents, n_i_shells) + cp.tile(i_exponents, n_j_shells)
-                    exponents_outer_product = cp.repeat(j_exponents, n_i_shells) * cp.tile(i_exponents, n_j_shells)
+                    pair_exponents = cp.tile(j_exponents, n_i_shells) + cp.repeat(i_exponents, n_j_shells)
+                    exponents_outer_product = cp.tile(j_exponents, n_i_shells) * cp.repeat(i_exponents, n_j_shells)
                     exponent_in_prefactor = exponents_outer_product / pair_exponents
-                    pair_coefficients = cp.repeat(j_coeffs, n_i_shells) * cp.tile(i_coeffs, n_j_shells)
+                    pair_coefficients = cp.tile(j_coeffs, n_i_shells) * cp.repeat(i_coeffs, n_j_shells)
 
                     non_trivial_pairs_from_images = []
                     image_indices = []
@@ -156,31 +156,35 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         shifted_i_y = i_y - i_image[1]
                         shifted_i_z = i_z - i_image[2]
 
-                        interatomic_distance = cp.square(cp.repeat(j_x, n_i_shells) - cp.tile(shifted_i_x, n_j_shells))
-                        interatomic_distance += cp.square(cp.repeat(j_y, n_i_shells) - cp.tile(shifted_i_y, n_j_shells))
-                        interatomic_distance += cp.square(cp.repeat(j_z, n_i_shells) - cp.tile(shifted_i_z, n_j_shells))
-                        exponents = exponent_in_prefactor * interatomic_distance
+                        interatomic_distance = cp.square(cp.tile(j_x, n_i_shells) - cp.repeat(shifted_i_x, n_j_shells))
+                        interatomic_distance += cp.square(cp.tile(j_y, n_i_shells) - cp.repeat(shifted_i_y, n_j_shells))
+                        interatomic_distance += cp.square(cp.tile(j_z, n_i_shells) - cp.repeat(shifted_i_z, n_j_shells))
+                        exponents = (exponent_in_prefactor * interatomic_distance).reshape(n_i_shells, n_j_shells)
+                        tril_indices = cp.tril_indices(n_i_shells, k=-1, m=n_j_shells)
+                        if(len(tril_indices[0]) > 0):
+                            exponents[tril_indices] = EIJ_CUTOFF + 1
+                        exponents = exponents.flatten()
                         non_trivial_pairs = cp.where(exponents < EIJ_CUTOFF)[0]
                         prefactors = cp.exp(-exponents[non_trivial_pairs]) * pair_coefficients[non_trivial_pairs]
                         gaussian_cutoffs = gaussian_summation_cutoff(pair_exponents[non_trivial_pairs],
                                                                      i_angular + j_angular,
                                                                      prefactors, threshold_in_log)
                         non_trivial_cutoffs = cp.where(gaussian_cutoffs > 0)[0]
-                        # non_trivial_cutoffs = cp.where(gaussian_cutoffs > 0)[0]
+                        #non_trivial_cutoffs = cp.arange(len(gaussian_cutoffs))
                         cutoffs.append(gaussian_cutoffs[non_trivial_cutoffs])
                         non_trivial_pairs = non_trivial_pairs[non_trivial_cutoffs]
 
                         if len(non_trivial_pairs) == 0:
                             continue
 
-                        pair_x = (cp.repeat(j_exponents * j_x, n_i_shells)
-                                  + cp.tile(i_exponents * shifted_i_x, n_j_shells)) / pair_exponents
+                        pair_x = (cp.tile(j_exponents * j_x, n_i_shells)
+                                  + cp.repeat(i_exponents * shifted_i_x, n_j_shells)) / pair_exponents
                         pair_x = pair_x[non_trivial_pairs]
-                        pair_y = (cp.repeat(j_exponents * j_y, n_i_shells)
-                                  + cp.tile(i_exponents * shifted_i_y, n_j_shells)) / pair_exponents
+                        pair_y = (cp.tile(j_exponents * j_y, n_i_shells)
+                                  + cp.repeat(i_exponents * shifted_i_y, n_j_shells)) / pair_exponents
                         pair_y = pair_y[non_trivial_pairs]
-                        pair_z = (cp.repeat(j_exponents * j_z, n_i_shells)
-                                  + cp.tile(i_exponents * shifted_i_z, n_j_shells)) / pair_exponents
+                        pair_z = (cp.tile(j_exponents * j_z, n_i_shells)
+                                  + cp.repeat(i_exponents * shifted_i_z, n_j_shells)) / pair_exponents
                         pair_z = pair_z[non_trivial_pairs]
 
                         non_trivial_pairs_from_images.append(non_trivial_pairs)
@@ -197,8 +201,8 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
 
                     for granularized_mesh_point in granularized_mesh_in_real_space:
                         displaced_centers = granularized_mesh_point - centers
-                        translation_lower = cp.asarray(cp.ceil(reciprocal_lattice_vectors.dot(displaced_centers.T - cutoffs).T), dtype=cp.int32)
-                        translation_upper = cp.asarray(cp.floor(reciprocal_lattice_vectors.dot(
+                        translation_lower = cp.asarray(cp.floor(reciprocal_lattice_vectors.dot(displaced_centers.T - cutoffs).T), dtype=cp.int32)
+                        translation_upper = cp.asarray(cp.ceil(reciprocal_lattice_vectors.dot(
                             displaced_centers.T + cutoffs).T + (blocking_sizes_on_gpu - 1) / mesh), dtype=cp.int32)
                         is_within_cell_translation = cp.all(translation_lower <= translation_upper, axis=1)
                         non_trivial_pairs_at_local_points.append(cp.where(is_within_cell_translation)[0])
@@ -261,8 +265,8 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
                  ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs"].data.ptr, ctypes.c_void_p),
                  ctypes.cast(gaussians_per_angular_pair["cutoffs"].data.ptr, ctypes.c_void_p),
                  ctypes.cast(gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p),
-                 ctypes.c_int(len(gaussians_per_angular_pair["i_shells"])),
                  ctypes.cast(gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
                  ctypes.cast(gaussians_per_angular_pair["shell_to_ao_indices"].data.ptr, ctypes.c_void_p),
                  ctypes.c_int(n_i_functions), ctypes.c_int(n_j_functions),
                  ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs_at_local_points"].data.ptr, ctypes.c_void_p),
@@ -334,9 +338,9 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
                                                  pairs["ao_indices_in_dense"]]
 
             if deriv == 0:
-                n_ao_in_sparse, n_ao_in_dense = density_matrix_with_rows_in_sparse.shape[2:]
-                density_matrix_with_rows_in_dense[:, :, :,
-                n_ao_in_dense:] += density_matrix_with_rows_in_sparse.transpose(0, 1, 3, 2)
+                # n_ao_in_sparse, n_ao_in_dense = density_matrix_with_rows_in_sparse.shape[2:]
+                # density_matrix_with_rows_in_dense[:, :, :,
+                # n_ao_in_dense:] += density_matrix_with_rows_in_sparse.transpose(0, 1, 3, 2)
                 coeff_sandwiched_density_matrix = cp.einsum('nkij,pi,qj->nkpq',
                                                             density_matrix_with_rows_in_dense,
                                                             pairs["coeff_in_dense"], pairs["concatenated_coeff"])
@@ -483,9 +487,10 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     cpu_df = multigrid.MultiGridFFTDF(cell)
 
     density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
-    # density_on_G_mesh_cpu = multigrid._eval_rhoG(cpu_df, dm_kpts.get(), hermi, kpts, derivative_order)
-    # print(cp.max(cp.abs(density_on_G_mesh - cp.asarray(density_on_G_mesh_cpu))))
-    # assert 0
+    density_on_G_mesh_cpu = multigrid._eval_rhoG(cpu_df, dm_kpts.get(), hermi, kpts, derivative_order)
+    print(density_on_G_mesh.shape)
+    print(cp.max(cp.abs(density_on_G_mesh - cp.asarray(density_on_G_mesh_cpu))))
+    assert 0
 
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
