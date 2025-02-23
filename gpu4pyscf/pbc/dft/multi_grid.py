@@ -618,6 +618,11 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts,
                                                    derivative_order)
 
+    density_on_G_mesh_cpu = multigrid._eval_rhoG(cpu_df, dm_kpts.get(), hermi, kpts, derivative_order)
+    print(density_on_G_mesh[0])
+    print(density_on_G_mesh_cpu[0])
+    print(cp.abs(density_on_G_mesh - cp.asarray(density_on_G_mesh_cpu)).max())
+    assert 0
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0],
                                   coulomb_kernel_on_g_mesh)
