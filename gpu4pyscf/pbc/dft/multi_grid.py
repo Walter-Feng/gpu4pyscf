@@ -104,13 +104,14 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
             minimum_exponent = np.hstack(grouped_cell.bas_exps()).min()
             theta_ij = minimum_exponent / 2
             lattice_summation_factor = max(2 * np.pi * cell.rcut / (vol * theta_ij), 1)
+
             precision = grouped_cell.precision / weight_penalty / lattice_summation_factor
             if xc_type != 'LDA':
                 precision *= .1
             threshold_in_log = np.log(precision * multigrid.EXTRA_PREC)
             n_primitive_gtos_in_dense = multigrid._pgto_shells(subcell_in_dense_region)
             n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
-            vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(subcell_in_dense_region)
+            vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(grouped_cell)
             phase_diff_among_images = cp.exp(
                 1j * cp.asarray(mydf.kpts.reshape(-1, 3).dot(vectors_to_neighboring_images.T)))
             shell_to_ao_indices = gto.moleintor.make_loc(grouped_cell._bas, 'cart')
@@ -480,13 +481,8 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
-    cpu_df = multigrid.MultiGridFFTDF(cell)
 
     density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
-    # density_on_G_mesh_cpu = multigrid._eval_rhoG(cpu_df, dm_kpts.get(), hermi, kpts, derivative_order)
-    # print(cp.max(cp.abs(density_on_G_mesh - cp.asarray(density_on_G_mesh_cpu))))
-    # assert 0
-
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
     coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)
