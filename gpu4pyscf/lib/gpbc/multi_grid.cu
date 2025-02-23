@@ -298,29 +298,29 @@ __global__ void evaluate_density_kernel(
     const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
 
     const int lower_a_index =
-        floor((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[0] +
+        ceil((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[0] +
               (position_y - pair_y - cutoff) * reciprocal_lattice_vectors[1] +
               (position_z - pair_z - cutoff) * reciprocal_lattice_vectors[2]);
     const int upper_a_index =
-        ceil((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[0] +
+        floor((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[0] +
              (position_y - pair_y + cutoff) * reciprocal_lattice_vectors[1] +
              (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[2]);
 
     const int lower_b_index =
-        floor((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[3] +
+        ceil((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[3] +
               (position_y - pair_y - cutoff) * reciprocal_lattice_vectors[4] +
               (position_z - pair_z - cutoff) * reciprocal_lattice_vectors[5]);
     const int upper_b_index =
-        ceil((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[3] +
+        floor((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[3] +
              (position_y - pair_y + cutoff) * reciprocal_lattice_vectors[4] +
              (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[5]);
 
     const int lower_c_index =
-        floor((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[6] +
+        ceil((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[6] +
               (position_y - pair_y - cutoff) * reciprocal_lattice_vectors[7] +
               (position_z - pair_z - cutoff) * reciprocal_lattice_vectors[8]);
     const int upper_c_index =
-        ceil((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[6] +
+        floor((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[6] +
              (position_y - pair_y + cutoff) * reciprocal_lattice_vectors[7] +
              (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[8]);
 
