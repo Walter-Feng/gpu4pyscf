@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cuda_runtime.h>
+#include <gint/config.h>
 #include <gint/gint.h>
 #include <cassert>
 #include <gint/cuda_alloc.cuh>
@@ -163,7 +164,7 @@ static void _cart_gto(double *g, double fx, double fy, double fz) {
 template<int n_channels, int i_angular, int j_angular>
 __global__ void evaluate_density_kernel(
         double *density, const double *density_matrices, const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int *j_shells, const int n_j_shells,
+        const int *i_shells, const int n_i_shells, const int *j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -219,8 +220,8 @@ __global__ void evaluate_density_kernel(
         const double image_z = vectors_to_neighboring_images[image_index * 3 + 2];
 
         const int shell_pair_index = non_trivial_pairs[i_pair];
-        const int i_shell_index = shell_pair_index / n_j_shells;
-        const int j_shell_index = shell_pair_index % n_j_shells;
+        const int j_shell_index = shell_pair_index / n_i_shells;
+        const int i_shell_index = shell_pair_index % n_i_shells;
         const int i_shell = i_shells[i_shell_index];
         const int i_function = shell_to_ao_indices[i_shell];
         const int j_shell = j_shells[j_shell_index];
@@ -244,16 +245,7 @@ __global__ void evaluate_density_kernel(
         const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * distance_squared(
                 i_x - j_x, i_y - j_y, i_z - j_z);
 
-        double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff;
-
-        if (i_shell < j_shell) {
-            pair_prefactor *= 2;
-        }
-
-        if(i_shell > j_shell) {
-            printf("error\n");
-        }
-
+        const double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff;
 #pragma unroll
         for (int i_channel = 0; i_channel < n_channels; i_channel++) {
             for (int i_function_index = 0; i_function_index < n_i_spherical_functions; i_function_index++) {
@@ -274,24 +266,24 @@ __global__ void evaluate_density_kernel(
         const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
         const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
 
-        const int lower_a_index = floor((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[0] +
+        const int lower_a_index = ceil((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[0] +
                                        (position_y - pair_y - cutoff) * reciprocal_lattice_vectors[1] +
                                        (position_z - pair_z - cutoff) * reciprocal_lattice_vectors[2]);
-        const int upper_a_index = ceil((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[0] +
+        const int upper_a_index = floor((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[0] +
                                         (position_y - pair_y + cutoff) * reciprocal_lattice_vectors[1] +
                                         (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[2]);
 
-        const int lower_b_index = floor((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[3] +
+        const int lower_b_index = ceil((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[3] +
                                        (position_y - pair_y - cutoff) * reciprocal_lattice_vectors[4] +
                                        (position_z - pair_z - cutoff) * reciprocal_lattice_vectors[5]);
-        const int upper_b_index = ceil((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[3] +
+        const int upper_b_index = floor((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[3] +
                                         (position_y - pair_y + cutoff) * reciprocal_lattice_vectors[4] +
                                         (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[5]);
 
-        const int lower_c_index = floor((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[6] +
+        const int lower_c_index = ceil((position_x - pair_x - cutoff) * reciprocal_lattice_vectors[6] +
                                        (position_y - pair_y - cutoff) * reciprocal_lattice_vectors[7] +
                                        (position_z - pair_z - cutoff) * reciprocal_lattice_vectors[8]);
-        const int upper_c_index = ceil((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[6] +
+        const int upper_c_index = floor((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[6] +
                                         (position_y - pair_y + cutoff) * reciprocal_lattice_vectors[7] +
                                         (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[8]);
 
@@ -343,7 +335,7 @@ __global__ void evaluate_density_kernel(
 }
 
 #define density_kernel_macro(li, lj) evaluate_density_kernel<n_channels, li, lj><<<block_grid, block_size>>>( \
-density, density_matrices, non_trivial_pairs, cutoffs, i_shells, j_shells, n_j_shells,\
+density, density_matrices, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells, \
 shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid, \
 accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images, \
 lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env)
@@ -354,7 +346,7 @@ template<int n_channels>
 void evaluate_density_driver(
         double *density, const double *density_matrices,
         const int left_angular, const int right_angular, const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int *j_shells, const int n_j_shells,
+        const int *i_shells, const int n_i_shells, const int *j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -490,11 +482,7 @@ __global__ void evaluate_xc_kernel(
         const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * distance_squared(
                 i_x - j_x, i_y - j_y, i_z - j_z);
 
-        double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff;
-
-        if (i_shell != j_shell) {
-            pair_prefactor *= 2;
-        }
+        const double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff;
 
         const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
         const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
@@ -668,7 +656,7 @@ extern "C" {
 void evaluate_density_driver(
         double *density, const double *density_matrices,
         const int left_angular, const int right_angular, const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int *j_shells, const int n_j_shells,
+        const int *i_shells, const int n_i_shells, const int *j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -678,14 +666,14 @@ void evaluate_density_driver(
     if (n_channels == 1) {
         evaluate_density_driver<1>(
                 density, density_matrices, left_angular, right_angular, non_trivial_pairs, cutoffs,
-                i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+                i_shells, n_i_shells, j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
                 sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
                 image_indices, vectors_to_neighboring_images, n_images,
                 lattice_vectors, reciprocal_lattice_vectors, mesh, atm, bas, env, blocking_sizes);
     } else if (n_channels == 2) {
         evaluate_density_driver<2>(
                 density, density_matrices, left_angular, right_angular, non_trivial_pairs, cutoffs,
-                i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+                i_shells, n_i_shells, j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
                 sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
                 image_indices, vectors_to_neighboring_images, n_images,
                 lattice_vectors, reciprocal_lattice_vectors, mesh, atm, bas, env, blocking_sizes);
