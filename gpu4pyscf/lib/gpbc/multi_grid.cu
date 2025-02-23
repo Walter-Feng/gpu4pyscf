@@ -1,8 +1,6 @@
 #include <cstdio>
 #include <cuda_runtime.h>
-#include <gint/config.h>
 #include <gint/gint.h>
-#include <cassert>
 #include <gint/cuda_alloc.cuh>
 
 #define atm(SLOT, I)     atm[ATM_SLOTS * (I) + (SLOT)]
@@ -14,145 +12,21 @@ __host__ __device__ double distance_squared(const double x, const double y, cons
     return x * x + y * y + z * z;
 }
 
-
 template<int ANG>
-__device__
-static void _cart2sph(double g_cart[15], double *g_sph, int stride, int grid_id) {
-    if (ANG == 0) {
-        g_sph[grid_id] += 0.282094791773878143 * g_cart[0];
-    } else if (ANG == 1) {
-        g_sph[grid_id] += 0.488602511902919921 * g_cart[0];
-        g_sph[grid_id + stride] += 0.488602511902919921 * g_cart[1];
-        g_sph[grid_id + 2 * stride] += 0.488602511902919921 * g_cart[2];
-    } else if (ANG == 2) {
-        g_sph[grid_id] += 1.092548430592079070 * g_cart[1];
-        g_sph[grid_id + stride] += 1.092548430592079070 * g_cart[4];
-        g_sph[grid_id + 2 * stride] +=
-                0.630783130505040012 * g_cart[5] - 0.315391565252520002 * (g_cart[0] + g_cart[3]);
-        g_sph[grid_id + 3 * stride] += 1.092548430592079070 * g_cart[2];
-        g_sph[grid_id + 4 * stride] += 0.546274215296039535 * (g_cart[0] - g_cart[3]);
-    } else if (ANG == 3) {
-        g_sph[grid_id] += 1.770130769779930531 * g_cart[1] - 0.590043589926643510 * g_cart[6];
-        g_sph[grid_id + stride] += 2.890611442640554055 * g_cart[4];
-        g_sph[grid_id + 2 * stride] +=
-                1.828183197857862944 * g_cart[8] - 0.457045799464465739 * (g_cart[1] + g_cart[6]);
-        g_sph[grid_id + 3 * stride] +=
-                0.746352665180230782 * g_cart[9] - 1.119528997770346170 * (g_cart[2] + g_cart[7]);
-        g_sph[grid_id + 4 * stride] +=
-                1.828183197857862944 * g_cart[5] - 0.457045799464465739 * (g_cart[0] + g_cart[3]);
-        g_sph[grid_id + 5 * stride] += 1.445305721320277020 * (g_cart[2] - g_cart[7]);
-        g_sph[grid_id + 6 * stride] += 0.590043589926643510 * g_cart[0] - 1.770130769779930530 * g_cart[3];
-    } else if (ANG == 4) {
-        g_sph[grid_id] += 2.503342941796704538 * (g_cart[1] - g_cart[6]);
-        g_sph[grid_id + stride] += 5.310392309339791593 * g_cart[4] - 1.770130769779930530 * g_cart[11];
-        g_sph[grid_id + 2 * stride] +=
-                5.677048174545360108 * g_cart[8] - 0.946174695757560014 * (g_cart[1] + g_cart[6]);
-        g_sph[grid_id + 3 * stride] +=
-                2.676186174229156671 * g_cart[13] - 2.007139630671867500 * (g_cart[4] + g_cart[11]);
-        g_sph[grid_id + 4 * stride] +=
-                0.317356640745612911 * (g_cart[0] + g_cart[10]) + 0.634713281491225822 * g_cart[3] -
-                2.538853125964903290 * (g_cart[5] + g_cart[12]) + 0.846284375321634430 * g_cart[14];
-        g_sph[grid_id + 5 * stride] +=
-                2.676186174229156671 * g_cart[9] - 2.007139630671867500 * (g_cart[2] + g_cart[7]);
-        g_sph[grid_id + 6 * stride] +=
-                2.838524087272680054 * (g_cart[5] - g_cart[12]) + 0.473087347878780009 * (g_cart[10] - g_cart[0]);
-        g_sph[grid_id + 7 * stride] += 1.770130769779930531 * g_cart[2] - 5.310392309339791590 * g_cart[7];
-        g_sph[grid_id + 8 * stride] +=
-                0.625835735449176134 * (g_cart[0] + g_cart[10]) - 3.755014412695056800 * g_cart[3];
-    }
-}
-
-template<int ANG>
-__device__
-static void _memset_cart(double *g_cart, int stride, int grid_id) {
-    if (ANG == 0) {
-        g_cart[grid_id] = 0.0;
-    } else if (ANG == 1) {
-        g_cart[grid_id] = 0.0;
-        g_cart[grid_id + stride] = 0.0;
-        g_cart[grid_id + 2 * stride] = 0.0;
-    } else if (ANG == 2) {
-        g_cart[grid_id] = 0.0;
-        g_cart[grid_id + stride] = 0.0;
-        g_cart[grid_id + 2 * stride] = 0.0;
-        g_cart[grid_id + 3 * stride] = 0.0;
-        g_cart[grid_id + 4 * stride] = 0.0;
-        g_cart[grid_id + 5 * stride] = 0.0;
-    } else if (ANG == 3) {
-        g_cart[grid_id] = 0.0;
-        g_cart[grid_id + stride] = 0.0;
-        g_cart[grid_id + 2 * stride] = 0.0;
-        g_cart[grid_id + 3 * stride] = 0.0;
-        g_cart[grid_id + 4 * stride] = 0.0;
-        g_cart[grid_id + 5 * stride] = 0.0;
-        g_cart[grid_id + 6 * stride] = 0.0;
-        g_cart[grid_id + 7 * stride] = 0.0;
-        g_cart[grid_id + 8 * stride] = 0.0;
-        g_cart[grid_id + 9 * stride] = 0.0;
-    } else if (ANG == 4) {
-        g_cart[grid_id] = 0.0;
-        g_cart[grid_id + stride] = 0.0;
-        g_cart[grid_id + 2 * stride] = 0.0;
-        g_cart[grid_id + 3 * stride] = 0.0;
-        g_cart[grid_id + 4 * stride] = 0.0;
-        g_cart[grid_id + 5 * stride] = 0.0;
-        g_cart[grid_id + 6 * stride] = 0.0;
-        g_cart[grid_id + 7 * stride] = 0.0;
-        g_cart[grid_id + 8 * stride] = 0.0;
-        g_cart[grid_id + 9 * stride] = 0.0;
-        g_cart[grid_id + 10 * stride] = 0.0;
-        g_cart[grid_id + 11 * stride] = 0.0;
-        g_cart[grid_id + 12 * stride] = 0.0;
-        g_cart[grid_id + 14 * stride] = 0.0;
+__inline__ __device__ constexpr double common_fac_sp() {
+    if constexpr(ANG == 0) {
+        return 0.282094791773878143;
+    } else if constexpr(ANG == 1) {
+        return 0.488602511902919921;
     } else {
-        int i = 0;
-        for (int lx = ANG; lx >= 0; lx--) {
-            for (int ly = ANG - lx; ly >= 0; ly--, i++) {
-                g_cart[grid_id + i * stride] = 0.0;
-            }
-        }
+        return 1.0;
     }
 }
 
-template<int ANG>
-__device__
-static void _memset_sph(double *g_sph, int stride, int grid_id) {
-    if (ANG == 0) {
-        g_sph[grid_id] = 0.0;
-    } else if (ANG == 1) {
-        g_sph[grid_id] = 0.0;
-        g_sph[grid_id + stride] = 0.0;
-        g_sph[grid_id + 2 * stride] = 0.0;
-    } else if (ANG == 2) {
-        g_sph[grid_id] = 0.0;
-        g_sph[grid_id + stride] = 0.0;
-        g_sph[grid_id + 2 * stride] = 0.0;
-        g_sph[grid_id + 3 * stride] = 0.0;
-        g_sph[grid_id + 4 * stride] = 0.0;
-    } else if (ANG == 3) {
-        g_sph[grid_id] = 0.0;
-        g_sph[grid_id + stride] = 0.0;
-        g_sph[grid_id + 2 * stride] = 0.0;
-        g_sph[grid_id + 3 * stride] = 0.0;
-        g_sph[grid_id + 4 * stride] = 0.0;
-        g_sph[grid_id + 5 * stride] = 0.0;
-        g_sph[grid_id + 6 * stride] = 0.0;
-    } else if (ANG == 4) {
-        g_sph[grid_id] = 0.0;
-        g_sph[grid_id + stride] = 0.0;
-        g_sph[grid_id + 2 * stride] = 0.0;
-        g_sph[grid_id + 3 * stride] = 0.0;
-        g_sph[grid_id + 4 * stride] = 0.0;
-        g_sph[grid_id + 5 * stride] = 0.0;
-        g_sph[grid_id + 6 * stride] = 0.0;
-        g_sph[grid_id + 7 * stride] = 0.0;
-        g_sph[grid_id + 8 * stride] = 0.0;
-    }
-}
 
 template<int ANG>
 __device__
-static void _cart_gto(double *g, double fx, double fy, double fz) {
+static void gto_cartesian(double *g, double fx, double fy, double fz) {
     for (int lx = ANG, i = 0; lx >= 0; lx--) {
         for (int ly = ANG - lx; ly >= 0; ly--, i++) {
             int lz = ANG - lx - ly;
@@ -189,17 +63,13 @@ __global__ void evaluate_density_kernel(
                               lattice_vectors[8] * c_index / mesh_c;
 
     constexpr int n_i_cartesian_functions = (i_angular + 1) * (i_angular + 2) / 2;
-    constexpr int n_i_spherical_functions = 2 * i_angular + 1;
     constexpr int n_j_cartesian_functions = (j_angular + 1) * (j_angular + 2) / 2;
-    constexpr int n_j_spherical_functions = 2 * j_angular + 1;
 
     double i_cartesian[n_i_cartesian_functions];
     double j_cartesian[n_j_cartesian_functions];
-    double i_spherical[n_i_spherical_functions];
-    double j_spherical[n_j_spherical_functions];
 
     double density_value[n_channels];
-    double prefactor[n_channels * n_i_spherical_functions * n_j_spherical_functions];
+    double prefactor[n_channels * n_i_cartesian_functions * n_j_cartesian_functions];
 
 #pragma unroll
     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -245,18 +115,19 @@ __global__ void evaluate_density_kernel(
         const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * distance_squared(
                 i_x - j_x, i_y - j_y, i_z - j_z);
 
-        const double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff;
+        const double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff * common_fac_sp<i_angular>() *
+                                      common_fac_sp<j_angular>();
 #pragma unroll
         for (int i_channel = 0; i_channel < n_channels; i_channel++) {
-            for (int i_function_index = 0; i_function_index < n_i_spherical_functions; i_function_index++) {
-                for (int j_function_index = 0; j_function_index < n_j_spherical_functions; j_function_index++) {
+            for (int i_function_index = 0; i_function_index < n_i_cartesian_functions; i_function_index++) {
+                for (int j_function_index = 0; j_function_index < n_j_cartesian_functions; j_function_index++) {
                     const double density_matrix_value =
                             density_matrices[
                                     density_matrix_channel_stride * i_channel + image_index * density_matrix_stride +
                                     (i_function + i_function_index) * n_j_functions + j_function + j_function_index];
 
-                    prefactor[i_channel * n_i_spherical_functions * n_j_spherical_functions +
-                              i_function_index * n_j_spherical_functions + j_function_index] =
+                    prefactor[i_channel * n_i_cartesian_functions * n_j_cartesian_functions +
+                              i_function_index * n_j_cartesian_functions + j_function_index] =
                             pair_prefactor * density_matrix_value;
                 }
             }
@@ -298,26 +169,21 @@ __global__ void evaluate_density_kernel(
                                      c_cell * lattice_vectors[7];
                     const double z = position_z - a_cell * lattice_vectors[2] - b_cell * lattice_vectors[5] -
                                      c_cell * lattice_vectors[8];
-                    _cart_gto<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
-                    _memset_sph<i_angular>(i_spherical, 1, 0);
-                    _cart2sph<i_angular>(i_cartesian, i_spherical, 1, 0);
-
-                    _cart_gto<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
-                    _memset_sph<j_angular>(j_spherical, 1, 0);
-                    _cart2sph<j_angular>(j_cartesian, j_spherical, 1, 0);
+                    gto_cartesian<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
+                    gto_cartesian<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
 
                     const double r_squared = distance_squared(x - pair_x, y - pair_y, z - pair_z);
                     const double gaussian = exp(-ij_exponent * r_squared);
 
 #pragma unroll
                     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
-                        for (int i_function_index = 0; i_function_index < n_i_spherical_functions; i_function_index++) {
+                        for (int i_function_index = 0; i_function_index < n_i_cartesian_functions; i_function_index++) {
                             for (int j_function_index = 0;
-                                 j_function_index < n_j_spherical_functions; j_function_index++) {
+                                 j_function_index < n_j_cartesian_functions; j_function_index++) {
                                 density_value[i_channel] +=
-                                        prefactor[i_channel * n_i_spherical_functions * n_j_spherical_functions +
-                                                  i_function_index * n_j_spherical_functions + j_function_index] *
-                                        gaussian * i_spherical[i_function_index] * j_spherical[j_function_index];
+                                        prefactor[i_channel * n_i_cartesian_functions * n_j_cartesian_functions +
+                                                  i_function_index * n_j_cartesian_functions + j_function_index] *
+                                        gaussian * i_cartesian[i_function_index] * j_cartesian[j_function_index];
                             }
                         }
                     }
@@ -425,17 +291,12 @@ __global__ void evaluate_xc_kernel(
                               lattice_vectors[8] * c_index / mesh_c;
 
     constexpr int n_i_cartesian_functions = (i_angular + 1) * (i_angular + 2) / 2;
-    constexpr int n_i_spherical_functions = 2 * i_angular + 1;
     constexpr int n_j_cartesian_functions = (j_angular + 1) * (j_angular + 2) / 2;
-    constexpr int n_j_spherical_functions = 2 * j_angular + 1;
-
     double xc_values[n_channels];
-    double neighboring_gaussian_sum[n_i_spherical_functions * n_j_spherical_functions];
+    double neighboring_gaussian_sum[n_i_cartesian_functions * n_j_cartesian_functions];
 
     double i_cartesian[n_i_cartesian_functions];
     double j_cartesian[n_j_cartesian_functions];
-    double i_spherical[n_i_spherical_functions];
-    double j_spherical[n_j_spherical_functions];
 
 #pragma unroll
     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -482,7 +343,8 @@ __global__ void evaluate_xc_kernel(
         const double ij_exponent_in_prefactor = i_exponent * j_exponent / ij_exponent * distance_squared(
                 i_x - j_x, i_y - j_y, i_z - j_z);
 
-        const double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff;
+        const double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff * common_fac_sp<i_angular>() *
+                                      common_fac_sp<j_angular>();
 
         const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
         const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
@@ -510,10 +372,10 @@ __global__ void evaluate_xc_kernel(
                                         (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[8]);
 
 #pragma unroll
-        for (int i_function_index = 0; i_function_index < n_i_spherical_functions; i_function_index++) {
+        for (int i_function_index = 0; i_function_index < n_i_cartesian_functions; i_function_index++) {
             for (int j_function_index = 0;
-                 j_function_index < n_j_spherical_functions; j_function_index++) {
-                neighboring_gaussian_sum[i_function_index * n_j_spherical_functions + j_function_index] = 0;
+                 j_function_index < n_j_cartesian_functions; j_function_index++) {
+                neighboring_gaussian_sum[i_function_index * n_j_cartesian_functions + j_function_index] = 0;
             }
         }
         for (int a_cell = lower_a_index; a_cell <= upper_a_index; a_cell++) {
@@ -526,21 +388,17 @@ __global__ void evaluate_xc_kernel(
                                      c_cell * lattice_vectors[7];
                     const double z = position_z - a_cell * lattice_vectors[2] - b_cell * lattice_vectors[5] -
                                      c_cell * lattice_vectors[8];
-                    _cart_gto<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
-                    _memset_sph<i_angular>(i_spherical, 1, 0);
-                    _cart2sph<i_angular>(i_cartesian, i_spherical, 1, 0);
+                    gto_cartesian<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
+                    gto_cartesian<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
 
-                    _cart_gto<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
-                    _memset_sph<j_angular>(j_spherical, 1, 0);
-                    _cart2sph<j_angular>(j_cartesian, j_spherical, 1, 0);
                     const double r_squared = distance_squared(x - pair_x, y - pair_y, z - pair_z);
                     const double gaussian = exp(-ij_exponent * r_squared);
 #pragma unroll
-                    for (int i_function_index = 0; i_function_index < n_i_spherical_functions; i_function_index++) {
+                    for (int i_function_index = 0; i_function_index < n_i_cartesian_functions; i_function_index++) {
                         for (int j_function_index = 0;
-                             j_function_index < n_j_spherical_functions; j_function_index++) {
-                            neighboring_gaussian_sum[i_function_index * n_j_spherical_functions + j_function_index] +=
-                                    gaussian * i_spherical[i_function_index] * j_spherical[j_function_index];
+                             j_function_index < n_j_cartesian_functions; j_function_index++) {
+                            neighboring_gaussian_sum[i_function_index * n_j_cartesian_functions + j_function_index] +=
+                                    gaussian * i_cartesian[i_function_index] * j_cartesian[j_function_index];
                         }
                     }
                 }
@@ -549,15 +407,14 @@ __global__ void evaluate_xc_kernel(
 
 #pragma unroll
         for (int i_channel = 0; i_channel < n_channels; i_channel++) {
-            for (int i_function_index = 0; i_function_index < n_i_spherical_functions; i_function_index++) {
-                for (int j_function_index = 0; j_function_index < n_j_spherical_functions; j_function_index++) {
+            for (int i_function_index = 0; i_function_index < n_i_cartesian_functions; i_function_index++) {
+                for (int j_function_index = 0; j_function_index < n_j_cartesian_functions; j_function_index++) {
                     atomicAdd(fock + fock_stride * image_index + n_j_functions * (i_function_index + i_function) +
                               j_function_index + j_function,
                               xc_values[i_channel] * pair_prefactor *
-                              neighboring_gaussian_sum[i_function_index * n_j_spherical_functions + j_function_index]);
+                              neighboring_gaussian_sum[i_function_index * n_j_cartesian_functions + j_function_index]);
                 }
             }
-
         }
     }
 }
@@ -619,35 +476,6 @@ void evaluate_xc_driver(
                     "angular momentum pair %d, %d is not supported in evaluate_xc_driver\n", left_angular,
                     right_angular);
     }
-//    if (left_angular == 0 && right_angular == 0) {
-//        evaluate_xc_kernel<n_channels, 0, 0><<<block_grid, block_size>>>(
-//                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-//                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-//                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-//                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-//    } else if (left_angular == 1 && right_angular == 0) {
-//        evaluate_xc_kernel<n_channels, 1, 0><<<block_grid, block_size>>>(
-//                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-//                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-//                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-//                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-//    } else if (left_angular == 0 && right_angular == 1) {
-//        evaluate_xc_kernel<n_channels, 0, 1><<<block_grid, block_size>>>(
-//                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-//                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-//                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-//                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-//    } else if (left_angular == 1 && right_angular == 1) {
-//        evaluate_xc_kernel<n_channels, 1, 1><<<block_grid, block_size>>>(
-//                fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells,
-//                shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-//                accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images,
-//                lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env);
-//    } else {
-//        fprintf(stderr,
-//                "angular momentum pair %d, %d is not supported in evaluate_xc_driver\n", left_angular,
-//                right_angular);
-//    }
 
     checkCudaErrors(cudaPeekAtLastError());
 }
