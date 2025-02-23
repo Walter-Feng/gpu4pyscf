@@ -251,11 +251,11 @@ def sort_gaussian_pairs(mydf, xc_type="LDA",
                     for granularized_mesh_point in granularized_mesh_in_real_space:
                         displaced_centers = granularized_mesh_point - centers
                         translation_lower = cp.asarray(
-                            cp.ceil(reciprocal_lattice_vectors.dot(
+                            cp.floor(reciprocal_lattice_vectors.dot(
                                 displaced_centers.T - cutoffs).T),
                             dtype=cp.int32)
                         translation_upper = cp.asarray(
-                            cp.floor(reciprocal_lattice_vectors.dot(
+                            cp.ceil(reciprocal_lattice_vectors.dot(
                                 displaced_centers.T + cutoffs).T + (
                                             blocking_sizes_on_gpu - 1) / mesh),
                             dtype=cp.int32)
