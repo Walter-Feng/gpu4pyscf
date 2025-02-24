@@ -38,7 +38,7 @@ static void gto_cartesian(double *g, double fx, double fy, double fz) {
 template<int n_channels, int i_angular, int j_angular>
 __global__ void evaluate_density_kernel(
         double *density, const double *density_matrices, const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int *i_shells, const int *j_shells, const int n_j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -90,8 +90,8 @@ __global__ void evaluate_density_kernel(
         const double image_z = vectors_to_neighboring_images[image_index * 3 + 2];
 
         const int shell_pair_index = non_trivial_pairs[i_pair];
-        const int j_shell_index = shell_pair_index / n_i_shells;
-        const int i_shell_index = shell_pair_index % n_i_shells;
+        const int i_shell_index = shell_pair_index / n_j_shells;
+        const int j_shell_index = shell_pair_index % n_j_shells;
         const int i_shell = i_shells[i_shell_index];
         const int i_function = shell_to_ao_indices[i_shell];
         const int j_shell = j_shells[j_shell_index];
@@ -201,7 +201,7 @@ __global__ void evaluate_density_kernel(
 }
 
 #define density_kernel_macro(li, lj) evaluate_density_kernel<n_channels, li, lj><<<block_grid, block_size>>>( \
-density, density_matrices, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells, \
+density, density_matrices, non_trivial_pairs, cutoffs, i_shells, j_shells, n_j_shells, \
 shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid, \
 accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images, \
 lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env)
@@ -211,8 +211,8 @@ lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, e
 template<int n_channels>
 void evaluate_density_driver(
         double *density, const double *density_matrices,
-        const int left_angular, const int right_angular, const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int i_angular, const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
+        const int *i_shells, const int *j_shells, const int n_j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -225,7 +225,7 @@ void evaluate_density_driver(
     dim3 block_grid((mesh_c + blocking_sizes[2] - 1) / blocking_sizes[2],
                     (mesh_b + blocking_sizes[1] - 1) / blocking_sizes[1],
                     (mesh_a + blocking_sizes[0] - 1) / blocking_sizes[0]);
-    switch (left_angular * 10 + right_angular) {
+    switch (i_angular * 10 + j_angular) {
         density_kernel_case_macro(0, 0);
         density_kernel_case_macro(0, 1);
         density_kernel_case_macro(0, 2);
@@ -253,8 +253,8 @@ void evaluate_density_driver(
         density_kernel_case_macro(4, 4);
         default:
             fprintf(stderr,
-                    "angular momentum pair %d, %d is not supported in evaluate_density_driver\n", left_angular,
-                    right_angular);
+                    "angular momentum pair %d, %d is not supported in evaluate_density_driver\n", i_angular,
+                    j_angular);
     }
 
     checkCudaErrors(cudaPeekAtLastError());
@@ -264,7 +264,7 @@ void evaluate_density_driver(
 template<int n_channels, int i_angular, int j_angular>
 __global__ void evaluate_xc_kernel(
         double *fock, const double *xc_weights, const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int *i_shells, const int *j_shells, const int n_j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -318,8 +318,8 @@ __global__ void evaluate_xc_kernel(
         const double image_z = vectors_to_neighboring_images[image_index * 3 + 2];
 
         const int shell_pair_index = non_trivial_pairs[i_pair];
-        const int j_shell_index = shell_pair_index / n_i_shells;
-        const int i_shell_index = shell_pair_index % n_i_shells;
+        const int i_shell_index = shell_pair_index / n_j_shells;
+        const int j_shell_index = shell_pair_index % n_j_shells;
         const int i_shell = i_shells[i_shell_index];
         const int i_function = shell_to_ao_indices[i_shell];
         const int j_shell = j_shells[j_shell_index];
@@ -420,7 +420,7 @@ __global__ void evaluate_xc_kernel(
 }
 
 #define xc_kernel_macro(li, lj) evaluate_xc_kernel<n_channels, li, lj><<<block_grid, block_size>>>( \
-        fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, n_i_shells, j_shells, \
+        fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, j_shells,  n_j_shells,\
         shell_to_ao_indices, n_i_functions, n_j_functions, sorted_pairs_per_local_grid, \
         accumulated_n_pairs_per_local_grid, image_indices, vectors_to_neighboring_images, n_images, \
         lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, atm, bas, env)
@@ -430,8 +430,8 @@ __global__ void evaluate_xc_kernel(
 template<int n_channels>
 void evaluate_xc_driver(
         double *fock, const double *xc_weights,
-        const int left_angular, const int right_angular, const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int i_angular, const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
+        const int *i_shells, const int *j_shells, const int n_j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -445,7 +445,7 @@ void evaluate_xc_driver(
                     (mesh_b + blocking_sizes[1] - 1) / blocking_sizes[1],
                     (mesh_a + blocking_sizes[0] - 1) / blocking_sizes[0]);
 
-    switch (left_angular * 10 + right_angular) {
+    switch (i_angular * 10 + j_angular) {
         xc_kernel_case_macro(0, 0);
         xc_kernel_case_macro(0, 1);
         xc_kernel_case_macro(0, 2);
@@ -473,8 +473,8 @@ void evaluate_xc_driver(
         xc_kernel_case_macro(4, 4);
         default:
             fprintf(stderr,
-                    "angular momentum pair %d, %d is not supported in evaluate_xc_driver\n", left_angular,
-                    right_angular);
+                    "angular momentum pair %d, %d is not supported in evaluate_xc_driver\n", i_angular,
+                    j_angular);
     }
 
     checkCudaErrors(cudaPeekAtLastError());
@@ -483,8 +483,8 @@ void evaluate_xc_driver(
 extern "C" {
 void evaluate_density_driver(
         double *density, const double *density_matrices,
-        const int left_angular, const int right_angular, const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int i_angular, const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
+        const int *i_shells, const int *j_shells,  const int n_j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -493,15 +493,15 @@ void evaluate_density_driver(
         const int n_channels) {
     if (n_channels == 1) {
         evaluate_density_driver<1>(
-                density, density_matrices, left_angular, right_angular, non_trivial_pairs, cutoffs,
-                i_shells, n_i_shells, j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+                density, density_matrices, i_angular, j_angular, non_trivial_pairs, cutoffs,
+                i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
                 sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
                 image_indices, vectors_to_neighboring_images, n_images,
                 lattice_vectors, reciprocal_lattice_vectors, mesh, atm, bas, env, blocking_sizes);
     } else if (n_channels == 2) {
         evaluate_density_driver<2>(
-                density, density_matrices, left_angular, right_angular, non_trivial_pairs, cutoffs,
-                i_shells, n_i_shells, j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+                density, density_matrices, i_angular, j_angular, non_trivial_pairs, cutoffs,
+                i_shells, j_shells, n_j_shells,  shell_to_ao_indices, n_i_functions, n_j_functions,
                 sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
                 image_indices, vectors_to_neighboring_images, n_images,
                 lattice_vectors, reciprocal_lattice_vectors, mesh, atm, bas, env, blocking_sizes);
@@ -511,9 +511,9 @@ void evaluate_density_driver(
 }
 
 void evaluate_xc_driver(
-        double *fock, const double *xc_weights, const int left_angular, const int right_angular,
+        double *fock, const double *xc_weights, const int i_angular, const int j_angular,
         const int *non_trivial_pairs, const double *cutoffs,
-        const int *i_shells, const int n_i_shells, const int *j_shells,
+        const int *i_shells, const int *j_shells, const int n_j_shells,
         const int *shell_to_ao_indices, const int n_i_functions, const int n_j_functions,
         const int *sorted_pairs_per_local_grid, const int *accumulated_n_pairs_per_local_grid,
         const int *image_indices, const double *vectors_to_neighboring_images, const int n_images,
@@ -521,14 +521,14 @@ void evaluate_xc_driver(
         const int *mesh, const int *atm, const int *bas, const double *env, const int blocking_sizes[3],
         const int n_channels) {
     if (n_channels == 1) {
-        evaluate_xc_driver<1>(fock, xc_weights, left_angular, right_angular, non_trivial_pairs, cutoffs,
-                              i_shells, n_i_shells, j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+        evaluate_xc_driver<1>(fock, xc_weights, i_angular, j_angular, non_trivial_pairs, cutoffs,
+                              i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
                               sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
                               image_indices, vectors_to_neighboring_images, n_images,
                               lattice_vectors, reciprocal_lattice_vectors, mesh, atm, bas, env, blocking_sizes);
     } else if (n_channels == 2) {
-        evaluate_xc_driver<2>(fock, xc_weights, left_angular, right_angular, non_trivial_pairs, cutoffs,
-                              i_shells, n_i_shells, j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+        evaluate_xc_driver<2>(fock, xc_weights, i_angular, j_angular, non_trivial_pairs, cutoffs,
+                              i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
                               sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
                               image_indices, vectors_to_neighboring_images, n_images,
                               lattice_vectors, reciprocal_lattice_vectors, mesh, atm, bas, env, blocking_sizes);
