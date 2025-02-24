@@ -64,6 +64,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
     cell = mydf.cell
     lattice_vectors = cp.asarray(cell.lattice_vectors().T)
     reciprocal_lattice_vectors = cp.linalg.inv(lattice_vectors.T)
+    reciprocal_norms = cp.linalg.norm(reciprocal_lattice_vectors, axis=1)
 
     tasks = getattr(mydf, 'tasks', None)
     if tasks is None:
@@ -83,14 +84,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
 
         else:
             mesh = cp.asarray(grids_dense.mesh)
-            granularized_mesh_size = cp.ceil(mesh / blocking_sizes_on_gpu).get()
-            granularized_mesh = cp.mgrid[0:granularized_mesh_size[0],
-                                        0:granularized_mesh_size[1],
-                                        0:granularized_mesh_size[2]].reshape(3, -1).T
+            granularized_mesh_size = cp.asarray(cp.ceil(mesh / blocking_sizes_on_gpu), dtype=cp.int32).get()
 
-            granularized_mesh_in_fractional = (granularized_mesh * blocking_sizes_on_gpu) / mesh
-            granularized_mesh_in_real_space = granularized_mesh_in_fractional.dot(lattice_vectors)
-
+            granularized_mesh_to_indices = cp.arange(np.prod(granularized_mesh_size)).reshape(granularized_mesh_size)
             subcell_in_sparse_region = grids_sparse.cell
             equivalent_cell_in_dense, coeff_in_dense = subcell_in_dense_region.decontract_basis(
                 to_cart=True, aggregate=True)
@@ -149,8 +145,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
 
                     non_trivial_pairs_from_images = []
                     image_indices = []
-                    centers = []
                     cutoffs = []
+                    contributing_area_begin = []
+                    contributing_area_end = []
 
                     for image_index, i_image in enumerate(vectors_to_neighboring_images):
                         shifted_i_x = i_x - i_image[0]
@@ -162,18 +159,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         interatomic_distance += cp.square(cp.repeat(j_z, n_i_shells) - cp.tile(shifted_i_z, n_j_shells))
                         exponents = exponent_in_prefactor * interatomic_distance
                         non_trivial_pairs = cp.where(exponents < EIJ_CUTOFF)[0]
-                        prefactors = cp.exp(-exponents[non_trivial_pairs]) * pair_coefficients[non_trivial_pairs]
-                        gaussian_cutoffs = gaussian_summation_cutoff(pair_exponents[non_trivial_pairs],
-                                                                     i_angular + j_angular,
-                                                                     prefactors, threshold_in_log)
-                        non_trivial_cutoffs = cp.where(gaussian_cutoffs > 0)[0]
-                        # non_trivial_cutoffs = cp.where(gaussian_cutoffs > 0)[0]
-                        cutoffs.append(gaussian_cutoffs[non_trivial_cutoffs])
-                        non_trivial_pairs = non_trivial_pairs[non_trivial_cutoffs]
-
-                        if len(non_trivial_pairs) == 0:
-                            continue
-
                         pair_x = (cp.repeat(j_exponents * j_x, n_i_shells)
                                   + cp.tile(i_exponents * shifted_i_x, n_j_shells)) / pair_exponents
                         pair_x = pair_x[non_trivial_pairs]
@@ -184,31 +169,62 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                                   + cp.tile(i_exponents * shifted_i_z, n_j_shells)) / pair_exponents
                         pair_z = pair_z[non_trivial_pairs]
 
+                        centers_in_fractional = reciprocal_lattice_vectors.dot(cp.vstack((pair_x, pair_y, pair_z)))
+
+                        prefactors = cp.exp(-exponents[non_trivial_pairs]) * pair_coefficients[non_trivial_pairs]
+                        gaussian_cutoffs = gaussian_summation_cutoff(pair_exponents[non_trivial_pairs],
+                                                                     i_angular + j_angular,
+                                                                     prefactors, threshold_in_log)
+                        cutoffs.append(gaussian_cutoffs)
+                        cutoffs_in_fractional = (cp.tile(gaussian_cutoffs, 3) * cp.repeat(reciprocal_norms, len(gaussian_cutoffs))).reshape(3, -1)
+                        begin = cp.ceil((centers_in_fractional - cutoffs_in_fractional).T * mesh)
+                        end = cp.floor((centers_in_fractional + cutoffs_in_fractional).T * mesh)
+
+                        contributing_area_begin.append(begin - blocking_sizes_on_gpu + 1)
+                        contributing_area_end.append(end)
+
+                        if len(non_trivial_pairs) == 0:
+                            continue
+
                         non_trivial_pairs_from_images.append(non_trivial_pairs)
                         image_indices.append(cp.ones(len(non_trivial_pairs)) * image_index)
-                        centers.append(cp.vstack((pair_x, pair_y, pair_z)).T)
 
                     non_trivial_pairs_from_images = cp.asarray(
                         cp.concatenate(non_trivial_pairs_from_images), dtype=cp.int32)
                     cutoffs = cp.concatenate(cutoffs)
-                    centers = cp.concatenate(centers)
                     image_indices = cp.asarray(cp.concatenate(image_indices), dtype=cp.int32)
+                    contributing_area_begin = cp.asarray(cp.concatenate(contributing_area_begin), dtype=cp.int32).T
+                    contributing_area_end = cp.asarray(cp.concatenate(contributing_area_end), dtype=cp.int32).T
+                    n_pairs = len(non_trivial_pairs_from_images)
+                    contributing_indices = []
+                    for xyz_index in range(3):
+                        local_grid_size = granularized_mesh_size[xyz_index]
+                        begin = cp.repeat(contributing_area_begin[xyz_index], local_grid_size)
+                        end = cp.repeat(contributing_area_end[xyz_index], local_grid_size)
+                        tiled_local_grid = cp.tile(cp.arange(local_grid_size), n_pairs) * blocking_sizes_on_gpu[xyz_index]
+                        begin_translation = cp.ceil((begin - tiled_local_grid) / mesh[xyz_index])
+                        end_translation = cp.floor((end - tiled_local_grid) / mesh[xyz_index])
+                        contributing = (begin_translation <= end_translation).reshape(n_pairs, local_grid_size)
+                        contributing_indices.append(list(map(lambda bools: cp.where(bools)[0], contributing)))
 
-                    non_trivial_pairs_at_local_points = []
+                    contributing_indices_for_pairs = []
+                    for i_pair in range(n_pairs):
+                        contributing_local_grid = granularized_mesh_to_indices[cp.ix_(
+                            contributing_indices[0][i_pair],
+                            contributing_indices[1][i_pair],
+                            contributing_indices[2][i_pair])]
 
-                    for granularized_mesh_point in granularized_mesh_in_real_space:
-                        displaced_centers = granularized_mesh_point - centers
-                        translation_lower = cp.asarray(cp.ceil(reciprocal_lattice_vectors.dot(displaced_centers.T - cutoffs).T), dtype=cp.int32)
-                        translation_upper = cp.asarray(cp.floor(reciprocal_lattice_vectors.dot(
-                            displaced_centers.T + cutoffs).T + (blocking_sizes_on_gpu - 1) / mesh), dtype=cp.int32)
-                        is_within_cell_translation = cp.all(translation_lower <= translation_upper, axis=1)
-                        non_trivial_pairs_at_local_points.append(cp.where(is_within_cell_translation)[0])
-                        # non_trivial_pairs_at_local_points.append(cp.arange(len(is_within_cell_translation)))
+                        contributing_indices_for_pairs.append(contributing_local_grid.flatten())
 
-                    n_pairs_per_point = list(map(len, non_trivial_pairs_at_local_points))
-                    accumulated_n_pairs_per_point = cp.asarray(accumulate(n_pairs_per_point), dtype=cp.int32)
-                    non_trivial_pairs_at_local_points = cp.asarray(
-                        cp.concatenate(non_trivial_pairs_at_local_points), dtype=cp.int32)
+                    pair_indices = [cp.full(len(contributing_indices_for_pairs[i]), i) for i in range(n_pairs)]
+                    contributing_indices_for_pairs = cp.concatenate(contributing_indices_for_pairs)
+                    sort_indices = cp.argsort(contributing_indices_for_pairs)
+                    contributing_indices_for_pairs = contributing_indices_for_pairs[sort_indices]
+                    non_trivial_pairs_at_local_points = cp.asarray(cp.concatenate(pair_indices)[sort_indices], dtype=cp.int32)
+                    effective_local_grid_points, counts = cp.unique(contributing_indices_for_pairs, return_counts=True)
+                    n_pairs_per_point = cp.zeros(cp.prod(granularized_mesh_size) + 1)
+                    n_pairs_per_point[effective_local_grid_points + 1] = counts
+                    accumulated_n_pairs_per_point = cp.asarray(cp.ufunc.accumulate(cp.add, n_pairs_per_point), dtype=cp.int32)
 
                     per_angular_pairs.append({
                         "angular": (i_angular, j_angular),
