@@ -202,6 +202,11 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     image_indices = cp.asarray(cp.concatenate(image_indices), dtype=cp.int32)
                     contributing_area_begin = cp.asarray(cp.concatenate(contributing_area_begin), dtype=cp.int32).T
                     contributing_area_end = cp.asarray(cp.concatenate(contributing_area_end), dtype=cp.int32).T
+
+                    a = cp.ceil((contributing_area_end - contributing_area_begin).T / cp.array([8, 8, 8])) * cp.array([8, 8, 8])
+                    unique, count = cp.unique(a, return_counts=True)
+                    print(cp.hstack((unique, count)).reshape(-1, 2))
+                    assert 0
                     n_pairs = len(non_trivial_pairs_from_images)
                     contributing_indices = []
                     for xyz_index in range(3):
