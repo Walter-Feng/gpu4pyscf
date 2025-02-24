@@ -414,20 +414,23 @@ __global__ void evaluate_density_kernel(
   const double exp_cross_term_x = exp(-2 * ij_exponent * dx * x0);
   const double exp_cross_term_y = exp(-2 * ij_exponent * dy * y0);
   const double exp_cross_term_z = exp(-2 * ij_exponent * dz * z0);
-  const double exp_2dx = exp(-2 * ij_exponent * dx);
-  const double exp_2dy = exp(-2 * ij_exponent * dy);
-  const double exp_2dz = exp(-2 * ij_exponent * dz);
+  const double exp_dx = exp(-ij_exponent * dx);
+  const double exp_dy = exp(-ij_exponent * dy);
+  const double exp_dz = exp(-ij_exponent * dz);
+  const double exp_2dx = exp_dx * exp_dx;
+  const double exp_2dy = exp_dy * exp_dy;
+  const double exp_2dz = exp_dz * exp_dz;
 
-  double exp_n_dx_squared = 1;
+  double exp_n_dx_squared = exp_dx;
   double gaussian_x = gaussian_x0;
   double x = x0;
   for (int a = 0; a < a_range; a++) {
-    double exp_n_dy_squared = 1;
+    double exp_n_dy_squared = exp_dy;
     double gaussian_y = gaussian_y0;
     double y = y0;
     const int a_index = a % mesh_a;
     for (int b = 0; b < b_range; b++) {
-      double exp_n_dz_squared = 1;
+      double exp_n_dz_squared = exp_dz;
       double gaussian_z = gaussian_z0;
       double z = z0;
       const int b_index = b % mesh_b;
@@ -461,8 +464,8 @@ __global__ void evaluate_density_kernel(
         exp_n_dz_squared *= exp_2dz;
         gaussian_z *= exp_n_dz_squared * exp_cross_term_z;
       }
-      exp_n_dx_squared *= exp_2dx;
-      gaussian_x *= exp_n_dy_squared * exp_cross_term_y;
+      exp_n_dy_squared *= exp_2dy;
+      gaussian_y *= exp_n_dy_squared * exp_cross_term_y;
     }
     exp_n_dx_squared *= exp_2dx;
     gaussian_x *= exp_n_dx_squared * exp_cross_term_x;
