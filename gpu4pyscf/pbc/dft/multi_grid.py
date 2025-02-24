@@ -156,31 +156,45 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         interatomic_distance += cp.square(cp.subtract.outer(shifted_i_y, j_y))
                         interatomic_distance += cp.square(cp.subtract.outer(shifted_i_z, j_z))
                         exponents = exponent_in_prefactor * interatomic_distance.flatten()
+
                         non_trivial_pairs = cp.where(exponents < EIJ_CUTOFF)[0]
-                        selected_pair_exponents = pair_exponents[non_trivial_pairs]
-                        pair_x = cp.outer(i_exponents * shifted_i_x, j_exponents * j_x).flatten()[non_trivial_pairs]
-                        pair_y = cp.outer(i_exponents * shifted_i_y, j_exponents * j_y).flatten()[non_trivial_pairs]
-                        pair_z = cp.outer(i_exponents * shifted_i_z, j_exponents * j_z).flatten()[non_trivial_pairs]
-
-                        centers_in_fractional = reciprocal_lattice_vectors.dot(cp.vstack((pair_x, pair_y, pair_z)) / selected_pair_exponents)
-
-                        prefactors = cp.exp(-exponents[non_trivial_pairs]) * pair_coefficients[non_trivial_pairs]
-                        gaussian_cutoffs = gaussian_summation_cutoff(selected_pair_exponents,
-                                                                     i_angular + j_angular,
-                                                                     prefactors, threshold_in_log)
-                        cutoffs.append(gaussian_cutoffs)
-                        cutoffs_in_fractional = cp.outer(reciprocal_norms, gaussian_cutoffs)
-                        begin = cp.ceil((centers_in_fractional - cutoffs_in_fractional).T * mesh)
-                        end = cp.floor((centers_in_fractional + cutoffs_in_fractional).T * mesh)
-
-                        contributing_area_begin.append(begin - blocking_sizes_on_gpu + 1)
-                        contributing_area_end.append(end)
 
                         if len(non_trivial_pairs) == 0:
                             continue
 
+                        prefactors = cp.exp(-exponents[non_trivial_pairs]) * pair_coefficients[non_trivial_pairs]
+                        selected_pair_exponents = pair_exponents[non_trivial_pairs]
+                        gaussian_cutoffs = gaussian_summation_cutoff(selected_pair_exponents,
+                                                                     i_angular + j_angular,
+                                                                     prefactors, threshold_in_log)
+                        non_trivial_cutoffs = cp.where(gaussian_cutoffs > 0)[0]
+
+                        if len(non_trivial_cutoffs) == 0:
+                            continue
+
+                        gaussian_cutoffs = gaussian_cutoffs[non_trivial_cutoffs]
+                        non_trivial_pairs = non_trivial_pairs[non_trivial_cutoffs]
+                        selected_pair_exponents = selected_pair_exponents[non_trivial_cutoffs]
+                        pair_x = cp.add.outer(i_exponents * shifted_i_x, j_exponents * j_x).flatten()[non_trivial_pairs]
+                        pair_y = cp.add.outer(i_exponents * shifted_i_y, j_exponents * j_y).flatten()[non_trivial_pairs]
+                        pair_z = cp.add.outer(i_exponents * shifted_i_z, j_exponents * j_z).flatten()[non_trivial_pairs]
+                        centers_in_fractional = reciprocal_lattice_vectors.dot(cp.vstack((pair_x, pair_y, pair_z)) / selected_pair_exponents)
+
+                        cutoffs_in_fractional = cp.outer(reciprocal_norms, gaussian_cutoffs)
+                        begin = cp.ceil((centers_in_fractional - cutoffs_in_fractional).T * mesh)
+                        end = cp.floor((centers_in_fractional + cutoffs_in_fractional).T * mesh)
+
+                        broad_enough_pairs = cp.where(cp.all(begin <= end, axis=1))[0]
+                        non_trivial_pairs = non_trivial_pairs[broad_enough_pairs]
+                        begin = begin[broad_enough_pairs]
+                        end = end[broad_enough_pairs]
+                        gaussian_cutoffs = gaussian_cutoffs[broad_enough_pairs]
+
+                        contributing_area_begin.append(begin - blocking_sizes_on_gpu)
+                        contributing_area_end.append(end + blocking_sizes_on_gpu)
+                        cutoffs.append(gaussian_cutoffs)
                         non_trivial_pairs_from_images.append(non_trivial_pairs)
-                        image_indices.append(cp.ones(len(non_trivial_pairs)) * image_index)
+                        image_indices.append(cp.full(len(non_trivial_pairs), image_index))
 
                     non_trivial_pairs_from_images = cp.asarray(
                         cp.concatenate(non_trivial_pairs_from_images), dtype=cp.int32)
@@ -192,25 +206,29 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     contributing_indices = []
                     for xyz_index in range(3):
                         local_grid_size = granularized_mesh_size[xyz_index]
-                        begin_translation = cp.ceil(cp.subtract.outer(contributing_area_begin[xyz_index], cp.arange(local_grid_size)) / mesh[xyz_index])
-                        end_translation = cp.ceil(cp.subtract.outer(contributing_area_end[xyz_index], cp.arange(local_grid_size)) / mesh[xyz_index])
-                        contributing = (begin_translation <= end_translation).reshape(n_pairs, local_grid_size)
+                        begin_translation = cp.asarray(cp.ceil(cp.subtract.outer(
+                            cp.arange(local_grid_size) * blocking_sizes[
+                                xyz_index], contributing_area_end[xyz_index]) /
+                                                    mesh[xyz_index]), dtype=cp.int32)
+                        end_translation = cp.asarray(cp.floor(cp.subtract.outer(cp.arange(local_grid_size) * blocking_sizes[xyz_index], contributing_area_begin[xyz_index]) / mesh[xyz_index]), dtype=cp.int32)
+                        contributing = (begin_translation <= end_translation).T
                         contributing_indices.append(list(map(lambda bools: cp.where(bools)[0], contributing)))
 
                     contributing_indices_for_pairs = []
+
                     for i_pair in range(n_pairs):
                         contributing_local_grid = granularized_mesh_to_indices[cp.ix_(
                             contributing_indices[0][i_pair],
                             contributing_indices[1][i_pair],
                             contributing_indices[2][i_pair])]
-
                         contributing_indices_for_pairs.append(contributing_local_grid.flatten())
 
-                    pair_indices = [cp.full(len(contributing_indices_for_pairs[i]), i) for i in range(n_pairs)]
+                    pair_indices = cp.concatenate(
+                        [cp.full(len(contributing_indices_for_pairs[i]), i) for i in range(n_pairs)])
                     contributing_indices_for_pairs = cp.concatenate(contributing_indices_for_pairs)
                     sort_indices = cp.argsort(contributing_indices_for_pairs)
                     contributing_indices_for_pairs = contributing_indices_for_pairs[sort_indices]
-                    non_trivial_pairs_at_local_points = cp.asarray(cp.concatenate(pair_indices)[sort_indices], dtype=cp.int32)
+                    non_trivial_pairs_at_local_points = cp.asarray(pair_indices[sort_indices], dtype=cp.int32)
                     effective_local_grid_points, counts = cp.unique(contributing_indices_for_pairs, return_counts=True)
                     n_pairs_per_point = cp.zeros(cp.prod(granularized_mesh_size) + 1)
                     n_pairs_per_point[effective_local_grid_points + 1] = counts
