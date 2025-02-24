@@ -190,8 +190,8 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         end = end[broad_enough_pairs]
                         gaussian_cutoffs = gaussian_cutoffs[broad_enough_pairs]
 
-                        contributing_area_begin.append(begin - blocking_sizes_on_gpu)
-                        contributing_area_end.append(end + blocking_sizes_on_gpu)
+                        contributing_area_begin.append(begin - blocking_sizes_on_gpu + 1)
+                        contributing_area_end.append(end)
                         cutoffs.append(gaussian_cutoffs)
                         non_trivial_pairs_from_images.append(non_trivial_pairs)
                         image_indices.append(cp.full(len(non_trivial_pairs), image_index))
