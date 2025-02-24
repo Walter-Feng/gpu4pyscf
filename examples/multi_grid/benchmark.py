@@ -6,12 +6,12 @@ from gpu4pyscf.pbc import dft as pbcdft
 from gpu4pyscf.pbc.dft import multi_grid
 
 
-diamond_cell = bulk('C', 'sc', a=4)
+diamond_cell = bulk('S', 'sc', a=4)
 
 lattice_vectors = diamond_cell.cell
 cell = gto.M(
     h=np.array(lattice_vectors),
-    atom=ase_atoms_to_pyscf(bulk('C', 'sc', a=4)),
+    atom=ase_atoms_to_pyscf(bulk('S', 'sc', a=4)),
     basis='minao',
     verbose=6,
     unit='aa',
@@ -19,7 +19,7 @@ cell = gto.M(
 )
 cell.exp_to_discard = 0.1
 
-cell = tools.super_cell(cell, [2, 2, 2])
+# cell = tools.super_cell(cell, [2, 2, 2])
 
 mf = pbcdft.RKS(cell)
 mf.xc = "LDA"
