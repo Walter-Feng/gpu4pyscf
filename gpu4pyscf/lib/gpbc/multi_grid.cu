@@ -424,6 +424,8 @@ __global__ void evaluate_density_kernel(
   double exp_n_dx_squared = exp_dx;
   double gaussian_x = gaussian_x0;
   double x = x0;
+  printf("i_pair: %d, shell_pair_index: %d, exp_cross_term_x: %e, exp_dx: %e, gaussian_x0: %e, x0: %f, ij_exponent: %f, a0: %d, pair_x: %f\n",
+  i_pair, shell_pair_index, exp_cross_term_x, exp_dx, gaussian_x0, x0, ij_exponent, a0, pair_x);
   for (int a = 0; a < a_range; a++) {
     double exp_n_dy_squared = exp_dy;
     double gaussian_y = gaussian_y0;
@@ -439,7 +441,6 @@ __global__ void evaluate_density_kernel(
         gto_cartesian<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
         gto_cartesian<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
         const double gaussian = gaussian_x * gaussian_y * gaussian_z;
-
 #pragma unroll
         for (int i_channel = 0; i_channel < n_channels; i_channel++) {
           double density_value = 0;
@@ -461,14 +462,14 @@ __global__ void evaluate_density_kernel(
                         b_index * b_stride + c_index,
                     density_value);
         }
-        exp_n_dz_squared *= exp_2dz;
         gaussian_z *= exp_n_dz_squared * exp_cross_term_z;
+        exp_n_dz_squared *= exp_2dz;
       }
-      exp_n_dy_squared *= exp_2dy;
       gaussian_y *= exp_n_dy_squared * exp_cross_term_y;
+      exp_n_dy_squared *= exp_2dy;
     }
-    exp_n_dx_squared *= exp_2dx;
     gaussian_x *= exp_n_dx_squared * exp_cross_term_x;
+    exp_n_dx_squared *= exp_2dx;
   }
 }
 
@@ -504,6 +505,7 @@ void evaluate_density_driver(
   const int mesh_a = mesh[0];
   const int mesh_b = mesh[1];
   const int mesh_c = mesh[2];
+
   dim3 block_grid(n_pairs / block_size.x + 1);
   switch (i_angular * 10 + j_angular) {
     new_density_kernel_case_macro(0, 0);
