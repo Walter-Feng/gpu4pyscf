@@ -203,10 +203,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     contributing_area_begin = cp.asarray(cp.concatenate(contributing_area_begin), dtype=cp.int32).T
                     contributing_area_end = cp.asarray(cp.concatenate(contributing_area_end), dtype=cp.int32).T
 
-                    a = cp.ceil((contributing_area_end - contributing_area_begin).T / cp.array([8, 8, 8])) * cp.array([8, 8, 8])
-                    unique, count = cp.unique(a, return_counts=True)
-                    print(cp.hstack((unique, count)).reshape(-1, 2))
-                    assert 0
+                    bin = cp.array([4, 4, 4])
+                    binned_ranges = cp.ceil((contributing_area_end - contributing_area_begin).T / bin) * bin
+                    unique, count = np.unique(binned_ranges.get(), return_counts=True, axis=0)
                     n_pairs = len(non_trivial_pairs_from_images)
                     contributing_indices = []
                     for xyz_index in range(3):
@@ -234,7 +233,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     sort_indices = cp.argsort(contributing_indices_for_pairs)
                     contributing_indices_for_pairs = contributing_indices_for_pairs[sort_indices]
                     non_trivial_pairs_at_local_points = cp.asarray(pair_indices[sort_indices], dtype=cp.int32)
-                    effective_local_grid_points, counts = cp.unique(contributing_indices_for_pairs, return_counts=True)
+                    effective_local_grid_points, counts = np.unique(contributing_indices_for_pairs.get(), return_counts=True)
                     n_pairs_per_point = cp.zeros(cp.prod(granularized_mesh_size) + 1)
                     n_pairs_per_point[effective_local_grid_points + 1] = counts
                     accumulated_n_pairs_per_point = cp.asarray(cp.ufunc.accumulate(cp.add, n_pairs_per_point), dtype=cp.int32)
@@ -272,12 +271,19 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
             })
 
     mydf.sorted_gaussian_pairs = pairs
+    assert 0
 
 
 def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
     c_driver = libgpbc.evaluate_density_driver
-    density_matrix_with_translation = cp.einsum("kt, ikpq->itpq", pairs_info["phase_diff_among_images"], dm_slice)
-    n_channels, n_images, n_i_functions, n_j_functions = density_matrix_with_translation.shape
+    n_k_points, n_images = pairs_info["phase_diff_among_images"].shape
+    if n_k_points == 0:
+        density_matrix_with_translation = cp.repeat(dm_slice, n_images, axis = 1)
+    else:
+        density_matrix_with_translation = cp.einsum("kt, ikpq->itpq", pairs_info["phase_diff_among_images"], dm_slice)
+
+    n_channels, _, n_i_functions, n_j_functions = density_matrix_with_translation.shape
+
     if ignore_imag is False:
         raise NotImplementedError
     density_matrix_with_translation_real_part = density_matrix_with_translation.real.flatten()
@@ -309,6 +315,45 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
 
     return density
 
+def evaluate_density_diffused_wrapper(pairs_info, dm_slice, ignore_imag=True):
+    c_driver = libgpbc.new_evaluate_density_driver
+    n_k_points, n_images = pairs_info["phase_diff_among_images"].shape
+    if n_k_points == 0:
+        density_matrix_with_translation = cp.repeat(dm_slice, n_images, axis = 1)
+    else:
+        density_matrix_with_translation = cp.einsum("kt, ikpq->itpq", pairs_info["phase_diff_among_images"], dm_slice)
+
+    n_channels, _, n_i_functions, n_j_functions = density_matrix_with_translation.shape
+
+    if ignore_imag is False:
+        raise NotImplementedError
+    density_matrix_with_translation_real_part = density_matrix_with_translation.real.flatten()
+    density = cp.zeros((n_channels,) + tuple(pairs_info["mesh"]))
+
+    for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
+        (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
+        c_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(density_matrix_with_translation_real_part.data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(i_angular), ctypes.c_int(j_angular),
+                 ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs"].data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(len(gaussians_per_angular_pair["non_trivial_pairs"])),
+                 ctypes.cast(gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
+                 ctypes.cast(gaussians_per_angular_pair["shell_to_ao_indices"].data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(n_i_functions), ctypes.c_int(n_j_functions),
+                 ctypes.c_int(gaussians_per_angular_pair["contributing_area_begin"], ctypes.c_void_p),
+                 ctypes.cast(gaussians_per_angular_pair["image_indices"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p), ctypes.c_int(n_images),
+                 ctypes.cast(pairs_info["lattice_vectors"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(pairs_info["reciprocal_lattice_vectors"].data.ptr, ctypes.c_void_p),
+                 (ctypes.c_int * 3)(*pairs_info["mesh"]),
+                 ctypes.cast(pairs_info["atm"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(pairs_info["bas"].data.ptr, ctypes.c_void_p),
+                 ctypes.cast(pairs_info["env"].data.ptr, ctypes.c_void_p),
+                 (ctypes.c_int * 3)(*pairs_info["blocking_sizes"]), ctypes.c_int(n_channels))
+
+    return density
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
     dm_kpts = cp.asarray(dm_kpts, order='C')

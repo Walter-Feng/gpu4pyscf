@@ -23,7 +23,7 @@ cell.exp_to_discard = 0.1
 
 mf = pbcdft.RKS(cell)
 mf.xc = "LDA"
-mf.max_cycle = 0
+mf.max_cycle = 10
 mf = multi_grid.fftdf(mf)
 mf.with_df.ngrids = 4  # number of sets of grid points
 mf.kernel()

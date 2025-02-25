@@ -472,6 +472,75 @@ __global__ void evaluate_density_kernel(
   }
 }
 
+#define new_density_kernel_macro(li, lj)                                       \
+  evaluate_density_kernel<n_channels, li, lj><<<block_grid, block_size>>>(     \
+      density, density_matrices, non_trivial_pairs, n_pairs, i_shells,         \
+      j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions, \
+      contributing_area_begin, image_indices, vectors_to_neighboring_images,   \
+      n_images, lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b,   \
+      mesh_c, a_range, b_range, c_range, atm, bas, env)
+
+#define new_density_kernel_case_macro(li, lj)                                  \
+  case (li * 10 + lj):                                                         \
+    new_density_kernel_macro(li, lj);                                          \
+    break
+
+template <int n_channels>
+void evaluate_density_driver(
+    double *density, const double *density_matrices, const int i_angular,
+    const int j_angular, const int *non_trivial_pairs, const int n_pairs,
+    const int *i_shells, const int *j_shells, const int n_j_shells,
+    const int *shell_to_ao_indices, const int n_i_functions,
+    const int n_j_functions, const int *contributing_area_begin,
+    const int *image_indices, const double *vectors_to_neighboring_images,
+    const int n_images, const double *lattice_vectors,
+    const double *reciprocal_lattice_vectors, const int *mesh, const int *atm,
+    const int *bas, const double *env, const int ranges[3]) {
+
+  dim3 block_size(256);
+  int a_range = ranges[0];
+  int b_range = ranges[1];
+  int c_range = ranges[2];
+  const int mesh_a = mesh[0];
+  const int mesh_b = mesh[1];
+  const int mesh_c = mesh[2];
+  dim3 block_grid(n_pairs / block_size.x + 1);
+  switch (i_angular * 10 + j_angular) {
+    new_density_kernel_case_macro(0, 0);
+    new_density_kernel_case_macro(0, 1);
+    new_density_kernel_case_macro(0, 2);
+    new_density_kernel_case_macro(0, 3);
+    new_density_kernel_case_macro(0, 4);
+    new_density_kernel_case_macro(1, 0);
+    new_density_kernel_case_macro(1, 1);
+    new_density_kernel_case_macro(1, 2);
+    new_density_kernel_case_macro(1, 3);
+    new_density_kernel_case_macro(1, 4);
+    new_density_kernel_case_macro(2, 0);
+    new_density_kernel_case_macro(2, 1);
+    new_density_kernel_case_macro(2, 2);
+    new_density_kernel_case_macro(2, 3);
+    new_density_kernel_case_macro(2, 4);
+    new_density_kernel_case_macro(3, 0);
+    new_density_kernel_case_macro(3, 1);
+    new_density_kernel_case_macro(3, 2);
+    new_density_kernel_case_macro(3, 3);
+    new_density_kernel_case_macro(3, 4);
+    new_density_kernel_case_macro(4, 0);
+    new_density_kernel_case_macro(4, 1);
+    new_density_kernel_case_macro(4, 2);
+    new_density_kernel_case_macro(4, 3);
+    new_density_kernel_case_macro(4, 4);
+  default:
+    fprintf(stderr,
+            "angular momentum pair %d, %d is not supported in "
+            "evaluate_density_driver\n",
+            i_angular, j_angular);
+  }
+
+  checkCudaErrors(cudaPeekAtLastError());
+}
+
 template <int n_channels, int i_angular, int j_angular>
 __global__ void evaluate_xc_kernel(
     double *fock, const double *xc_weights, const int *non_trivial_pairs,
@@ -761,6 +830,36 @@ void evaluate_density_driver(
         accumulated_n_pairs_per_local_grid, image_indices,
         vectors_to_neighboring_images, n_images, lattice_vectors,
         reciprocal_lattice_vectors, mesh, atm, bas, env, blocking_sizes);
+  } else {
+    fprintf(stderr, "n_channels more than 2 is not supported.\n");
+  }
+}
+
+void new_evaluate_density_driver(
+    double *density, const double *density_matrices, const int i_angular,
+    const int j_angular, const int *non_trivial_pairs, const int n_pairs,
+    const int *i_shells, const int *j_shells, const int n_j_shells,
+    const int *shell_to_ao_indices, const int n_i_functions,
+    const int n_j_functions, const int *contributing_area_begin,
+    const int *image_indices, const double *vectors_to_neighboring_images,
+    const int n_images, const double *lattice_vectors,
+    const double *reciprocal_lattice_vectors, const int *mesh, const int *atm,
+    const int *bas, const double *env, const int ranges[3],
+    const int n_channels) {
+  if (n_channels == 1) {
+    evaluate_density_driver<1>(
+        density, density_matrices, i_angular, j_angular, non_trivial_pairs,
+        n_pairs, i_shells, j_shells, n_j_shells, shell_to_ao_indices,
+        n_i_functions, n_j_functions, contributing_area_begin, image_indices,
+        vectors_to_neighboring_images, n_images, lattice_vectors,
+        reciprocal_lattice_vectors, mesh, atm, bas, env, ranges);
+  } else if (n_channels == 2) {
+    evaluate_density_driver<2>(
+        density, density_matrices, i_angular, j_angular, non_trivial_pairs,
+        n_pairs, i_shells, j_shells, n_j_shells, shell_to_ao_indices,
+        n_i_functions, n_j_functions, contributing_area_begin, image_indices,
+        vectors_to_neighboring_images, n_images, lattice_vectors,
+        reciprocal_lattice_vectors, mesh, atm, bas, env, ranges);
   } else {
     fprintf(stderr, "n_channels more than 2 is not supported.\n");
   }
