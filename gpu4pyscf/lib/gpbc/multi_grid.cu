@@ -23,6 +23,49 @@ template <int ANG> __inline__ __device__ constexpr double common_fac_sp() {
   }
 }
 
+template <typename T, unsigned int blockSize>
+__device__ void warpReduce(volatile T *sdata, unsigned int tid) {
+  if (blockSize >= 64)
+    sdata[tid] += sdata[tid + 32];
+  if (blockSize >= 32)
+    sdata[tid] += sdata[tid + 16];
+  if (blockSize >= 16)
+    sdata[tid] += sdata[tid + 8];
+  if (blockSize >= 8)
+    sdata[tid] += sdata[tid + 4];
+  if (blockSize >= 4)
+    sdata[tid] += sdata[tid + 2];
+  if (blockSize >= 2)
+    sdata[tid] += sdata[tid + 1];
+}
+
+template <typename T, unsigned int blockSize>
+__device__ void reduce_and_add(volatile T *shared_memory, T *output,
+                               unsigned int thread_id, T number_to_be_added) {
+  __syncthreads();
+  shared_memory[thread_id] = number_to_be_added;
+  __syncthreads();
+  if constexpr (blockSize >= 512) {
+    if (thread_id < 256)
+      shared_memory[thread_id] += shared_memory[thread_id + 256];
+    __syncthreads();
+  }
+  if constexpr (blockSize >= 256) {
+    if (thread_id < 128)
+      shared_memory[thread_id] += shared_memory[thread_id + 128];
+    __syncthreads();
+  }
+  if constexpr (blockSize >= 128) {
+    if (thread_id < 64)
+      shared_memory[thread_id] += shared_memory[thread_id + 64];
+    __syncthreads();
+  }
+  if (thread_id < 32)
+    warpReduce<T, blockSize>(shared_memory, thread_id);
+  if (thread_id == 0)
+    atomicAdd(output, shared_memory[0]);
+}
+
 template <int ANG>
 __device__ static void gto_cartesian(double *g, double fx, double fy,
                                      double fz) {
@@ -577,10 +620,10 @@ __global__ void evaluate_xc_kernel(
   const uint a_index = threadIdx.z + blockDim.z * blockIdx.z;
   const uint b_index = threadIdx.y + blockDim.y * blockIdx.y;
   const uint c_index = threadIdx.x + blockDim.x * blockIdx.x;
+  const uint thread_id = threadIdx.x + threadIdx.y * blockDim.x +
+                         threadIdx.z * blockDim.y * blockDim.x;
 
-  if (a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c) {
-    return;
-  }
+  bool out_of_boundary = a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c;
 
   const uint flattened_index =
       a_index * mesh_b * mesh_c + b_index * mesh_c + c_index;
@@ -605,6 +648,8 @@ __global__ void evaluate_xc_kernel(
 
   double i_cartesian[n_i_cartesian_functions];
   double j_cartesian[n_j_cartesian_functions];
+
+  __shared__ double shared_memory[64];
 
 #pragma unroll
   for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -655,9 +700,12 @@ __global__ void evaluate_xc_kernel(
         i_exponent * j_exponent / ij_exponent *
         distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
 
-    const double pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff *
-                                  j_coeff * common_fac_sp<i_angular>() *
-                                  common_fac_sp<j_angular>();
+    double pair_prefactor = 0;
+    if (!out_of_boundary) {
+      pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff *
+                                    j_coeff * common_fac_sp<i_angular>() *
+                                    common_fac_sp<j_angular>();
+    }
 
     const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
     const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
@@ -735,21 +783,26 @@ __global__ void evaluate_xc_kernel(
       }
     }
 
+    double *fock_pointer = fock + image_index * fock_stride +
+                           i_function * n_j_functions + j_function;
 #pragma unroll
     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
       for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
            i_function_index++) {
         for (int j_function_index = 0;
              j_function_index < n_j_cartesian_functions; j_function_index++) {
-          atomicAdd(fock + fock_stride * image_index +
-                        n_j_functions * (i_function_index + i_function) +
-                        j_function_index + j_function,
-                    xc_values[i_channel] * pair_prefactor *
-                        neighboring_gaussian_sum[i_function_index *
-                                                     n_j_cartesian_functions +
-                                                 j_function_index]);
+          reduce_and_add<double, 64>(
+              shared_memory, fock_pointer, thread_id,
+              xc_values[i_channel] * pair_prefactor *
+                  neighboring_gaussian_sum[i_function_index *
+                                               n_j_cartesian_functions +
+                                           j_function_index]);
+          fock_pointer++;
         }
+        fock_pointer += n_j_functions - n_j_cartesian_functions;
       }
+      fock_pointer +=
+          n_images * fock_stride - n_i_cartesian_functions * n_j_functions;
     }
   }
 }
