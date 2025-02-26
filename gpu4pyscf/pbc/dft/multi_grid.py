@@ -427,9 +427,13 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
                 density_matrix_with_rows_in_dense[:, :, :,
                 n_ao_in_dense:] += density_matrix_with_rows_in_sparse.transpose(0, 1, 3, 2)
 
-                coeff_sandwiched_density_matrix = cp.einsum('nkij,pi,qj->nkpq',
+                coeff_sandwiched_density_matrix = cp.einsum('nkij,pi->nkpj',
                                                             density_matrix_with_rows_in_dense,
-                                                            pairs["coeff_in_dense"], pairs["concatenated_coeff"])
+                                                            pairs["coeff_in_dense"])
+
+                coeff_sandwiched_density_matrix = cp.einsum("nkpj, qj -> nkpq",
+                                                            coeff_sandwiched_density_matrix,
+                                                            pairs["concatenated_coeff"])
 
                 density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
             else:
