@@ -537,8 +537,8 @@ def convert_xc_on_g_mesh_to_fock(mydf, xc_on_g_mesh, hermi=1, kpts=np.zeros((1, 
 
             fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
 
-            fock_slice = cp.einsum('nkpq,pi,qj->nkij', fock_slice,
-                                   pairs["coeff_in_dense"], pairs["concatenated_coeff"])
+            fock_slice = cp.einsum('nkpq,pi->nkiq', fock_slice, pairs["coeff_in_dense"])
+            fock_slice = cp.einsum('nkiq,qj->nkij', fock_slice, pairs["concatenated_coeff"])
 
             fock[:, :, pairs["ao_indices_in_dense"][:, None], pairs["ao_indices_in_dense"]] += fock_slice[:, :, :,
                                                                                                :n_ao_in_sparse]
