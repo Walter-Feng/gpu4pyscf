@@ -321,7 +321,7 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
     return density
 
 def evaluate_density_diffused_wrapper(pairs_info, dm_slice, ignore_imag=True):
-    c_driver = libgpbc.new_evaluate_density_driver
+    c_driver = libgpbc.evaluate_diffused_density_driver
     n_k_points, n_images = pairs_info["phase_diff_among_images"].shape
     if n_k_points == 0:
         density_matrix_with_translation = cp.repeat(dm_slice, n_images, axis = 1)
@@ -340,6 +340,7 @@ def evaluate_density_diffused_wrapper(pairs_info, dm_slice, ignore_imag=True):
             selected_pairs = gaussians_per_angular_pair["non_trivial_pairs"][corresponding_indices]
             selected_image_indices = gaussians_per_angular_pair["image_indices"][selected_pairs]
             selected_pairs_area_begin = gaussians_per_angular_pair["contributing_area_begin"][:, selected_pairs]
+
             assert selected_pairs.dtype == cp.int32
             assert selected_image_indices.dtype == cp.int32
             assert selected_pairs_area_begin.dtype == cp.int32
@@ -425,6 +426,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
                 n_ao_in_sparse, n_ao_in_dense = density_matrix_with_rows_in_sparse.shape[2:]
                 density_matrix_with_rows_in_dense[:, :, :,
                 n_ao_in_dense:] += density_matrix_with_rows_in_sparse.transpose(0, 1, 3, 2)
+
                 coeff_sandwiched_density_matrix = cp.einsum('nkij,pi,qj->nkpq',
                                                             density_matrix_with_rows_in_dense,
                                                             pairs["coeff_in_dense"], pairs["concatenated_coeff"])

@@ -297,7 +297,7 @@ void evaluate_density_driver(
 }
 
 template <int n_channels, int i_angular, int j_angular>
-__global__ void evaluate_density_kernel(
+__global__ void evaluate_diffused_density_kernel(
     double *density, const double *density_matrices,
     const int *non_trivial_pairs, const int n_pairs, const int *i_shells,
     const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
@@ -401,6 +401,10 @@ __global__ void evaluate_density_kernel(
                     lattice_vectors[5] * b0 / mesh_b +
                     lattice_vectors[8] * c0 / mesh_c - pair_z;
 
+  const int a_start = mesh_a + a0 % mesh_a;
+  const int b_start = mesh_b + b0 % mesh_b;
+  const int c_start = mesh_c + c0 % mesh_c;
+
   // asserting orthogonal lattice vectors
 
   const double gaussian_x0 = exp(-ij_exponent * x0 * x0);
@@ -414,32 +418,30 @@ __global__ void evaluate_density_kernel(
   const double exp_cross_term_x = exp(-2 * ij_exponent * dx * x0);
   const double exp_cross_term_y = exp(-2 * ij_exponent * dy * y0);
   const double exp_cross_term_z = exp(-2 * ij_exponent * dz * z0);
-  const double exp_dx = exp(-ij_exponent * dx);
-  const double exp_dy = exp(-ij_exponent * dy);
-  const double exp_dz = exp(-ij_exponent * dz);
-  const double exp_2dx = exp_dx * exp_dx;
-  const double exp_2dy = exp_dy * exp_dy;
-  const double exp_2dz = exp_dz * exp_dz;
+  const double exp_dx_squared = exp(-ij_exponent * dx * dx);
+  const double exp_dy_squared = exp(-ij_exponent * dy * dy);
+  const double exp_dz_squared = exp(-ij_exponent * dz * dz);
+  const double exp_2dx_squared = exp_dx_squared * exp_dx_squared;
+  const double exp_2dy_squared = exp_dy_squared * exp_dy_squared;
+  const double exp_2dz_squared = exp_dz_squared * exp_dz_squared;
 
-  double exp_n_dx_squared = exp_dx;
+  double exp_n_dx_squared = exp_dx_squared;
   double gaussian_x = gaussian_x0;
   double x = x0;
-  printf("i_pair: %d, shell_pair_index: %d, exp_cross_term_x: %e, exp_dx: %e, gaussian_x0: %e, x0: %f, ij_exponent: %f, a0: %d, pair_x: %f\n",
-  i_pair, shell_pair_index, exp_cross_term_x, exp_dx, gaussian_x0, x0, ij_exponent, a0, pair_x);
-  for (int a = 0; a < a_range; a++) {
-    double exp_n_dy_squared = exp_dy;
+  int a_index = a_start;
+  for (int a = 0; a <= a_range; a++) {
+    double exp_n_dy_squared = exp_dy_squared;
     double gaussian_y = gaussian_y0;
     double y = y0;
-    const int a_index = a % mesh_a;
-    for (int b = 0; b < b_range; b++) {
-      double exp_n_dz_squared = exp_dz;
+    int b_index = b_start;
+    for (int b = 0; b <= b_range; b++) {
+      double exp_n_dz_squared = exp_dz_squared;
       double gaussian_z = gaussian_z0;
       double z = z0;
-      const int b_index = b % mesh_b;
-      for (int c = 0; c < c_range; c++) {
-        const int c_index = c % mesh_c;
-        gto_cartesian<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
-        gto_cartesian<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
+      int c_index = c_start;
+      for (int c = 0; c <= c_range; c++) {
+        gto_cartesian<i_angular>(i_cartesian, x, y, z);
+        gto_cartesian<j_angular>(j_cartesian, x, y, z);
         const double gaussian = gaussian_x * gaussian_y * gaussian_z;
 #pragma unroll
         for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -463,27 +465,44 @@ __global__ void evaluate_density_kernel(
                     density_value);
         }
         gaussian_z *= exp_n_dz_squared * exp_cross_term_z;
-        exp_n_dz_squared *= exp_2dz;
+        exp_n_dz_squared *= exp_2dz_squared;
+        z += dz;
+        c_index++;
+        if (c_index == mesh_c) {
+          c_index = 0;
+        }
       }
       gaussian_y *= exp_n_dy_squared * exp_cross_term_y;
-      exp_n_dy_squared *= exp_2dy;
+      exp_n_dy_squared *= exp_2dy_squared;
+      y += dy;
+      b_index++;
+      if (b_index == mesh_b) {
+        b_index = 0;
+      }
     }
     gaussian_x *= exp_n_dx_squared * exp_cross_term_x;
-    exp_n_dx_squared *= exp_2dx;
+    exp_n_dx_squared *= exp_2dx_squared;
+    x += dx;
+    a_index++;
+    if (a_index == mesh_a) {
+      a_index = 0;
+    }
   }
 }
 
-#define new_density_kernel_macro(li, lj)                                       \
-  evaluate_density_kernel<n_channels, li, lj><<<block_grid, block_size>>>(     \
-      density, density_matrices, non_trivial_pairs, n_pairs, i_shells,         \
-      j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions, \
-      contributing_area_begin, image_indices, vectors_to_neighboring_images,   \
-      n_images, lattice_vectors, reciprocal_lattice_vectors, mesh_a, mesh_b,   \
-      mesh_c, a_range, b_range, c_range, atm, bas, env)
+#define diffused_density_kernel_macro(li, lj)                                  \
+  evaluate_diffused_density_kernel<n_channels, li, lj>                         \
+      <<<block_grid, block_size>>>(                                            \
+          density, density_matrices, non_trivial_pairs, n_pairs, i_shells,     \
+          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,            \
+          n_j_functions, contributing_area_begin, image_indices,               \
+          vectors_to_neighboring_images, n_images, lattice_vectors,            \
+          reciprocal_lattice_vectors, mesh_a, mesh_b, mesh_c, a_range,         \
+          b_range, c_range, atm, bas, env)
 
-#define new_density_kernel_case_macro(li, lj)                                  \
+#define diffused_density_kernel_case_macro(li, lj)                             \
   case (li * 10 + lj):                                                         \
-    new_density_kernel_macro(li, lj);                                          \
+    diffused_density_kernel_macro(li, lj);                                     \
     break
 
 template <int n_channels>
@@ -508,31 +527,31 @@ void evaluate_density_driver(
 
   dim3 block_grid(n_pairs / block_size.x + 1);
   switch (i_angular * 10 + j_angular) {
-    new_density_kernel_case_macro(0, 0);
-    new_density_kernel_case_macro(0, 1);
-    new_density_kernel_case_macro(0, 2);
-    new_density_kernel_case_macro(0, 3);
-    new_density_kernel_case_macro(0, 4);
-    new_density_kernel_case_macro(1, 0);
-    new_density_kernel_case_macro(1, 1);
-    new_density_kernel_case_macro(1, 2);
-    new_density_kernel_case_macro(1, 3);
-    new_density_kernel_case_macro(1, 4);
-    new_density_kernel_case_macro(2, 0);
-    new_density_kernel_case_macro(2, 1);
-    new_density_kernel_case_macro(2, 2);
-    new_density_kernel_case_macro(2, 3);
-    new_density_kernel_case_macro(2, 4);
-    new_density_kernel_case_macro(3, 0);
-    new_density_kernel_case_macro(3, 1);
-    new_density_kernel_case_macro(3, 2);
-    new_density_kernel_case_macro(3, 3);
-    new_density_kernel_case_macro(3, 4);
-    new_density_kernel_case_macro(4, 0);
-    new_density_kernel_case_macro(4, 1);
-    new_density_kernel_case_macro(4, 2);
-    new_density_kernel_case_macro(4, 3);
-    new_density_kernel_case_macro(4, 4);
+    diffused_density_kernel_case_macro(0, 0);
+    diffused_density_kernel_case_macro(0, 1);
+    diffused_density_kernel_case_macro(0, 2);
+    diffused_density_kernel_case_macro(0, 3);
+    diffused_density_kernel_case_macro(0, 4);
+    diffused_density_kernel_case_macro(1, 0);
+    diffused_density_kernel_case_macro(1, 1);
+    diffused_density_kernel_case_macro(1, 2);
+    diffused_density_kernel_case_macro(1, 3);
+    diffused_density_kernel_case_macro(1, 4);
+    diffused_density_kernel_case_macro(2, 0);
+    diffused_density_kernel_case_macro(2, 1);
+    diffused_density_kernel_case_macro(2, 2);
+    diffused_density_kernel_case_macro(2, 3);
+    diffused_density_kernel_case_macro(2, 4);
+    diffused_density_kernel_case_macro(3, 0);
+    diffused_density_kernel_case_macro(3, 1);
+    diffused_density_kernel_case_macro(3, 2);
+    diffused_density_kernel_case_macro(3, 3);
+    diffused_density_kernel_case_macro(3, 4);
+    diffused_density_kernel_case_macro(4, 0);
+    diffused_density_kernel_case_macro(4, 1);
+    diffused_density_kernel_case_macro(4, 2);
+    diffused_density_kernel_case_macro(4, 3);
+    diffused_density_kernel_case_macro(4, 4);
   default:
     fprintf(stderr,
             "angular momentum pair %d, %d is not supported in "
@@ -837,7 +856,7 @@ void evaluate_density_driver(
   }
 }
 
-void new_evaluate_density_driver(
+void evaluate_diffused_density_driver(
     double *density, const double *density_matrices, const int i_angular,
     const int j_angular, const int *non_trivial_pairs, const int n_pairs,
     const int *i_shells, const int *j_shells, const int n_j_shells,
