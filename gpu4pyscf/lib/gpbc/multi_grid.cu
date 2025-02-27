@@ -23,6 +23,119 @@ template <int ANG> __inline__ __device__ constexpr double common_fac_sp() {
   }
 }
 
+template <int ANG>
+__device__ static void _cart2sph(double g_cart[15], double *g_sph, int stride,
+                                 int grid_id) {
+  if (ANG == 0) {
+    g_sph[grid_id] += 0.282094791773878143 * g_cart[0];
+  } else if (ANG == 1) {
+    g_sph[grid_id] += 0.488602511902919921 * g_cart[0];
+    g_sph[grid_id + stride] += 0.488602511902919921 * g_cart[1];
+    g_sph[grid_id + 2 * stride] += 0.488602511902919921 * g_cart[2];
+  } else if (ANG == 2) {
+    g_sph[grid_id] += 1.092548430592079070 * g_cart[1];
+    g_sph[grid_id + stride] += 1.092548430592079070 * g_cart[4];
+    g_sph[grid_id + 2 * stride] +=
+        0.630783130505040012 * g_cart[5] -
+        0.315391565252520002 * (g_cart[0] + g_cart[3]);
+    g_sph[grid_id + 3 * stride] += 1.092548430592079070 * g_cart[2];
+    g_sph[grid_id + 4 * stride] +=
+        0.546274215296039535 * (g_cart[0] - g_cart[3]);
+  } else if (ANG == 3) {
+    g_sph[grid_id] +=
+        1.770130769779930531 * g_cart[1] - 0.590043589926643510 * g_cart[6];
+    g_sph[grid_id + stride] += 2.890611442640554055 * g_cart[4];
+    g_sph[grid_id + 2 * stride] +=
+        1.828183197857862944 * g_cart[8] -
+        0.457045799464465739 * (g_cart[1] + g_cart[6]);
+    g_sph[grid_id + 3 * stride] +=
+        0.746352665180230782 * g_cart[9] -
+        1.119528997770346170 * (g_cart[2] + g_cart[7]);
+    g_sph[grid_id + 4 * stride] +=
+        1.828183197857862944 * g_cart[5] -
+        0.457045799464465739 * (g_cart[0] + g_cart[3]);
+    g_sph[grid_id + 5 * stride] +=
+        1.445305721320277020 * (g_cart[2] - g_cart[7]);
+    g_sph[grid_id + 6 * stride] +=
+        0.590043589926643510 * g_cart[0] - 1.770130769779930530 * g_cart[3];
+  } else if (ANG == 4) {
+    g_sph[grid_id] += 2.503342941796704538 * (g_cart[1] - g_cart[6]);
+    g_sph[grid_id + stride] +=
+        5.310392309339791593 * g_cart[4] - 1.770130769779930530 * g_cart[11];
+    g_sph[grid_id + 2 * stride] +=
+        5.677048174545360108 * g_cart[8] -
+        0.946174695757560014 * (g_cart[1] + g_cart[6]);
+    g_sph[grid_id + 3 * stride] +=
+        2.676186174229156671 * g_cart[13] -
+        2.007139630671867500 * (g_cart[4] + g_cart[11]);
+    g_sph[grid_id + 4 * stride] +=
+        0.317356640745612911 * (g_cart[0] + g_cart[10]) +
+        0.634713281491225822 * g_cart[3] -
+        2.538853125964903290 * (g_cart[5] + g_cart[12]) +
+        0.846284375321634430 * g_cart[14];
+    g_sph[grid_id + 5 * stride] +=
+        2.676186174229156671 * g_cart[9] -
+        2.007139630671867500 * (g_cart[2] + g_cart[7]);
+    g_sph[grid_id + 6 * stride] +=
+        2.838524087272680054 * (g_cart[5] - g_cart[12]) +
+        0.473087347878780009 * (g_cart[10] - g_cart[0]);
+    g_sph[grid_id + 7 * stride] +=
+        1.770130769779930531 * g_cart[2] - 5.310392309339791590 * g_cart[7];
+    g_sph[grid_id + 8 * stride] +=
+        0.625835735449176134 * (g_cart[0] + g_cart[10]) -
+        3.755014412695056800 * g_cart[3];
+  }
+}
+
+template <typename T, int ANG>
+__device__ static void cart2sph_in_place(double g_cart[]) {
+  double g_sph[2 * ANG + 1];
+  if constexpr (ANG == 2) {
+    g_sph[0] += 1.092548430592079070 * g_cart[1];
+    g_sph[1] += 1.092548430592079070 * g_cart[4];
+    g_sph[2] += 0.630783130505040012 * g_cart[5] -
+                0.315391565252520002 * (g_cart[0] + g_cart[3]);
+    g_sph[3] += 1.092548430592079070 * g_cart[2];
+    g_sph[4] += 0.546274215296039535 * (g_cart[0] - g_cart[3]);
+  } else if constexpr (ANG == 3) {
+    g_sph[0] +=
+        1.770130769779930531 * g_cart[1] - 0.590043589926643510 * g_cart[6];
+    g_sph[1] += 2.890611442640554055 * g_cart[4];
+    g_sph[2] += 1.828183197857862944 * g_cart[8] -
+                0.457045799464465739 * (g_cart[1] + g_cart[6]);
+    g_sph[3] += 0.746352665180230782 * g_cart[9] -
+                1.119528997770346170 * (g_cart[2] + g_cart[7]);
+    g_sph[4] += 1.828183197857862944 * g_cart[5] -
+                0.457045799464465739 * (g_cart[0] + g_cart[3]);
+    g_sph[5] += 1.445305721320277020 * (g_cart[2] - g_cart[7]);
+    g_sph[6] +=
+        0.590043589926643510 * g_cart[0] - 1.770130769779930530 * g_cart[3];
+  } else if constexpr (ANG == 4) {
+    g_sph[0] += 2.503342941796704538 * (g_cart[1] - g_cart[6]);
+    g_sph[1] +=
+        5.310392309339791593 * g_cart[4] - 1.770130769779930530 * g_cart[11];
+    g_sph[2] += 5.677048174545360108 * g_cart[8] -
+                0.946174695757560014 * (g_cart[1] + g_cart[6]);
+    g_sph[3] += 2.676186174229156671 * g_cart[13] -
+                2.007139630671867500 * (g_cart[4] + g_cart[11]);
+    g_sph[4] += 0.317356640745612911 * (g_cart[0] + g_cart[10]) +
+                0.634713281491225822 * g_cart[3] -
+                2.538853125964903290 * (g_cart[5] + g_cart[12]) +
+                0.846284375321634430 * g_cart[14];
+    g_sph[5] += 2.676186174229156671 * g_cart[9] -
+                2.007139630671867500 * (g_cart[2] + g_cart[7]);
+    g_sph[6] += 2.838524087272680054 * (g_cart[5] - g_cart[12]) +
+                0.473087347878780009 * (g_cart[10] - g_cart[0]);
+    g_sph[7] +=
+        1.770130769779930531 * g_cart[2] - 5.310392309339791590 * g_cart[7];
+    g_sph[8] += 0.625835735449176134 * (g_cart[0] + g_cart[10]) -
+                3.755014412695056800 * g_cart[3];
+  }
+  for (int i = 0; i < 2 * ANG + 1; i++) {
+    g_cart[i] = g_sph[i];
+  }
+}
+
 template <typename T, unsigned int blockSize>
 __device__ void warpReduce(volatile T *sdata, unsigned int tid) {
   if (blockSize >= 64)
@@ -75,6 +188,31 @@ __device__ static void gto_cartesian(double *g, double fx, double fy,
       g[i] = pow(fx, lx) * pow(fy, ly) * pow(fz, lz);
     }
   }
+}
+
+template <int angular>
+__global__ void evaluate_gto(
+    double *result, const int *shells, const int n_shells,
+    const double *vectors_to_neighboring_images, const int n_images,
+    const double *lattice_vectors, const double *reciprocal_lattice_vectors,
+    const int mesh_a, const int mesh_b, const int mesh_c, const int *atm,
+    const int *bas, const double *env) {
+  const uint a_index = threadIdx.z + blockDim.z * blockIdx.z;
+  const uint b_index = threadIdx.y + blockDim.y * blockIdx.y;
+  const uint c_index = threadIdx.x + blockDim.x * blockIdx.x;
+
+  const double position_x = lattice_vectors[0] * a_index / mesh_a +
+                            lattice_vectors[3] * b_index / mesh_b +
+                            lattice_vectors[6] * c_index / mesh_c;
+  const double position_y = lattice_vectors[1] * a_index / mesh_a +
+                            lattice_vectors[4] * b_index / mesh_b +
+                            lattice_vectors[7] * c_index / mesh_c;
+  const double position_z = lattice_vectors[2] * a_index / mesh_a +
+                            lattice_vectors[5] * b_index / mesh_b +
+                            lattice_vectors[8] * c_index / mesh_c;
+
+  constexpr int n_i_cartesian_functions = (i_angular + 1) * (i_angular + 2) / 2;
+  constexpr int n_j_cartesian_functions = (j_angular + 1) * (j_angular + 2) / 2;
 }
 
 template <int n_channels, int i_angular, int j_angular>
@@ -623,7 +761,8 @@ __global__ void evaluate_xc_kernel(
   const uint thread_id = threadIdx.x + threadIdx.y * blockDim.x +
                          threadIdx.z * blockDim.y * blockDim.x;
 
-  bool out_of_boundary = a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c;
+  bool out_of_boundary =
+      a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c;
 
   const uint flattened_index =
       a_index * mesh_b * mesh_c + b_index * mesh_c + c_index;
@@ -702,9 +841,8 @@ __global__ void evaluate_xc_kernel(
 
     double pair_prefactor = 0;
     if (!out_of_boundary) {
-      pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff *
-                                    j_coeff * common_fac_sp<i_angular>() *
-                                    common_fac_sp<j_angular>();
+      pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff *
+                       common_fac_sp<i_angular>() * common_fac_sp<j_angular>();
     }
 
     const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
