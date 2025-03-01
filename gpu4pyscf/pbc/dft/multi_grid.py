@@ -241,6 +241,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     n_pairs_per_point[effective_local_grid_points + 1] = counts
                     accumulated_n_pairs_per_point = cp.asarray(cp.ufunc.accumulate(cp.add, n_pairs_per_point), dtype=cp.int32)
 
+                    print("non_trivial_pairs: ", len(non_trivial_pairs_from_images))
                     per_angular_pairs.append({
                         "angular": (i_angular, j_angular),
                         "non_trivial_pairs": non_trivial_pairs_from_images,
@@ -278,6 +279,36 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
 
     mydf.sorted_gaussian_pairs = pairs
 
+    assert 0
+
+def evaluate_gto_wrapper(cell, kpts, block_size = [4, 4, 4]):
+    c_driver = libgpbc.evaluate_gto_driver
+    n_images = kpts.shape[0]
+    at_gamma_point = False
+    if n_images == 1 and np.all(np.abs(kpts) < 1e-8):
+        at_gamma_point = True
+    atm = cp.asarray(cell._atm, dtype=cp.int32)
+    bas = cp.asarray(cell._bas, dtype=cp.int32)
+    env = cp.asarray(cell._env)
+
+    gto_values = cp.zeros((n_k_points, n_k_points, n_points), dtype=cp.complex128)
+
+    for i_k_point, kpt in enumerate(kpts):
+        phase = cp.exp(1j * cp.dot(coords, kpt))
+        c_driver(ctypes.cast(gto_values.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(phase.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(ao_indices.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(coords.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(exps.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(coeffs.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(mesh.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(nimgs.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(atm.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(bas.data.ptr, ctypes.c_void_p),
+                 ctypes.cast(env.data.ptr, ctypes.c_void_p),
+                 ctypes.c_int(n_channels), ctypes.c_int(n_ao_indices), ctypes.c_int(n_points))
+
+    return gto_values
 
 def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
     c_driver = libgpbc.evaluate_density_driver
