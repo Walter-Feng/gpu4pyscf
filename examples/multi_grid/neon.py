@@ -11,7 +11,7 @@ from pyscf.pbc.dft import multigrid as cpu_multi_grid
 
 diamond_cell = bulk('Ne', 'sc', a=6)
 
-with cupy.cuda.Device(3):
+with cupy.cuda.Device(0):
     lattice_vectors = diamond_cell.cell
     cell = gto.M(
         h=np.array(lattice_vectors),
@@ -31,10 +31,10 @@ with cupy.cuda.Device(3):
     mf.with_df.ngrids = 4  # number of sets of grid points
     mf.kernel()
 
-    # mf = cpu_pbcdft.RKS(cell)
-    # # mf.xc = "LDA, VWN"
-    # mf.xc = "LDA"
-    # #mf.max_cycle = 0
-    # mf = cpu_multi_grid.multigrid.multigrid_fftdf(mf)
-    # mf.with_df.ngrids = 4  # number of sets of grid points
-    # mf.kernel()
+    mf = cpu_pbcdft.RKS(cell)
+    # mf.xc = "LDA, VWN"
+    mf.xc = "LDA"
+    mf.max_cycle = 1
+    mf = cpu_multi_grid.multigrid.multigrid_fftdf(mf)
+    mf.with_df.ngrids = 4  # number of sets of grid points
+    mf.kernel()

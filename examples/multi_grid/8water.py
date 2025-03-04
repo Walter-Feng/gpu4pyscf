@@ -9,7 +9,7 @@ from gpu4pyscf.pbc.dft import multi_grid
 cell=gto.Cell()
 
 import cupy.cuda
-cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
+# cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
 boxlen=10
 cell.a=numpy.array([[boxlen,0.0,0.0],[0.0,boxlen,0.0],[0.0,0.0,boxlen]])
 cell.atom="""
@@ -51,7 +51,7 @@ cell.build()
 
 gpu_mf = gpu_pbcdft.RKS(cell)
 gpu_mf.xc = "LDA"
-gpu_mf.init_guess = 'atom' # atom guess is fast
+# gpu_mf.init_guess = 'atom' # atom guess is fast
 gpu_mf.max_cycle = 10
 gpu_mf = multi_grid.fftdf(gpu_mf)
 gpu_mf.with_df.ngrids = 4
@@ -61,8 +61,8 @@ mf=dft.RKS(cell)
 mf.xc = "LDA"
 # mf.xc = "PBE,PBE"
 mf.max_cycle = 10
-mf.init_guess = 'atom' # atom guess is fast
-mf.with_df = cpu_multi_grid.MultiGridFFTDF2(cell)
+# mf.init_guess = 'atom' # atom guess is fast
+mf.with_df = cpu_multi_grid.MultiGridFFTDF(cell)
 mf.with_df.ngrids = 4 # number of sets of grid points
 mf.kernel()
 

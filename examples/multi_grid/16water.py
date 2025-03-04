@@ -9,7 +9,7 @@ from gpu4pyscf.pbc.dft import multi_grid
 cell=gto.Cell()
 
 import cupy.cuda
-cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
+# cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
 boxlen=15
 cell.a=numpy.array([[boxlen,0.0,0.0],[0.0,boxlen,0.0],[0.0,0.0,boxlen]])
 cell.atom="""

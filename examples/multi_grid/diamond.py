@@ -13,8 +13,8 @@ diamond_cell = bulk('C', 'diamond', orthorhombic=True, a=4)
 
 lattice_vectors = diamond_cell.cell
 cell = gto.M(
-    h=np.array(lattice_vectors),
-    atom=ase_atoms_to_pyscf(bulk('C', 'diamond', orthorhombic=True, a=4)),
+    h=np.array(diamond_cell.cell),
+    atom=ase_atoms_to_pyscf(diamond_cell),
     basis='gth-tzv2p',
     verbose=6,
     unit='aa',
@@ -23,11 +23,12 @@ cell = gto.M(
 )
 cell.exp_to_discard = 0.1
 
-#cell = tools.super_cell(cell, [2, 2, 2])
+cell = tools.super_cell(cell, [2, 2, 2])
 
 gpu_mf = pbcdft.RKS(cell)
 gpu_mf.xc = "LDA"
 gpu_mf.max_cycle = 3
+gpu_mf.init_guess = 'atom' # atom guess is fast
 gpu_mf = multi_grid.fftdf(gpu_mf)
 gpu_mf.with_df.ngrids = 4  # number of sets of grid points
 gpu_mf.kernel()
