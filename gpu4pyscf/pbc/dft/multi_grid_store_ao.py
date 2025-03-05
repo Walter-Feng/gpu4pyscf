@@ -7,6 +7,7 @@ import gpu4pyscf.lib.cupy_helper as cupy_helper
 
 from pyscf.pbc.dft.multigrid import multigrid as cpu_multi_grid
 import pyscf.pbc.gto as gto
+import pyscf.gto as mol_gto
 from pyscf.pbc.lib.kpts_helper import gamma_point
 from pyscf import lib as cpu_lib
 from pyscf.pbc.gto import pseudo
@@ -192,15 +193,15 @@ def get_pp(mydf, kpts=None):
         vpp[k] += vpp2[k]
 
     # vppnonloc evaluated in reciprocal space
-    fakemol = gto.Mole()
-    fakemol._atm = np.zeros((1, gto.ATM_SLOTS), dtype=cp.int32)
-    fakemol._bas = np.zeros((1, gto.BAS_SLOTS), dtype=cp.int32)
-    ptr = gto.PTR_ENV_START
+    fakemol = mol_gto.Mole()
+    fakemol._atm = np.zeros((1, mol_gto.ATM_SLOTS), dtype=cp.int32)
+    fakemol._bas = np.zeros((1, mol_gto.BAS_SLOTS), dtype=cp.int32)
+    ptr = mol_gto.PTR_ENV_START
     fakemol._env = np.zeros(ptr + 10)
-    fakemol._bas[0, gto.NPRIM_OF] = 1
-    fakemol._bas[0, gto.NCTR_OF] = 1
-    fakemol._bas[0, gto.PTR_EXP] = ptr + 3
-    fakemol._bas[0, gto.PTR_COEFF] = ptr + 4
+    fakemol._bas[0, mol_gto.NPRIM_OF] = 1
+    fakemol._bas[0, mol_gto.NCTR_OF] = 1
+    fakemol._bas[0, mol_gto.PTR_EXP] = ptr + 3
+    fakemol._bas[0, mol_gto.PTR_COEFF] = ptr + 4
 
     def vppnl_by_k(kpt):
         SPG_lm_aoGs = []
@@ -235,7 +236,7 @@ def get_pp(mydf, kpts=None):
                 for l, proj in enumerate(pp[5:]):
                     rl, nl, hl = proj
                     if nl > 0:
-                        fakemol._bas[0, gto.ANG_OF] = l
+                        fakemol._bas[0, mol_gto.ANG_OF] = l
                         fakemol._env[ptr + 3] = .5 * rl ** 2
                         fakemol._env[ptr + 4] = rl ** (
                                 l + 1.5) * np.pi ** 1.25

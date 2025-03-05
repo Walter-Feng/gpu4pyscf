@@ -73,6 +73,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA",
     lattice_vectors = cp.asarray(cell.lattice_vectors().T)
     reciprocal_lattice_vectors = cp.linalg.inv(lattice_vectors.T)
     reciprocal_norms = cp.linalg.norm(reciprocal_lattice_vectors, axis=1)
+    numerical_integrator = mydf._numint
 
     tasks = getattr(mydf, 'tasks', None)
     if tasks is None:
@@ -85,10 +86,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA",
         subcell_in_dense_region = grids_dense.cell
 
         if grids_sparse is None:
-            # The first pass handles all diffused functions using the regular
-            # matrix multiplication code.
-
-            pairs.append({"mesh": grids_dense.mesh})
+            ao_values = numerical_integrator.eval_ao(grids_dense.cell, grids_dense.coords, mydf.kpts)
+            
+            pairs.append({"mesh": grids_dense.mesh, "ao_values": ao_values})
 
         else:
             mesh = cp.asarray(grids_dense.mesh)
@@ -523,7 +523,6 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)),
     for (grids_dense, grids_sparse), pairs in zip(tasks,
                                                   mydf.sorted_gaussian_pairs):
 
-        subcell_in_dense_region = grids_dense.cell
         mesh = pairs["mesh"]
         fft_grids = list(map(lambda mesh_points: np.fft.fftfreq(mesh_points,
                                                                 1. / mesh_points).astype(
@@ -540,25 +539,12 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)),
             density_matrix_in_dense_region = dms[:, :,
                                              ao_indices_in_dense[:, None],
                                              ao_indices_in_dense]
-            for ao_on_sliced_grid_in_dense, grid_begin, grid_end in mydf.aoR_loop(
-                    grids_dense, kpts, deriv):
-                ao_values, mask = ao_on_sliced_grid_in_dense[0], \
-                    ao_on_sliced_grid_in_dense[2]
-                for k in range(n_k_points):
-                    for i in range(n_channels):
-                        if xc_type == 'LDA':
-                            ao_dot_dm = cp.dot(ao_values[k],
-                                               density_matrix_in_dense_region[
-                                                   i, k])
-                            density_subblock = cp.einsum('xi,xi->x', ao_dot_dm,
-                                                         ao_values[k].conj())
-                        else:
-                            density_subblock = numint.eval_rho(
-                                subcell_in_dense_region, ao_values[k],
-                                density_matrix_in_dense_region[i, k],
-                                mask, xc_type, hermi)
-                        density[i, :, grid_begin:grid_end] += density_subblock
-                ao_values = ao_on_sliced_grid_in_dense = ao_dot_dm = None
+            for k in range(n_k_points):
+                for i in range(n_channels):
+                    if xc_type == 'LDA':
+                        ao_dot_dm = cp.dot(pairs["ao_values"][k], density_matrix_in_dense_region[i, k])
+                        density_subblock = cp.einsum('xi,xi->x', ao_dot_dm, pairs["ao_values"][k].conj())
+                    density[i, :] += density_subblock
             if hermi:
                 density = density.real
 

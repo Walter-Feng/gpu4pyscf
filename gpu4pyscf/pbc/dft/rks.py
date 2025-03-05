@@ -76,6 +76,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
                                        with_j=True, return_j=False)
         logger.info(ks, 'nelec by numeric integration = %s', n)
         t0 = logger.timer(ks, 'vxc', *t0)
+        return vxc
 
     if isinstance(ni, multigrid.MultiGridNumInt):
         if ks.do_nlc():
