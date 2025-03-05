@@ -569,8 +569,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)),
                                                 pairs[
                                                     "concatenated_ao_indices"]]
             density_matrix_with_rows_in_sparse = dms[:, :,
-                                                 pairs["ao_indices_in_sparse"][
-                                                 :, None],
+                                                 pairs["ao_indices_in_sparse"][:, None],
                                                  pairs["ao_indices_in_dense"]]
 
             if deriv == 0:
@@ -751,6 +750,24 @@ def convert_xc_on_g_mesh_to_fock(mydf, xc_on_g_mesh, hermi=1,
 
     return fock
 
+
+def get_nuc(mydf, kpts=None):
+    kpts, is_single_kpt = fft._check_kpts(mydf, kpts)
+    cell = mydf.cell
+    mesh = mydf.mesh
+    charge = cp.asarray(-cell.atom_charges())
+    Gv = cell.get_Gv(mesh)
+    SI = cp.asarray(cell.get_SI(Gv))
+    rhoG = cp.dot(charge, SI)
+
+    coulG = tools.get_coulG(cell, mesh=mesh, Gv=Gv)
+    vneG = rhoG * coulG
+    hermi = 1
+    vne = convert_xc_on_g_mesh_to_fock(mydf, vneG, hermi, kpts)[0]
+
+    if is_single_kpt:
+        vne = vne[0]
+    return vne
 
 def get_pp(mydf, kpts=None):
     '''Get the periodic pseudopotential nuc-el AO matrix, with G=0 removed.
@@ -967,25 +984,6 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     xc_for_fock = cupy_helper.tag_array(xc_for_fock, ecoul=coulomb_energy,
                                         exc=xc_energy_sum, vj=vj, vk=None)
     return n_electrons, xc_energy_sum, xc_for_fock
-
-
-def get_nuc(mydf, kpts=None):
-    kpts, is_single_kpt = fft._check_kpts(mydf, kpts)
-    cell = mydf.cell
-    mesh = mydf.mesh
-    charge = -cell.atom_charges()
-    Gv = cell.get_Gv(mesh)
-    SI = cell.get_SI(Gv)
-    rhoG = cp.dot(charge, SI)
-
-    coulG = tools.get_coulG(cell, mesh=mesh, Gv=Gv)
-    vneG = rhoG * coulG
-    hermi = 1
-    vne = convert_xc_on_g_mesh_to_fock(mydf, vneG, hermi, kpts)[0]
-
-    if is_single_kpt:
-        vne = vne[0]
-    return vne
 
 
 class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):

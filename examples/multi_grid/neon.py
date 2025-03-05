@@ -5,7 +5,7 @@ import numpy as np
 from pyscf.pbc import gto, tools
 from gpu4pyscf.pbc import dft as pbcdft
 from pyscf.pbc import dft as cpu_pbcdft
-from gpu4pyscf.pbc.dft import multi_grid
+from gpu4pyscf.pbc.dft import multi_grid_store_ao as gpu_multi_grid
 from pyscf.pbc.dft import multigrid as cpu_multi_grid
 
 
@@ -23,11 +23,12 @@ with cupy.cuda.Device(0):
     )
     cell.exp_to_discard = 0.1
 
+    cell = tools.super_cell(cell, [2, 2, 2])
     mf = pbcdft.RKS(cell)
     # mf.xc = "LDA, VWN"
     mf.xc = "LDA"
     mf.max_cycle = 1
-    mf = multi_grid.fftdf(mf)
+    mf = gpu_multi_grid.fftdf(mf)
     mf.with_df.ngrids = 4  # number of sets of grid points
     mf.kernel()
 
