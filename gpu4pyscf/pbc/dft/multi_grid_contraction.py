@@ -21,163 +21,31 @@ PTR_COORD = 1
 EIJ_CUTOFF = 60
 
 
-def CINTcommon_fac_sp(angular):
-    if angular == 0:
-        return 0.282094791773878143
-    if angular == 1:
-        return 0.488602511902919921
-    else:
-        return 1
-
-
-def accumulate(list):
-    out = [0]
-    for i in range(len(list)):
-        if i == 0:
-            out.append(list[i])
-        else:
-            out.append(out[i] + list[i])
-    return out
-
-
-def gaussian_summation_cutoff(exponents, angular, prefactors, threshold_in_log):
-    prefactors_in_log = cp.log(cp.abs(prefactors))
-    l = angular + 1
-    r_reference = 10
-    log_r = cp.log(r_reference)
-    log_of_doubled_exponents = cp.log(2 * exponents)
-    approximated_log_of_sum = (l + 1) * log_r - log_of_doubled_exponents
-    branched_indices = cp.where(2 * log_r + log_of_doubled_exponents > 1)[0]
-    if branched_indices.size > 0:
-        approximated_log_of_sum[branched_indices] = - (l + 4) // 2 * log_of_doubled_exponents[branched_indices]
-    approximated_log_of_sum += prefactors_in_log - threshold_in_log
-    another_estimate_indices = cp.where(approximated_log_of_sum < exponents)[0]
-    if another_estimate_indices.size > 0:
-        approximated_log_of_sum[another_estimate_indices] = prefactors_in_log[
-                                                                another_estimate_indices] - threshold_in_log
-    return cp.sqrt(cp.clip(approximated_log_of_sum, 0, None) / exponents)
-
-
-def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4])):
-    blocking_sizes_on_gpu = cp.asarray(blocking_sizes)
+def generate_ao_values(mydf, kpts):
     log = logger.Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
-    lattice_vectors = cp.asarray(cell.lattice_vectors().T)
-    reciprocal_lattice_vectors = cp.linalg.inv(lattice_vectors.T)
-    reciprocal_norms = cp.linalg.norm(reciprocal_lattice_vectors, axis=1)
+    numerical_integrator = mydf._numint
 
     tasks = getattr(mydf, 'tasks', None)
     if tasks is None:
         tasks = multigrid.multi_grids_tasks(cell, mydf.mesh, log)
         mydf.tasks = tasks
 
-    pairs = []
+    ao_values = []
 
     for grids_dense, grids_sparse in tasks:
-        ao_index_in_dense = grids_dense.ao_idx
-        n_ao = ao_index_in_dense.size
-        ao_values = cp.asarray(grids_dense.ao_value, order='C')
-        for ao_on_sliced_grid_in_dense, p0, p1 in mydf.aoR_loop(grids_dense, kpts):
-            ao_values = ao_on_sliced_grid_in_dense[0]
-            for k in range(n_k_points):
-                for i in range(n_channels):
-                    xc_scaled_ao = numint._scale_ao(ao_values[k], reordered_xc_on_real_mesh[i, p0:p1])
-                    xc_sub_block = cp.dot(ao_values[k].conj().T, xc_scaled_ao)
-                    fock[i, k, ao_index_in_dense[:, None], ao_index_in_dense] += xc_sub_block
-            ao_values = ao_on_sliced_grid_in_dense = None
+        ao_values_for_this_task = {}
+        ao_for_dense = numerical_integrator.eval_ao(grids_dense.cell, grids_dense.coords, kpts)
+        ao_values_for_this_task["dense"] = ao_for_dense
+        if grids_sparse is not None:
+            ao_values_for_this_task["sparse"] = numerical_integrator.eval_ao(grids_sparse.cell,  grids_dense.coords, kpts)
+        else:
+            ao_values_for_this_task["sparse"] = None
+        ao_values.append(ao_values_for_this_task)
+        
 
-    mydf.sorted_gaussian_pairs = pairs
+    mydf.ao_values = ao_values
 
-
-def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
-    c_driver = libgpbc.evaluate_density_driver
-    n_k_points, n_images = pairs_info["phase_diff_among_images"].shape
-    if n_k_points == 0:
-        density_matrix_with_translation = cp.repeat(dm_slice, n_images, axis = 1)
-    else:
-        density_matrix_with_translation = cp.einsum("kt, ikpq->itpq", pairs_info["phase_diff_among_images"], dm_slice)
-
-    n_channels, _, n_i_functions, n_j_functions = density_matrix_with_translation.shape
-
-    if ignore_imag is False:
-        raise NotImplementedError
-    density_matrix_with_translation_real_part = density_matrix_with_translation.real.flatten()
-    density = cp.zeros((n_channels,) + tuple(pairs_info["mesh"]))
-
-    for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
-        (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
-        c_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
-                 ctypes.cast(density_matrix_with_translation_real_part.data.ptr, ctypes.c_void_p),
-                 ctypes.c_int(i_angular), ctypes.c_int(j_angular),
-                 ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(gaussians_per_angular_pair["cutoffs"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p),
-                 ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
-                 ctypes.cast(gaussians_per_angular_pair["shell_to_ao_indices"].data.ptr, ctypes.c_void_p),
-                 ctypes.c_int(n_i_functions), ctypes.c_int(n_j_functions),
-                 ctypes.cast(gaussians_per_angular_pair["non_trivial_pairs_at_local_points"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(gaussians_per_angular_pair["accumulated_n_pairs_per_point"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(gaussians_per_angular_pair["image_indices"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p), ctypes.c_int(n_images),
-                 ctypes.cast(pairs_info["lattice_vectors"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(pairs_info["reciprocal_lattice_vectors"].data.ptr, ctypes.c_void_p),
-                 (ctypes.c_int * 3)(*pairs_info["mesh"]),
-                 ctypes.cast(pairs_info["atm"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(pairs_info["bas"].data.ptr, ctypes.c_void_p),
-                 ctypes.cast(pairs_info["env"].data.ptr, ctypes.c_void_p),
-                 (ctypes.c_int * 3)(*pairs_info["blocking_sizes"]), ctypes.c_int(n_channels))
-
-    return density
-
-def evaluate_density_diffused_wrapper(pairs_info, dm_slice, ignore_imag=True):
-    c_driver = libgpbc.evaluate_diffused_density_driver
-    n_k_points, n_images = pairs_info["phase_diff_among_images"].shape
-    if n_k_points == 0:
-        density_matrix_with_translation = cp.repeat(dm_slice, n_images, axis = 1)
-    else:
-        density_matrix_with_translation = cp.einsum("kt, ikpq->itpq", pairs_info["phase_diff_among_images"], dm_slice)
-
-    n_channels, _, n_i_functions, n_j_functions = density_matrix_with_translation.shape
-
-    if ignore_imag is False:
-        raise NotImplementedError
-    density_matrix_with_translation_real_part = density_matrix_with_translation.real.flatten()
-    density = cp.zeros((n_channels,) + tuple(pairs_info["mesh"]))
-
-    for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
-        for blocking_size, corresponding_indices in zip(gaussians_per_angular_pair["block_sizes"], gaussians_per_angular_pair["indices_with_same_block"]):
-            selected_pairs = gaussians_per_angular_pair["non_trivial_pairs"][corresponding_indices]
-            selected_image_indices = gaussians_per_angular_pair["image_indices"][selected_pairs]
-            selected_pairs_area_begin = gaussians_per_angular_pair["contributing_area_begin"][:, selected_pairs]
-
-            assert selected_pairs.dtype == cp.int32
-            assert selected_image_indices.dtype == cp.int32
-            assert selected_pairs_area_begin.dtype == cp.int32
-
-            (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
-            c_driver(ctypes.cast(density.data.ptr, ctypes.c_void_p),
-                     ctypes.cast(density_matrix_with_translation_real_part.data.ptr, ctypes.c_void_p),
-                     ctypes.c_int(i_angular), ctypes.c_int(j_angular),
-                     ctypes.cast(selected_pairs.data.ptr, ctypes.c_void_p),
-                     ctypes.c_int(len(selected_pairs)),
-                     ctypes.cast(gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p),
-                     ctypes.cast(gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p),
-                     ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
-                     ctypes.cast(gaussians_per_angular_pair["shell_to_ao_indices"].data.ptr, ctypes.c_void_p),
-                     ctypes.c_int(n_i_functions), ctypes.c_int(n_j_functions),
-                     ctypes.cast(selected_pairs_area_begin.data.ptr, ctypes.c_void_p),
-                     ctypes.cast(selected_image_indices.data.ptr, ctypes.c_void_p),
-                     ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p), ctypes.c_int(n_images),
-                     ctypes.cast(pairs_info["lattice_vectors"].data.ptr, ctypes.c_void_p),
-                     ctypes.cast(pairs_info["reciprocal_lattice_vectors"].data.ptr, ctypes.c_void_p),
-                     (ctypes.c_int * 3)(*pairs_info["mesh"]),
-                     ctypes.cast(pairs_info["atm"].data.ptr, ctypes.c_void_p),
-                     ctypes.cast(pairs_info["bas"].data.ptr, ctypes.c_void_p),
-                     ctypes.cast(pairs_info["env"].data.ptr, ctypes.c_void_p),
-                     (ctypes.c_int * 3)(*blocking_size), ctypes.c_int(n_channels))
-
-    return density
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0, rho_g_high_order=None):
     dm_kpts = cp.asarray(dm_kpts, order='C')
@@ -196,58 +64,35 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
 
     nx, ny, nz = mydf.mesh
     density_on_g_mesh = cp.zeros((n_channels * density_slices, nx, ny, nz), dtype=cp.complex128)
-    for (grids_dense, grids_sparse), pairs in zip(tasks, mydf.sorted_gaussian_pairs):
+    for (grids_dense, grids_sparse), ao_values in zip(tasks, mydf.ao_values):
 
-        subcell_in_dense_region = grids_dense.cell
-        mesh = pairs["mesh"]
+        mesh = grids_dense.mesh
         fft_grids = list(map(lambda mesh_points: np.fft.fftfreq(mesh_points, 1. / mesh_points).astype(np.int32), mesh))
         n_grid_points = np.prod(mesh)
         weight_per_grid_point = 1. / n_k_points * mydf.cell.vol / n_grid_points
 
-        if grids_sparse is None:
-            # The first pass handles all diffused functions using the regular
-            # matrix multiplication code.
-            density = cp.zeros((n_channels, density_slices, n_grid_points), dtype=cp.complex128)
-            ao_indices_in_dense = grids_dense.ao_idx
-            density_matrix_in_dense_region = dms[:, :, ao_indices_in_dense[:, None], ao_indices_in_dense]
-            for ao_on_sliced_grid_in_dense, grid_begin, grid_end in mydf.aoR_loop(grids_dense, kpts, deriv):
-                ao_values, mask = ao_on_sliced_grid_in_dense[0], ao_on_sliced_grid_in_dense[2]
-                for k in range(n_k_points):
-                    for i in range(n_channels):
-                        if xc_type == 'LDA':
-                            ao_dot_dm = cp.dot(ao_values[k], density_matrix_in_dense_region[i, k])
-                            density_subblock = cp.einsum('xi,xi->x', ao_dot_dm, ao_values[k].conj())
-                        else:
-                            density_subblock = numint.eval_rho(subcell_in_dense_region, ao_values[k],
-                                                               density_matrix_in_dense_region[i, k],
-                                                               mask, xc_type, hermi)
-                        density[i, :, grid_begin:grid_end] += density_subblock
-                ao_values = ao_on_sliced_grid_in_dense = ao_dot_dm = None
-            if hermi:
-                density = density.real
-
-        else:
-            density_matrix_with_rows_in_dense = dms[:, :, pairs["ao_indices_in_dense"][:, None],
-                                                pairs["concatenated_ao_indices"]]
-            density_matrix_with_rows_in_sparse = dms[:, :, pairs["ao_indices_in_sparse"][:, None],
-                                                 pairs["ao_indices_in_dense"]]
-
-            if deriv == 0:
-                n_ao_in_sparse, n_ao_in_dense = density_matrix_with_rows_in_sparse.shape[2:]
-                density_matrix_with_rows_in_dense[:, :, :,
-                n_ao_in_dense:] += density_matrix_with_rows_in_sparse.transpose(0, 1, 3, 2)
-
-                coeff_sandwiched_density_matrix = cp.einsum('nkij,pi->nkpj',
-                                                            density_matrix_with_rows_in_dense,
-                                                            pairs["coeff_in_dense"])
-
-                coeff_sandwiched_density_matrix = cp.einsum("nkpj, qj -> nkpq",
-                                                            coeff_sandwiched_density_matrix,
-                                                            pairs["concatenated_coeff"])
-
-                density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
-            else:
-                raise NotImplementedError
+        # The first pass handles all diffused functions using the regular
+        # matrix multiplication code.
+        density = cp.zeros((n_channels, density_slices, n_grid_points), dtype=cp.complex128)
+        density_matrix_in_dense_region = dms[:, :, grids_dense.ao_idx[:, None], grids_dense.ao_idx]
+        for k in range(n_k_points):
+            for i in range(n_channels):
+                if xc_type == 'LDA':
+                    ao_dot_dm = cp.dot(ao_values["dense"][k], density_matrix_in_dense_region[i, k])
+                    density_subblock = cp.einsum('xi,xi->x', ao_dot_dm, ao_values["dense"][k].conj())
+                density[i, :] += density_subblock
+            
+        if grids_sparse is not None:
+            density_matrix_slice = dms[:, :, grids_dense.ao_idx[:, None], grids_sparse.ao_idx]
+            for k in range(n_k_points):
+                for i in range(n_channels):
+                    if xc_type == 'LDA':
+                        ao_dot_dm = cp.dot(ao_values["dense"][k], density_matrix_slice[i, k])
+                        density_subblock = cp.einsum('xi,xi->x', ao_dot_dm, ao_values["sparse"][k].conj())
+                    density[i, :] += 2 * density_subblock
+                    
+        if hermi:
+            density = density.real
 
         density_contribution_on_g_mesh = tools.fft(density.reshape(n_channels * density_slices, -1),
                                                    mesh) * weight_per_grid_point
@@ -384,8 +229,15 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
+    
+    cpu_df = multigrid.FFTDF(cell, kpts)
+
 
     density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts, derivative_order)
+    cpu_density_on_g_mesh = multigrid._eval_rhoG(cpu_df, dm_kpts, hermi, kpts, derivative_order)
+    print(cp.allclose(density_on_G_mesh, cpu_density_on_g_mesh))
+    
+    assert 0
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh)
     coulomb_energy = .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real)
@@ -450,7 +302,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
     def __init__(self, cell, kpts=np.zeros((1, 3))):
         self.sorted_gaussian_pairs = None
         fft.FFTDF.__init__(self, cell, kpts)
-        sort_gaussian_pairs(self)
+        generate_ao_values(self, kpts)
 
 
 def fftdf(mf):
