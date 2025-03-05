@@ -20,17 +20,13 @@ import numpy as np
 import cupy
 from pyscf import lib
 from gpu4pyscf.lib import logger
-from gpu4pyscf.gto import mole
 from gpu4pyscf.lib.cutensor import contract
 from gpu4pyscf.lib.cusolver import eigh, cholesky  #NOQA
-from gpu4pyscf.__config__ import _streams, _num_devices, _p2p_access
+from gpu4pyscf.lib.memcpy import copy_array, p2p_transfer  #NOQA
+from gpu4pyscf.__config__ import _streams, num_devices, _p2p_access
 
 LMAX_ON_GPU = 7
 DSOLVE_LINDEP = 1e-13
-
-c2s_l = mole.get_cart2sph(lmax=LMAX_ON_GPU)
-c2s_offset = np.cumsum([0] + [x.shape[0]*x.shape[1] for x in c2s_l])
-_data = {'c2s': None}
 
 _kernel_registery = {}
 
@@ -80,38 +76,22 @@ def get_avail_mem():
         mem_avail = cupy.cuda.runtime.memGetInfo()[0]
         return mem_avail + total_mem - used_mem
 
-def p2p_transfer(a, b):
-    ''' If the direct P2P data transfer is not available, transfer data via CPU memory
-    '''
-    if a.device == b.device:
-        a[:] = b
-    elif _p2p_access:
-        a[:] = b
-    elif a.strides == b.strides and a.flags.c_contiguous and a.dtype == b.dtype:
-        # cupy supports a direct copy from different devices without p2p. See also
-        # https://github.com/cupy/cupy/blob/v13.3.0/cupy/_core/_routines_indexing.pyx#L48
-        # https://github.com/cupy/cupy/blob/v13.3.0/cupy/_core/_routines_indexing.pyx#L1015
-        a[:] = b
-    else:
-        with cupy.cuda.Device(a.device):
-            # TODO: reduce memory copy, a can be non-contiguous array
-            a[:] = cupy.asarray(b.get())
-
 def concatenate(array_list):
     ''' Concatenate axis=0 only
     '''
     if _p2p_access:
         return cupy.concatenate(array_list)
     else:
-        array_list_cpu = [a.get() for a in array_list]
-        n = sum([a.shape[0] for a in array_list_cpu])
-        a0_shape = list(array_list_cpu[0].shape)
+        #array_list_cpu = [a.get() for a in array_list]
+        n = sum([a.shape[0] for a in array_list])
+        a0_shape = list(array_list[0].shape)
         out_shape = tuple([n] + a0_shape[1:])
         out = cupy.empty(out_shape)
         p0 = p1 = 0
-        for a in array_list_cpu:
+        for a in array_list:
             p1 = p0 + a.shape[0]
-            out[p0:p1].set(a)
+            #out[p0:p1].set(a)
+            copy_array(a, out[p0:p1])
             p0 = p1
         return out
 
@@ -124,8 +104,8 @@ def reduce_to_device(array_list, inplace=False):
     ''' Reduce a list of ndarray in different devices to device 0
     TODO: reduce memory footprint, improve throughput
     '''
-    assert len(array_list) == _num_devices
-    if _num_devices == 1:
+    assert len(array_list) == num_devices
+    if num_devices == 1:
         return array_list[0]
     
     out_shape = array_list[0].shape
@@ -136,18 +116,19 @@ def reduce_to_device(array_list, inplace=False):
         result = array_list[0]
     else:
         result = array_list[0].copy()
+    
+    # Transfer data chunk by chunk, reduce memory footprint,
     result = result.reshape(-1)
-    # Asynchronously add each matrix from its device
     for device_id, matrix in enumerate(array_list):
         if device_id == 0:
             continue
         
         assert matrix.device.id == device_id
         matrix = matrix.reshape(-1)
-        blksize = 1024*1024*128 # 1GB
+        blksize = 1024*1024*1024 // matrix.itemsize # 1GB
         for p0, p1 in lib.prange(0,len(matrix), blksize):
-            result[p0:p1] += cupy.asarray(matrix[p0:p1])
-    
+            result[p0:p1] += copy_array(matrix[p0:p1])
+            #result[p0:p1] += cupy.asarray(matrix[p0:p1]) 
     return result.reshape(out_shape)
     
 def device2host_2d(a_cpu, a_gpu, stream=None):
@@ -320,6 +301,14 @@ def dist_matrix(x, y, out=None):
         raise RuntimeError('failed in calculating distance matrix')
     return out
 
+@functools.lru_cache(1)
+def _initialize_c2s_data():
+    from gpu4pyscf.gto import mole
+    c2s_l = [mole.cart2sph_by_l(l) for l in range(LMAX_ON_GPU)]
+    c2s_data = cupy.concatenate([x.ravel() for x in c2s_l])
+    c2s_offset = np.cumsum([0] + [x.shape[0]*x.shape[1] for x in c2s_l])
+    return c2s_l, c2s_data, c2s_offset
+
 def block_c2s_diag(angular, counts):
     '''
     Diagonal blocked cartesian to spherical transformation
@@ -327,10 +316,7 @@ def block_c2s_diag(angular, counts):
         angular (list): angular momentum type, e.g. [0,1,2,3]
         counts (list): count of each angular momentum
     '''
-    if _data['c2s'] is None:
-        c2s_data = cupy.concatenate([cupy.asarray(x.ravel()) for x in c2s_l])
-        _data['c2s'] = c2s_data
-    c2s_data = _data['c2s']
+    c2s_l, c2s_data, c2s_offset = _initialize_c2s_data()
 
     nshells = np.sum(counts)
     rows = [np.array([0], dtype='int32')]
@@ -503,11 +489,12 @@ def cart2sph_cutensor(t, axis=0, ang=1, out=None):
     '''
     transform 'axis' of a tensor from cartesian basis into spherical basis with cutensor
     '''
+    from gpu4pyscf.gto import mole
     if(ang <= 1):
         if(out is not None): out[:] = t
         return t
     size = list(t.shape)
-    c2s = cupy.asarray(c2s_l[ang])
+    c2s = mole.cart2sph_by_l(ang)
     if(not t.flags['C_CONTIGUOUS']): t = cupy.asarray(t, order='C')
     li_size = c2s.shape
     nli = size[axis] // li_size[0]
@@ -525,11 +512,12 @@ def cart2sph(t, axis=0, ang=1, out=None, stream=None):
     '''
     transform 'axis' of a tensor from cartesian basis into spherical basis
     '''
+    from gpu4pyscf.gto import mole
     if(ang <= 1):
         if(out is not None): out[:] = t
         return t
     size = list(t.shape)
-    c2s = c2s_l[ang]
+    c2s = mole.cart2sph_by_l(ang)
     if(not t.flags['C_CONTIGUOUS']): t = cupy.asarray(t, order='C')
     li_size = c2s.shape
     nli = size[axis] // li_size[0]

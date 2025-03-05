@@ -20,15 +20,18 @@ import numpy as np
 from cupyx.scipy.linalg import solve_triangular
 from pyscf import lib
 from pyscf.df import df, addons, incore
-from gpu4pyscf.lib.cupy_helper import cholesky, tag_array, get_avail_mem, cart2sph, p2p_transfer
+from gpu4pyscf.lib.cupy_helper import (cholesky, tag_array, get_avail_mem, 
+                                       cart2sph, p2p_transfer, copy_array)
 from gpu4pyscf.df import int3c2e, df_jk
+from gpu4pyscf.df import int3c2e_bdiv
 from gpu4pyscf.lib import logger
 from gpu4pyscf import __config__
-from gpu4pyscf.__config__ import _streams, _num_devices
+from gpu4pyscf.__config__ import _streams, num_devices
 
 MIN_BLK_SIZE = getattr(__config__, 'min_ao_blksize', 128)
 ALIGNED = getattr(__config__, 'ao_aligned', 32)
 GB = 1024*1024*1024
+INT3C2E_V2 = False
 
 LINEAR_DEP_THR = incore.LINEAR_DEP_THR
 GROUP_SIZE = 256
@@ -36,7 +39,7 @@ GROUP_SIZE = 256
 class DF(lib.StreamObject):
     from gpu4pyscf.lib.utils import to_gpu, device
 
-    _keys = {'intopt', 'mol', 'auxmol', 'use_gpu_memory'}
+    _keys = {'intopt', 'nao', 'naux', 'cd_low', 'mol', 'auxmol', 'use_gpu_memory'}
 
     def __init__(self, mol, auxbasis=None):
         self.mol = mol
@@ -52,7 +55,11 @@ class DF(lib.StreamObject):
         self.naux = None
         self.cd_low = None
         self._cderi = None
+        self._vjopt = None
         self._rsh_df = {}
+
+    __getstate__, __setstate__ = lib.generate_pickle_methods(
+        excludes=('cd_low', 'intopt', '_cderi', '_vjopt'))
 
     @property
     def auxbasis(self):
@@ -76,6 +83,42 @@ class DF(lib.StreamObject):
         t0 = log.init_timer()
         if auxmol is None:
             self.auxmol = auxmol = addons.make_auxmol(mol, self.auxbasis)
+
+        if INT3C2E_V2:
+            self.intopt = intopt = int3c2e_bdiv.Int3c2eOpt(mol, auxmol)
+            self._cderi = {}
+            self._cderi[0] = _cholesky_eri_bdiv(intopt, omega=omega)
+            ao_pair_mapping = intopt.create_ao_pair_mapping(cart=mol.cart)
+            rows, cols = divmod(cupy.asarray(ao_pair_mapping), mol.nao)
+            intopt.cderi_row = rows
+            intopt.cderi_col = cols
+
+            # intopt.cderi_diag stores the indices for cderi_row that
+            # corresponds to the diagonal blocks. Note this index array can
+            # contain some of the off-diagonal elements which happen to be the
+            # off-diagonal elements while within the diagonal blocks.
+            uniq_l = intopt.uniq_l_ctr[:,0]
+            if mol.cart:
+                nf = (uniq_l + 1) * (uniq_l + 2) // 2
+            else:
+                nf = uniq_l * 2 + 1
+            n_groups = len(uniq_l)
+            ij_tasks = ((i, j) for i in range(n_groups) for j in range(i+1))
+            nbas = intopt.sorted_mol.nbas
+            offset = 0
+            cderi_diag = []
+            for (i, j), bas_ij_idx in zip(ij_tasks, intopt.shl_pair_idx):
+                nfi = nf[i]
+                nfj = nf[j]
+                if i == j: # the diagonal blocks
+                    ish, jsh = divmod(bas_ij_idx, nbas)
+                    idx = np.where(ish == jsh)[0]
+                    addr = offset + idx[:,None] * (nfi*nfi) + np.arange(nfi*nfi)
+                    cderi_diag.append(addr.ravel())
+                offset += bas_ij_idx.size * nfi * nfj
+            intopt.cderi_diag = cupy.asarray(np.hstack(cderi_diag))
+            log.timer_debug1('cholesky_eri', *t0)
+            return self
 
         if omega and omega > 1e-10:
             with auxmol.with_range_coulomb(omega):
@@ -138,8 +181,7 @@ class DF(lib.StreamObject):
         log = logger.new_logger(self.mol, self.mol.verbose)
         device_id = cupy.cuda.Device().id
         log.debug(f"{mem_avail/1e9:.3f} GB memory available on Device {device_id}, block size = {blksize}")
-        if blksize < ALIGNED:
-            raise RuntimeError("Not enough GPU memory")
+        assert blksize > 0
         return blksize
 
     def loop(self, blksize=None, unpack=True):
@@ -214,7 +256,7 @@ def cholesky_eri_gpu(intopt, mol, auxmol, cd_low,
         # CDERI will be equally distributed to the devices
         # Other devices usually have more memory available than Device 0
         # CDERI will use up to 40% of the available memory
-        use_gpu_memory = naux * npairs * 8 < 0.4 * avail_mem * _num_devices
+        use_gpu_memory = naux * npairs * 8 < 0.4 * avail_mem * num_devices
 
     if use_gpu_memory:
         log.debug("Saving CDERI on GPU")
@@ -222,12 +264,16 @@ def cholesky_eri_gpu(intopt, mol, auxmol, cd_low,
         log.debug("Saving CDERI on CPU")
 
     _cderi = {}
-    blksize = (naux + _num_devices - 1) // _num_devices
-    for device_id, (p0,p1) in enumerate(lib.prange(0, naux, blksize)):
+    aux_blksize = (naux + num_devices - 1) // num_devices
+    aux_blksize = (aux_blksize + ALIGNED - 1) // ALIGNED * ALIGNED
+    for device_id in range(num_devices):
+        p0 = min(aux_blksize*device_id, naux)
+        p1 = min(aux_blksize*(device_id+1), naux)
+        #for device_id, (p0,p1) in enumerate(lib.prange(0, naux, aux_blksize)):
         if use_gpu_memory:
             with cupy.cuda.Device(device_id), _streams[device_id]:
                 _cderi[device_id] = cupy.empty([p1-p0, npairs])
-            log.debug(f"CDERI size {_cderi[device_id].nbytes/GB:.3f} on Device {device_id}")
+            log.debug(f"CDERI size {_cderi[device_id].nbytes/GB:.3f} GB on Device {device_id}")
         else:
             mem = cupy.cuda.alloc_pinned_memory((p1-p0) * npairs * 8)
             cderi_blk = np.ndarray([p1-p0, npairs], dtype=np.float64, order='C', buffer=mem)
@@ -238,18 +284,18 @@ def cholesky_eri_gpu(intopt, mol, auxmol, cd_low,
     npairs_per_ctr = np.array(npairs_per_ctr)
     total_task_list = np.argsort(npairs_per_ctr)
     task_list_per_device = []
-    for device_id in range(_num_devices):
-        task_list_per_device.append(total_task_list[device_id::_num_devices])
+    for device_id in range(num_devices):
+        task_list_per_device.append(total_task_list[device_id::num_devices])
 
     cd_low_f = cupy.array(cd_low, order='F', copy=False)
     cd_low_f = tag_array(cd_low_f, tag=cd_low.tag)
 
     cupy.cuda.get_current_stream().synchronize()
     futures = []
-    with ThreadPoolExecutor(max_workers=_num_devices) as executor:
-        for device_id in range(_num_devices):
+    with ThreadPoolExecutor(max_workers=num_devices) as executor:
+        for device_id in range(num_devices):
             task_list = task_list_per_device[device_id]
-            future = executor.submit(_cderi_task, intopt, cd_low_f, task_list, _cderi,
+            future = executor.submit(_cderi_task, intopt, cd_low_f, task_list, _cderi, aux_blksize,
                                      omega=omega, sr_only=sr_only, device_id=device_id)
             futures.append(future)
 
@@ -261,7 +307,8 @@ def cholesky_eri_gpu(intopt, mol, auxmol, cd_low,
 
     return _cderi
 
-def _cderi_task(intopt, cd_low, task_list, _cderi, omega=None, sr_only=False, device_id=0):
+def _cderi_task(intopt, cd_low, task_list, _cderi, aux_blksize, 
+                omega=None, sr_only=False, device_id=0):
     ''' Execute CDERI tasks on one device
     '''
     nq = len(intopt.log_qs)
@@ -270,7 +317,6 @@ def _cderi_task(intopt, cd_low, task_list, _cderi, omega=None, sr_only=False, de
     naoaux = cd_low.shape[0]
     npairs = [len(intopt.ao_pairs_row[cp_ij]) for cp_ij in range(len(intopt.log_qs))]
     pairs_loc = np.append(0, np.cumsum(npairs))
-    blksize = (naux + _num_devices - 1) // _num_devices
     with cupy.cuda.Device(device_id), _streams[device_id]:
         assert isinstance(mol.verbose, int)
         log = logger.new_logger(mol, mol.verbose)
@@ -341,13 +387,33 @@ def _cderi_task(intopt, cd_low, task_list, _cderi, omega=None, sr_only=False, de
             ij0 = pairs_loc[cp_ij_id]
             ij1 = pairs_loc[cp_ij_id+1]
             if isinstance(_cderi[0], np.ndarray):
-                for slice_id, (p0,p1) in enumerate(lib.prange(0, naux, blksize)):
-                    for i in range(p0,p1):
-                        cderi_block[i].get(out=_cderi[slice_id][i-p0,ij0:ij1])
+                for slice_id, (p0,p1) in enumerate(lib.prange(0, naux, aux_blksize)):
+                    tmp = cupy.array(cderi_block[p0:p1], order='C', copy=True)
+                    copy_array(tmp, _cderi[slice_id][:p1-p0,ij0:ij1])
+            elif num_devices > 1:
+                # Multi-GPU case, copy data to other Devices
+                for dev_id, (p0,p1) in enumerate(lib.prange(0, naux, aux_blksize)):
+                    # Making a copy for contiguous data transfer
+                    tmp = cupy.array(cderi_block[p0:p1], order='C', copy=True)
+                    with cupy.cuda.Device(dev_id):
+                        tmp = copy_array(tmp)
+                        _cderi[dev_id][:,ij0:ij1] = tmp
             else:
-                # Copy data to other Devices
-                for slice_id, (p0,p1) in enumerate(lib.prange(0, naux, blksize)):
-                    #_cderi[slice_id][:,ij0:ij1] = cderi_block[p0:p1]
-                    p2p_transfer(_cderi[slice_id][:,ij0:ij1], cderi_block[p0:p1])
-            t1 = log.timer_debug1(f'transfer data for {cp_ij_id} / {nq} on Device {device_id}', *t1)
+                _cderi[0][:,ij0:ij1] = cderi_block
+            t1 = log.timer_debug1(f'transfer data for {cp_ij_id} / {nq} on Device {device_id}', *t1)    
     return
+
+# Generate CDERI using the new int3c2e_bdiv algorithm
+def _cholesky_eri_bdiv(intopt, omega=None):
+    assert isinstance(intopt, int3c2e_bdiv.Int3c2eOpt)
+    assert omega is None
+    eri3c = intopt.int3c2e_bdiv_kernel()
+    if intopt.mol.cart:
+        eri3c = intopt.orbital_pair_cart2sph(eri3c)
+    auxmol = intopt.auxmol
+    j2c = cupy.asarray(auxmol.intor('int2c2e', hermi=1), order='C')
+    cd_low = cholesky(j2c)
+    aux_coeff = cupy.array(intopt.aux_coeff, copy=True)
+    cd_low = solve_triangular(cd_low, aux_coeff.T, lower=True, overwrite_b=True)
+    cderi = cd_low.dot(eri3c.T)
+    return cderi

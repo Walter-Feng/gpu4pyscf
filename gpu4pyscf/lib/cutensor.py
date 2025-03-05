@@ -103,24 +103,21 @@ def contraction(
     ws = cupy.empty(ws_size, dtype=np.int8)
     out = c
 
-    alpha = np.asarray(alpha)
-    beta = np.asarray(beta)
+    alpha = np.asarray(alpha, dtype=dtype)
+    beta = np.asarray(beta, dtype=dtype)
 
-    cutensor_backend.contract(cutensor._get_handle().ptr, plan.ptr,
+    handler = cutensor._get_handle()
+    cutensor_backend.contract(handler.ptr, plan.ptr,
                              alpha.ctypes.data, a.data.ptr, b.data.ptr,
                              beta.ctypes.data, c.data.ptr, out.data.ptr,
                              ws.data.ptr, ws_size)
-    
     return out
 
 import os
-if 'CONTRACT_ENGINE' in os.environ:
-    contract_engine = os.environ['CONTRACT_ENGINE']
-else:
-    contract_engine = None
-
+contract_engine = None
 if cutensor is None:
     contract_engine = 'cupy'  # default contraction engine
+contract_engine = os.environ.get('CONTRACT_ENGINE', contract_engine)
 
 # override the 'contract' function if einsum is customized or cutensor is not found
 if contract_engine is not None:
@@ -138,11 +135,23 @@ if contract_engine is not None:
     import warnings
     warnings.warn(f'using {contract_engine} as the tensor contraction engine.')
     def contract(pattern, a, b, alpha=1.0, beta=0.0, out=None):
-        if out is None:
-            return cupy.asarray(einsum(pattern, a, b), order='C')
-        else:
-            out[:] = alpha*einsum(pattern, a, b) + beta*out
-            return cupy.asarray(out, order='C')
+        try:
+            if out is None:
+                out = einsum(pattern, a, b)
+                out *= alpha
+            elif beta == 0.:
+                out[:] = einsum(pattern, a, b)
+                out *= alpha
+            else:
+                out *= beta
+                tmp = einsum(pattern, a, b)
+                tmp *= alpha
+                out += tmp
+        except cupy.cuda.memory.OutOfMemoryError:
+            print('Out of memory error caused by cupy.einsum. '
+                  'It is recommended to install cutensor to resolve this.')
+            raise
+        return cupy.asarray(out, order='C')
 else:
     def contract(pattern, a, b, alpha=1.0, beta=0.0, out=None):
         '''

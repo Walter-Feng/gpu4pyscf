@@ -13,9 +13,9 @@
 # limitations under the License.
 
 # modified by Xiaojie Wu (wxj6000@gmail.com)
+
 import cupy
 from pyscf.dft import rks
-
 from gpu4pyscf.lib import logger
 from gpu4pyscf.dft import numint, gen_grid
 from gpu4pyscf.scf import hf
@@ -257,6 +257,7 @@ class KohnShamDFT(rks.KohnShamDFT):
 ##################################################
 # don't modify the following attributes, they are not input options
         self._numint = numint.NumInt()
+
     @property
     def omega(self):
         return self._numint.omega
@@ -265,8 +266,31 @@ class KohnShamDFT(rks.KohnShamDFT):
         self._numint.omega = float(v)
 
     def dump_flags(self, verbose=None):
+        log = logger.new_logger(self, verbose)
+        log.info('XC library %s version %s\n    %s',
+                 self._numint.libxc.__name__,
+                 self._numint.libxc.__version__,
+                 self._numint.libxc.__reference__)
+        
         # TODO: add this later
-        return
+        '''
+        if log.verbose >= logger.INFO:
+            log.info('XC functionals = %s', self.xc)
+            if hasattr(self._numint.libxc, 'xc_reference'):
+                log.info(textwrap.indent('\n'.join(self._numint.libxc.xc_reference(self.xc)), '    '))
+        '''
+        self.grids.dump_flags(verbose)
+
+        if self.do_nlc():
+            log.info('** Following is NLC and NLC Grids **')
+            if self.nlc:
+                log.info('NLC functional = %s', self.nlc)
+            else:
+                log.info('NLC functional = %s', self.xc)
+            self.nlcgrids.dump_flags(verbose)
+
+        log.info('small_rho_cutoff = %g', self.small_rho_cutoff)
+        return self
 
     reset = rks.KohnShamDFT.reset
     do_nlc = rks.KohnShamDFT.do_nlc
@@ -291,8 +315,13 @@ class RKS(KohnShamDFT, hf.RHF):
         hf.SCF.reset(self, mol)
         self.grids.reset(mol)
         self.nlcgrids.reset(mol)
-        self.cphf_grids.reset(mol)
         self._numint.reset()
+        # The cphf_grids attribute is not available in the PySCF CPU version.
+        # In PySCF's to_gpu() function, this attribute is not properly
+        # initialized. mol of the KS object must be used for initialization.
+        if mol is None:
+            mol = self.mol
+        self.cphf_grids.reset(mol)
         return self
 
     def nuc_grad_method(self):

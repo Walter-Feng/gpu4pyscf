@@ -26,7 +26,7 @@ from gpu4pyscf.lib.cupy_helper import contract, transpose_sum, reduce_to_device
 from gpu4pyscf.dft import rks, uks, numint
 from gpu4pyscf.scf import hf, uhf
 from gpu4pyscf.df import df, int3c2e
-from gpu4pyscf.__config__ import _streams, _num_devices
+from gpu4pyscf.__config__ import _streams, num_devices
 
 def _pin_memory(array):
     mem = cupy.cuda.alloc_pinned_memory(array.nbytes)
@@ -122,7 +122,7 @@ class _DFHF:
     to_gpu = utils.to_gpu
     device = utils.device
     __name_mixin__ = 'DF'
-    _keys = {'rhoj', 'rhok', 'disp', 'screen_tol'}
+    _keys = {'rhoj', 'rhok', 'disp', 'screen_tol', 'with_df', 'only_dfj'}
 
     def __init__(self, mf, dfobj, only_dfj):
         self.__dict__.update(mf.__dict__)
@@ -132,7 +132,6 @@ class _DFHF:
         self.direct_scf = False
         self.with_df = dfobj
         self.only_dfj = only_dfj
-        self._keys = mf._keys.union(['with_df', 'only_dfj'])
 
     def undo_df(self):
         '''Remove the DFHF Mixin'''
@@ -454,8 +453,8 @@ def get_jk(dfobj, dms_tag, hermi=0, with_j=True, with_k=True, direct_scf_tol=1e-
         mo_coeff = intopt.sort_orbitals(mo_coeff, axis=[1])
 
         futures = []
-        with ThreadPoolExecutor(max_workers=_num_devices) as executor:
-            for device_id in range(_num_devices):
+        with ThreadPoolExecutor(max_workers=num_devices) as executor:
+            for device_id in range(num_devices):
                 future = executor.submit(
                     _jk_task_with_mo,
                     dfobj, dms, mo_coeff, mo_occ,
@@ -475,8 +474,8 @@ def get_jk(dfobj, dms_tag, hermi=0, with_j=True, with_k=True, direct_scf_tol=1e-
         mo1s = [intopt.sort_orbitals(mo1, axis=[1]) for mo1 in mo1s]
 
         futures = []
-        with ThreadPoolExecutor(max_workers=_num_devices) as executor:
-            for device_id in range(_num_devices):
+        with ThreadPoolExecutor(max_workers=num_devices) as executor:
+            for device_id in range(num_devices):
                 future = executor.submit(
                     _jk_task_with_mo1,
                     dfobj, dms, mo1s, occ_coeffs,
@@ -487,8 +486,8 @@ def get_jk(dfobj, dms_tag, hermi=0, with_j=True, with_k=True, direct_scf_tol=1e-
     # general K matrix with density matrix
     else:
         futures = []
-        with ThreadPoolExecutor(max_workers=_num_devices) as executor:
-            for device_id in range(_num_devices):
+        with ThreadPoolExecutor(max_workers=num_devices) as executor:
+            for device_id in range(num_devices):
                 future = executor.submit(
                     _jk_task_with_dm, dfobj, dms,
                     hermi=hermi, device_id=device_id,

@@ -28,7 +28,7 @@ from gpu4pyscf.dft import radi
 from gpu4pyscf.lib.cupy_helper import (
     contract, get_avail_mem, add_sparse, tag_array, sandwich_dot, reduce_to_device)
 from gpu4pyscf.lib import logger
-from gpu4pyscf.__config__ import _streams, _num_devices
+from gpu4pyscf.__config__ import _streams, num_devices
 
 from pyscf import __config__
 MIN_BLK_SIZE = getattr(__config__, 'min_grid_blksize', 128*128)
@@ -136,7 +136,7 @@ def get_veff(ks_grad, mol=None, dm=None, verbose=None):
     return tag_array(exc1_per_atom, exc1_grid=exc)
 
 def _get_vxc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
-                  verbose=None, with_lapl=False, grid_range=(), device_id=0):
+                  verbose=None, with_lapl=False, device_id=0):
     ''' Calculate the gradient of vxc on given device
     '''
     with cupy.cuda.Device(device_id), _streams[device_id]:
@@ -151,10 +151,11 @@ def _get_vxc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
         opt = ni.gdftopt
         _sorted_mol = opt._sorted_mol
         nset = dms.shape[0]
+
         ngrids_glob = grids.coords.shape[0]
-        ngrids_per_device = (ngrids_glob + _num_devices - 1) // _num_devices
-        grid_start = device_id * ngrids_per_device
-        grid_end = (device_id + 1) * ngrids_per_device
+        grid_start, grid_end = numint.gen_grid_range(ngrids_glob, device_id)
+        ngrids_local = grid_end - grid_start
+        log.debug(f"{ngrids_local} grids on Device {device_id}")
 
         nset = len(dms)
         assert nset == 1
@@ -222,8 +223,8 @@ def get_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
 
     futures = []
     cupy.cuda.get_current_stream().synchronize()
-    with ThreadPoolExecutor(max_workers=_num_devices) as executor:
-        for device_id in range(_num_devices):
+    with ThreadPoolExecutor(max_workers=num_devices) as executor:
+        for device_id in range(num_devices):
             future = executor.submit(
                 _get_vxc_task,
                 ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
