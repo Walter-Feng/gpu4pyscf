@@ -23,6 +23,10 @@ from pyscf.gto import ATOM_OF, ANG_OF, NPRIM_OF, NCTR_OF, PTR_EXP, PTR_COEFF, PT
 from pyscf.pbc.gto import pseudo
 from pyscf.pbc.df.df_jk import _format_kpts_band
 from pyscf.pbc.lib.kpts_helper import is_zero
+from pyscf.pbc.lib.kpts_helper import gamma_point
+from pyscf import lib as cpu_lib
+from pyscf.pbc.gto.pseudo import pp_int
+from pyscf.pbc.df import ft_ao
 from gpu4pyscf.lib import logger
 from gpu4pyscf.lib import utils
 from gpu4pyscf.lib.cupy_helper import (
@@ -32,7 +36,7 @@ from gpu4pyscf.dft import numint
 from gpu4pyscf.pbc import tools
 from gpu4pyscf.pbc.df.fft import get_SI, _check_kpts
 from gpu4pyscf.pbc.df.fft_jk import _format_dms, _format_jks
-from gpu4pyscf.pbc.df.ft_ao import ft_ao
+# from gpu4pyscf.pbc.df.ft_ao import ft_ao
 from gpu4pyscf.__config__ import shm_size
 from gpu4pyscf.__config__ import props as gpu_specs
 
@@ -281,6 +285,7 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
     kpts = np.zeros((1, 3))
 
     log = logger.new_logger(cell, verbose)
+    t0 = log.init_timer()
     cell = ni.cell
     dm_kpts = cp.asarray(dm_kpts, order='C')
     dms = _format_dms(dm_kpts, kpts)
@@ -305,7 +310,7 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
     ecoul = .5 * float(rhoG[0,0].conj().dot(vG).real)
     ecoul /= cell.vol
     log.debug('Multigrid Coulomb energy %s', ecoul)
-
+    t0 = log.timer('coulomb', *t0)
     weight = cell.vol / ngrids
     # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
     # computing rhoR with IFFT, the weight factor is not needed.
@@ -340,7 +345,7 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
         wv_freq[:,0] *= .5
         veff = _get_gga_pass2(ni, wv_freq, hermi, kpts_band, verbose=log)
     veff = _format_jks(veff, dm_kpts, input_band, kpts)
-
+    t0 = log.timer('xc', *t0)
     shape = list(dm_kpts.shape)
     if len(shape) == 3 and shape[0] != kpts_band.shape[0]:
         shape[0] = kpts_band.shape[0]
@@ -395,46 +400,190 @@ def get_nuc(ni, kpts=None):
         vne = vne[0]
     return vne
 
-def get_pp(ni, kpts=None):
+# def get_pp(ni, kpts=None):
+#     '''Get the periodic pseudopotential nuc-el AO matrix, with G=0 removed.
+#     '''
+#     from pyscf import gto
+#     from pyscf.pbc.gto.pseudo import pp_int
+#     assert kpts is None or all(kpts == 0)
+#     if kpts is None or kpts.ndim == 1:
+#         is_single_kpt = True
+#     kpts = np.zeros((1, 3))
+
+#     cell = ni.cell
+#     log = logger.new_logger(cell)
+#     t0 = log.init_timer()
+#     mesh = ni.mesh
+#     Gv = cell.get_Gv(mesh)
+#     # TODO: SI size = prod(mesh)*natm, may exceed the GPU memory size
+#     SI = get_SI(cell, mesh=mesh)
+#     vpplocG = cp.asarray(pseudo.get_vlocG(cell, Gv))
+#     vpplocG = -contract('ij,ij->j', SI, vpplocG)
+#     print(vpplocG.shape)
+#     print(mesh)
+#     vpp = _get_j_pass2(ni, vpplocG[None,:], kpts=kpts)[0]
+
+#     # vppnonloc evaluated in reciprocal space
+#     fakemol = gto.Mole()
+#     fakemol._atm = np.zeros((1,gto.ATM_SLOTS), dtype=np.int32)
+#     fakemol._bas = np.zeros((1,gto.BAS_SLOTS), dtype=np.int32)
+#     ptr = gto.PTR_ENV_START
+#     fakemol._env = np.zeros(ptr+10)
+#     fakemol._bas[0,gto.NPRIM_OF ] = 1
+#     fakemol._bas[0,gto.NCTR_OF  ] = 1
+#     fakemol._bas[0,gto.PTR_EXP  ] = ptr+3
+#     fakemol._bas[0,gto.PTR_COEFF] = ptr+4
+
+#     # buf for SPG_lmi upto l=0..3 and nl=3
+#     ngrids = np.prod(mesh)
+#     buf = np.empty((48,ngrids), dtype=np.complex128)
+#     def vppnl_by_k(kpt):
+#         Gk = Gv + kpt
+#         G_rad = lib.norm(Gk, axis=1)
+#         aokG = ft_ao(cell, Gv, kpt=kpt) * (1/cell.vol)**.5
+#         vppnl = 0
+#         for ia in range(cell.natm):
+#             symb = cell.atom_symbol(ia)
+#             if symb not in cell._pseudo:
+#                 continue
+#             pp = cell._pseudo[symb]
+#             p1 = 0
+#             for l, proj in enumerate(pp[5:]):
+#                 rl, nl, hl = proj
+#                 if nl > 0:
+#                     fakemol._bas[0,gto.ANG_OF] = l
+#                     fakemol._env[ptr+3] = .5*rl**2
+#                     fakemol._env[ptr+4] = rl**(l+1.5)*np.pi**1.25
+#                     pYlm_part = fakemol.eval_gto('GTOval', Gk)
+
+#                     p0, p1 = p1, p1+nl*(l*2+1)
+#                     # pYlm is real, SI[ia] is complex
+#                     pYlm = np.ndarray((nl,l*2+1,ngrids), dtype=np.complex128, buffer=buf[p0:p1])
+#                     for k in range(nl):
+#                         qkl = pseudo.pp._qli(G_rad*rl, l, k)
+#                         pYlm[k] = pYlm_part.T * qkl
+#                     #:SPG_lmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYlm)
+#                     #:SPG_lm_aoG = np.einsum('nmg,gp->nmp', SPG_lmi, aokG)
+#                     #:tmp = np.einsum('ij,jmp->imp', hl, SPG_lm_aoG)
+#                     #:vppnl += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
+#             if p1 > 0:
+#                 SPG_lmi = cp.asarray(buf[:p1])
+#                 SPG_lmi *= SI[ia].conj()
+#                 SPG_lm_aoGs = SPG_lmi.dot(aokG)
+#                 p1 = 0
+#                 for l, proj in enumerate(pp[5:]):
+#                     rl, nl, hl = proj
+#                     if nl > 0:
+#                         p0, p1 = p1, p1+nl*(l*2+1)
+#                         hl = cp.asarray(hl)
+#                         SPG_lm_aoG = SPG_lm_aoGs[p0:p1].reshape(nl,l*2+1,-1)
+#                         tmp = contract('ij,jmp->imp', hl, SPG_lm_aoG)
+#                         vppnl += contract('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
+#         return vppnl * (1./cell.vol)
+
+#     for k, kpt in enumerate(kpts):
+#         vppnl = vppnl_by_k(kpt)
+#         if is_zero(kpt):
+#             vpp[k] += cp.asarray(vppnl.real)
+#         else:
+#             vpp[k] += cp.asarray(vppnl)
+
+#     if is_single_kpt:
+#         vpp = vpp[0]
+#     log.timer('get_pp', *t0)
+#     return vpp
+
+
+def get_pp(mydf, kpts=None):
     '''Get the periodic pseudopotential nuc-el AO matrix, with G=0 removed.
     '''
     from pyscf import gto
-    from pyscf.pbc.gto.pseudo import pp_int
-    assert kpts is None or all(kpts == 0)
-    if kpts is None or kpts.ndim == 1:
-        is_single_kpt = True
-    kpts = np.zeros((1, 3))
-
-    cell = ni.cell
-    log = logger.new_logger(cell)
-    t0 = log.init_timer()
-    mesh = ni.mesh
+    kpts, is_single_kpt = _check_kpts(mydf, kpts)
+    cell = mydf.cell
+    mesh = mydf.mesh
     Gv = cell.get_Gv(mesh)
-    # TODO: SI size = prod(mesh)*natm, may exceed the GPU memory size
-    SI = get_SI(cell, mesh=mesh)
-    vpplocG = cp.asarray(pseudo.get_vlocG(cell, Gv))
-    vpplocG = -contract('ij,ij->j', SI, vpplocG)
-    vpp = _get_j_pass2(ni, vpplocG[None,:], kpts=kpts)[0]
+
+    ngrids = len(Gv)
+    vpplocG = cp.empty((ngrids,), dtype=cp.complex128)
+
+    for ig0, ig1 in cpu_lib.prange(0, ngrids, ngrids):
+        vpplocG_batch = cp.asarray(
+            pp_int.get_gth_vlocG_part1(cell, Gv[ig0:ig1]))
+        SI = cp.asarray(cell.get_SI(Gv[ig0:ig1]))
+        vpplocG[ig0:ig1] = -cp.einsum('ij,ij->j', SI, vpplocG_batch)
+
+    vpp = _get_j_pass2(mydf, vpplocG[None,:], kpts=kpts)[0]
+    vpp2 = cp.asarray(pp_int.get_pp_loc_part2(cell, kpts))
+    for k, kpt in enumerate(kpts):
+        vpp[k] += vpp2[k]
 
     # vppnonloc evaluated in reciprocal space
     fakemol = gto.Mole()
-    fakemol._atm = np.zeros((1,gto.ATM_SLOTS), dtype=np.int32)
-    fakemol._bas = np.zeros((1,gto.BAS_SLOTS), dtype=np.int32)
+    fakemol._atm = np.zeros((1, gto.ATM_SLOTS), dtype=cp.int32)
+    fakemol._bas = np.zeros((1, gto.BAS_SLOTS), dtype=cp.int32)
     ptr = gto.PTR_ENV_START
-    fakemol._env = np.zeros(ptr+10)
-    fakemol._bas[0,gto.NPRIM_OF ] = 1
-    fakemol._bas[0,gto.NCTR_OF  ] = 1
-    fakemol._bas[0,gto.PTR_EXP  ] = ptr+3
-    fakemol._bas[0,gto.PTR_COEFF] = ptr+4
+    fakemol._env = np.zeros(ptr + 10)
+    fakemol._bas[0, gto.NPRIM_OF] = 1
+    fakemol._bas[0, gto.NCTR_OF] = 1
+    fakemol._bas[0, gto.PTR_EXP] = ptr + 3
+    fakemol._bas[0, gto.PTR_COEFF] = ptr + 4
 
-    # buf for SPG_lmi upto l=0..3 and nl=3
-    ngrids = np.prod(mesh)
-    buf = np.empty((48,ngrids), dtype=np.complex128)
     def vppnl_by_k(kpt):
-        Gk = Gv + kpt
-        G_rad = lib.norm(Gk, axis=1)
-        aokG = ft_ao(cell, Gv, kpt=kpt) * (1/cell.vol)**.5
+        SPG_lm_aoGs = []
+        for ia in range(cell.natm):
+            symb = cell.atom_symbol(ia)
+            if symb not in cell._pseudo:
+                SPG_lm_aoGs.append(None)
+                continue
+            pp = cell._pseudo[symb]
+            p1 = 0
+            for l, proj in enumerate(pp[5:]):
+                rl, nl, hl = proj
+                if nl > 0:
+                    p1 = p1 + nl * (l * 2 + 1)
+            SPG_lm_aoGs.append(
+                np.zeros((p1, cell.nao), dtype=np.complex128))
+
         vppnl = 0
+        for ig0, ig1 in cpu_lib.prange(0, ngrids, ngrids):
+            ng = ig1 - ig0
+            # buf for SPG_lmi upto l=0..3 and nl=3
+            buf = np.empty((48, ng), dtype=np.complex128)
+            Gk = Gv[ig0:ig1] + kpt
+            G_rad = np.linalg.norm(Gk, axis=1)
+            aokG = ft_ao.ft_ao(cell, Gv[ig0:ig1], kpt=kpt) * (ngrids / cell.vol)
+            for ia in range(cell.natm):
+                symb = cell.atom_symbol(ia)
+                if symb not in cell._pseudo:
+                    continue
+                pp = cell._pseudo[symb]
+                p1 = 0
+                for l, proj in enumerate(pp[5:]):
+                    rl, nl, hl = proj
+                    if nl > 0:
+                        fakemol._bas[0, gto.ANG_OF] = l
+                        fakemol._env[ptr + 3] = .5 * rl ** 2
+                        fakemol._env[ptr + 4] = rl ** (
+                                l + 1.5) * np.pi ** 1.25
+                        pYlm_part = fakemol.eval_gto('GTOval', Gk)
+
+                        p0, p1 = p1, p1 + nl * (l * 2 + 1)
+                        # pYlm is real, SI[ia] is complex
+                        pYlm = np.ndarray((nl, l * 2 + 1, ng),
+                                          dtype=np.complex128,
+                                          buffer=buf[p0:p1])
+                        for k in range(nl):
+                            qkl = pseudo.pp._qli(G_rad * rl, l, k)
+                            pYlm[k] = pYlm_part.T * qkl
+                        #:SPG_lmi = numpy.einsum('g,nmg->nmg', SI[ia].conj(), pYlm)
+                        #:SPG_lm_aoG = numpy.einsum('nmg,gp->nmp', SPG_lmi, aokG)
+                        #:tmp = numpy.einsum('ij,jmp->imp', hl, SPG_lm_aoG)
+                        #:vppnl += numpy.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
+                if p1 > 0:
+                    SPG_lmi = buf[:p1]
+                    SPG_lmi *= cell.get_SI(Gv[ig0:ig1], atmlst=[ia, ]).conj()
+                    SPG_lm_aoGs[ia] += cpu_lib.zdot(SPG_lmi, aokG)
+            buf = None
         for ia in range(cell.natm):
             symb = cell.atom_symbol(ia)
             if symb not in cell._pseudo:
@@ -444,46 +593,24 @@ def get_pp(ni, kpts=None):
             for l, proj in enumerate(pp[5:]):
                 rl, nl, hl = proj
                 if nl > 0:
-                    fakemol._bas[0,gto.ANG_OF] = l
-                    fakemol._env[ptr+3] = .5*rl**2
-                    fakemol._env[ptr+4] = rl**(l+1.5)*np.pi**1.25
-                    pYlm_part = fakemol.eval_gto('GTOval', Gk)
-
-                    p0, p1 = p1, p1+nl*(l*2+1)
-                    # pYlm is real, SI[ia] is complex
-                    pYlm = np.ndarray((nl,l*2+1,ngrids), dtype=np.complex128, buffer=buf[p0:p1])
-                    for k in range(nl):
-                        qkl = pseudo.pp._qli(G_rad*rl, l, k)
-                        pYlm[k] = pYlm_part.T * qkl
-                    #:SPG_lmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYlm)
-                    #:SPG_lm_aoG = np.einsum('nmg,gp->nmp', SPG_lmi, aokG)
-                    #:tmp = np.einsum('ij,jmp->imp', hl, SPG_lm_aoG)
-                    #:vppnl += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
-            if p1 > 0:
-                SPG_lmi = cp.asarray(buf[:p1])
-                SPG_lmi *= SI[ia].conj()
-                SPG_lm_aoGs = SPG_lmi.dot(aokG)
-                p1 = 0
-                for l, proj in enumerate(pp[5:]):
-                    rl, nl, hl = proj
-                    if nl > 0:
-                        p0, p1 = p1, p1+nl*(l*2+1)
-                        hl = cp.asarray(hl)
-                        SPG_lm_aoG = SPG_lm_aoGs[p0:p1].reshape(nl,l*2+1,-1)
-                        tmp = contract('ij,jmp->imp', hl, SPG_lm_aoG)
-                        vppnl += contract('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
-        return vppnl * (1./cell.vol)
+                    p0, p1 = p1, p1 + nl * (l * 2 + 1)
+                    hl = np.asarray(hl)
+                    SPG_lm_aoG = SPG_lm_aoGs[ia][p0:p1].reshape(nl, l * 2 + 1,
+                                                                -1)
+                    tmp = np.einsum('ij,jmp->imp', hl, SPG_lm_aoG)
+                    vppnl += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
+        SPG_lm_aoGs = None
+        return vppnl * (1. / ngrids ** 2)
 
     for k, kpt in enumerate(kpts):
-        vppnl = vppnl_by_k(kpt)
-        if is_zero(kpt):
-            vpp[k] += cp.asarray(vppnl.real)
+        vppnl = cp.asarray(vppnl_by_k(kpt))
+        if gamma_point(kpt):
+            vpp[k] = vpp[k].real + vppnl.real
         else:
-            vpp[k] += cp.asarray(vppnl)
+            vpp[k] += vppnl
 
     if is_single_kpt:
         vpp = vpp[0]
-    log.timer('get_pp', *t0)
     return vpp
 
 def to_primitive_bas(cell):

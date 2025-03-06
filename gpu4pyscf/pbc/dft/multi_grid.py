@@ -880,6 +880,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
            kpts_band=None, with_j=False, return_j=False, verbose=None):
     if kpts is None: kpts = mydf.kpts
     log = logger.new_logger(mydf, verbose)
+    t0 = log.init_timer()
     cell = mydf.cell
     dm_kpts = cp.asarray(dm_kpts, order='C')
     dms = fft_jk._format_dms(dm_kpts, kpts)
@@ -899,6 +900,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts,
                                                    derivative_order)
+    t0 = log.timer('density', *t0)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum('ng,g->ng', density_on_G_mesh[:, 0],
                                   coulomb_kernel_on_g_mesh)
@@ -908,7 +910,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
                                      coulomb_on_g_mesh.imag)
     coulomb_energy /= cell.vol
     log.debug('Multigrid Coulomb energy %s', coulomb_energy)
-
+    t0 = log.timer('coulomb', *t0)
     weight = cell.vol / ngrids
 
     # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
@@ -962,6 +964,8 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
         vj = fft_jk._format_jks(vj, dm_kpts, input_band, kpts)
     else:
         vj = None
+
+    t0 = log.timer('xc', *t0)
 
     shape = list(dm_kpts.shape)
     if len(shape) == 3 and shape[0] != kpts_band.shape[0]:
