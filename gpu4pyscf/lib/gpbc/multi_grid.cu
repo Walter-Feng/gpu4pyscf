@@ -25,17 +25,17 @@ template <int ANG> __inline__ __device__ constexpr double common_fac_sp() {
 
 template <typename T, unsigned int blockSize>
 __device__ void warpReduce(volatile T *sdata, unsigned int tid) {
-  if (blockSize >= 64)
+  if constexpr(blockSize >= 64)
     sdata[tid] += sdata[tid + 32];
-  if (blockSize >= 32)
+  if constexpr(blockSize >= 32)
     sdata[tid] += sdata[tid + 16];
-  if (blockSize >= 16)
+  if constexpr(blockSize >= 16)
     sdata[tid] += sdata[tid + 8];
-  if (blockSize >= 8)
+  if constexpr(blockSize >= 8)
     sdata[tid] += sdata[tid + 4];
-  if (blockSize >= 4)
+  if constexpr(blockSize >= 4)
     sdata[tid] += sdata[tid + 2];
-  if (blockSize >= 2)
+  if constexpr(blockSize >= 2)
     sdata[tid] += sdata[tid + 1];
 }
 
@@ -654,8 +654,12 @@ __global__ void evaluate_xc_kernel(
 
 #pragma unroll
   for (int i_channel = 0; i_channel < n_channels; i_channel++) {
-    xc_values[i_channel] =
-        xc_weights[i_channel * xc_weights_stride + flattened_index];
+    if(out_of_boundary) {
+      xc_values[i_channel] = 0;
+    } else {
+      xc_values[i_channel] =
+          xc_weights[i_channel * xc_weights_stride + flattened_index];
+    }
   }
 
   const uint local_grid_index =
@@ -701,12 +705,21 @@ __global__ void evaluate_xc_kernel(
         i_exponent * j_exponent / ij_exponent *
         distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
 
-    double pair_prefactor = 0;
-    if (!out_of_boundary) {
-      pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff *
-                       common_fac_sp<i_angular>() * common_fac_sp<j_angular>();
+
+    #pragma unroll
+    for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
+         i_function_index++) {
+      for (int j_function_index = 0; j_function_index < n_j_cartesian_functions;
+           j_function_index++) {
+        neighboring_gaussian_sum[i_function_index * n_j_cartesian_functions +
+                                 j_function_index] = 0;
+      }
     }
 
+    double pair_prefactor = 0;
+    if(!out_of_boundary) {
+     pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff *
+                       common_fac_sp<i_angular>() * common_fac_sp<j_angular>();
     const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
     const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
     const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
@@ -737,16 +750,6 @@ __global__ void evaluate_xc_kernel(
         floor((position_x - pair_x + cutoff) * reciprocal_lattice_vectors[6] +
               (position_y - pair_y + cutoff) * reciprocal_lattice_vectors[7] +
               (position_z - pair_z + cutoff) * reciprocal_lattice_vectors[8]);
-
-#pragma unroll
-    for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
-         i_function_index++) {
-      for (int j_function_index = 0; j_function_index < n_j_cartesian_functions;
-           j_function_index++) {
-        neighboring_gaussian_sum[i_function_index * n_j_cartesian_functions +
-                                 j_function_index] = 0;
-      }
-    }
     for (int a_cell = lower_a_index; a_cell <= upper_a_index; a_cell++) {
       for (int b_cell = lower_b_index; b_cell <= upper_b_index; b_cell++) {
         for (int c_cell = lower_c_index; c_cell <= upper_c_index; c_cell++) {
@@ -778,6 +781,7 @@ __global__ void evaluate_xc_kernel(
                   gaussian * i_cartesian[i_function_index] *
                   j_cartesian[j_function_index];
             }
+          }
           }
         }
       }

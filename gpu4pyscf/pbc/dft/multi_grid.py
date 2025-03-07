@@ -70,8 +70,8 @@ def sort_gaussian_pairs(mydf, xc_type="LDA",
     blocking_sizes_on_gpu = cp.asarray(blocking_sizes)
     log = logger.Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
-    lattice_vectors = cp.asarray(cell.lattice_vectors().T)
-    reciprocal_lattice_vectors = cp.linalg.inv(lattice_vectors.T)
+    lattice_vectors = cp.asarray(cell.lattice_vectors())
+    reciprocal_lattice_vectors = cp.asarray(cp.linalg.inv(lattice_vectors).T, order='C')
     reciprocal_norms = cp.linalg.norm(reciprocal_lattice_vectors, axis=1)
     numerical_integrator = mydf._numint
 
@@ -884,7 +884,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     cell = mydf.cell
     dm_kpts = cp.asarray(dm_kpts, order='C')
     dms = fft_jk._format_dms(dm_kpts, kpts)
-    nset, nkpts, nao = dms.shape[:3]
+    nset = dms.shape[0]
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
 
     numerical_integrator = mydf._numint
@@ -897,7 +897,6 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
-
     density_on_G_mesh = evaluate_density_on_g_mesh(mydf, dm_kpts, hermi, kpts,
                                                    derivative_order)
     t0 = log.timer('density', *t0)
@@ -909,6 +908,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     coulomb_energy += .5 * cp.einsum('ng,ng->n', density_on_G_mesh[:, 0].imag,
                                      coulomb_on_g_mesh.imag)
     coulomb_energy /= cell.vol
+    
     log.debug('Multigrid Coulomb energy %s', coulomb_energy)
     t0 = log.timer('coulomb', *t0)
     weight = cell.vol / ngrids
@@ -939,7 +939,6 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
         weighted_xc_for_fock_on_g_mesh[i] = tools.fft(xc_for_fock * weight,
                                                       mesh)
     density_in_real_space = density_on_G_mesh = None
-
     if nset == 1:
         coulomb_energy = coulomb_energy[0]
         n_electrons = n_electrons[0]
@@ -957,7 +956,6 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     else:
         raise NotImplementedError
-
     if return_j:
         vj = convert_xc_on_g_mesh_to_fock(mydf, coulomb_on_g_mesh, hermi,
                                           kpts_band, verbose=log)
@@ -967,7 +965,7 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
 
     t0 = log.timer('xc', *t0)
 
-    shape = list(dm_kpts.shape)
+    shape = dm_kpts.shape
     if len(shape) == 3 and shape[0] != kpts_band.shape[0]:
         shape[0] = kpts_band.shape[0]
     xc_for_fock = xc_for_fock.reshape(shape)
