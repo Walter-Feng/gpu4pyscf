@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <gint/gint.h>
+#include <stdio.h>
 
-#include <cstdio>
 #include <gint/cuda_alloc.cuh>
 
 #define atm(SLOT, I) atm[ATM_SLOTS * (I) + (SLOT)]
@@ -932,12 +932,16 @@ __global__ void evaluate_diffused_xc_kernel_non_orthogonal(
       distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
 
 #pragma unroll
-  for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
-       i_function_index++) {
-    for (int j_function_index = 0; j_function_index < n_j_cartesian_functions;
-         j_function_index++) {
-      neighboring_gaussian_sum[i_function_index * n_j_cartesian_functions +
-                               j_function_index] = 0;
+  for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+    for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
+         i_function_index++) {
+      for (int j_function_index = 0; j_function_index < n_j_cartesian_functions;
+           j_function_index++) {
+        neighboring_gaussian_sum[i_channel * n_i_cartesian_functions *
+                                     n_j_cartesian_functions +
+                                 i_function_index * n_j_cartesian_functions +
+                                 j_function_index] = 0;
+      }
     }
   }
 
@@ -993,19 +997,25 @@ __global__ void evaluate_diffused_xc_kernel_non_orthogonal(
        a <= upper_a_index; a += blockDim.z, a_residue += blockDim.z) {
     if (a_residue >= mesh_a) {
       a_residue -= mesh_a;
+    } else if (a_residue < 0) {
+      a_residue += mesh_a;
     }
 
     for (int b = lower_b_index + threadIdx.y, b_residue = b % mesh_b;
          b <= upper_b_index; b += blockDim.y, b_residue += blockDim.y) {
       if (b_residue >= mesh_b) {
         b_residue -= mesh_b;
+      } else if (b_residue < 0) {
+        b_residue += mesh_b;
       }
 
       for (int c = lower_c_index + threadIdx.x, c_residue = c % mesh_c;
            c <= upper_c_index; c += blockDim.x, c_residue += blockDim.x) {
         if (c_residue >= mesh_c) {
           c_residue -= mesh_c;
-        }
+        } else if (c_residue < 0) {
+          c_residue += mesh_c;
+        } 
 
         const double x = a * lattice_vectors[0] / mesh_a +
                          b * lattice_vectors[3] / mesh_b +

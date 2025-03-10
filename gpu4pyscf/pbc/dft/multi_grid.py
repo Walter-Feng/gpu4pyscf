@@ -62,7 +62,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
     cell = mydf.cell
     lattice_vectors = cp.asarray(cell.lattice_vectors())
     reciprocal_lattice_vectors = cp.asarray(cp.linalg.inv(lattice_vectors).T, order="C")
-    
+
     reciprocal_norms = cp.linalg.norm(reciprocal_lattice_vectors, axis=1)
     numerical_integrator = mydf._numint
     libgpbc.update_lattice_vectors(
@@ -762,6 +762,68 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, xc_type="LDA"):
             n_channels, n_k_points, n_i_functions, n_j_functions
         )
 
+def evaluate_xc_diffused_wrapper(pairs_info, xc_weights, xc_type="LDA"):
+    c_driver = libgpbc.evaluate_diffused_xc_driver
+    n_i_functions = len(pairs_info["coeff_in_dense"])
+    n_j_functions = len(pairs_info["concatenated_coeff"])
+
+    n_channels = xc_weights.shape[0]
+    n_k_points, n_images = pairs_info["phase_diff_among_images"].shape
+
+    if xc_type != "LDA":
+        raise NotImplementedError
+
+    fock = cp.zeros((n_channels, n_images, n_i_functions, n_j_functions))
+    for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
+        (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
+        c_driver(
+            ctypes.cast(fock.data.ptr, ctypes.c_void_p),
+            ctypes.cast(xc_weights.data.ptr, ctypes.c_void_p),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+            ctypes.cast(
+                gaussians_per_angular_pair["non_trivial_pairs"].data.ptr,
+                ctypes.c_void_p,
+            ),
+            ctypes.cast(
+                gaussians_per_angular_pair["cutoffs"].data.ptr, ctypes.c_void_p
+            ),
+            ctypes.c_int(len(gaussians_per_angular_pair["non_trivial_pairs"])),
+            ctypes.cast(
+                gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p
+            ),
+            ctypes.cast(
+                gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p
+            ),
+            ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
+            ctypes.cast(
+                gaussians_per_angular_pair["shell_to_ao_indices"].data.ptr,
+                ctypes.c_void_p,
+            ),
+            ctypes.c_int(n_i_functions),
+            ctypes.c_int(n_j_functions),
+            ctypes.cast(
+                gaussians_per_angular_pair["image_indices"].data.ptr, ctypes.c_void_p
+            ),
+            ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p),
+            ctypes.c_int(n_images),
+            (ctypes.c_int * 3)(*pairs_info["mesh"]),
+            ctypes.cast(pairs_info["atm"].data.ptr, ctypes.c_void_p),
+            ctypes.cast(pairs_info["bas"].data.ptr, ctypes.c_void_p),
+            ctypes.cast(pairs_info["env"].data.ptr, ctypes.c_void_p),
+            ctypes.c_int(n_channels),
+        )
+
+    if n_k_points > 1:
+        return cp.einsum(
+            "kt, ntij -> nkij", pairs_info["phase_diff_among_images"], fock
+        )
+    else:
+        return cp.sum(fock, axis=1).reshape(
+            n_channels, n_k_points, n_i_functions, n_j_functions
+        )
+
+
 
 def convert_xc_on_g_mesh_to_fock(
     mydf, xc_on_g_mesh, hermi=1, kpts=np.zeros((1, 3)), verbose=None
@@ -824,8 +886,10 @@ def convert_xc_on_g_mesh_to_fock(
         else:
             n_ao_in_sparse = len(pairs["ao_indices_in_dense"])
 
-            fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
+            # fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
+            fock_slice = evaluate_xc_diffused_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
 
+            # print("diff: ", cp.max(cp.abs(fock_slice - fock_slice_diffused)))
             fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_dense"])
             fock_slice = cp.einsum(
                 "nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"]
