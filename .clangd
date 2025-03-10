@@ -1,0 +1,10 @@
+CompileFlags:
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - --generate-code*
+    - -rdc=*
+    - -Xcompiler*
+  Add:
+    - --cuda-path=/opt/cuda
+    - -L/opt/cuda/lib64
+    - -I/opt/cuda/include

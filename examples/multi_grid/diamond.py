@@ -15,7 +15,7 @@ cell=gto.Cell()
 import cupy.cuda
 # cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
 boxlen=12
-diamond_cell = bulk('C', 'diamond', orthorhombic=True, a=4)
+diamond_cell = bulk('C', 'diamond', orthorhombic=True)
 
 lattice_vectors = diamond_cell.cell
 cell = gto.M(
@@ -29,7 +29,7 @@ cell = gto.M(
 )
 cell.exp_to_discard = 0.1
 
-cell = tools.super_cell(cell, [1, 1, 1])
+cell = tools.super_cell(cell, [3, 3, 3])
 cell.build()
 
 print("="*100)
