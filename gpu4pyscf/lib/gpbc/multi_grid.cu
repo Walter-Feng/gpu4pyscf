@@ -197,23 +197,26 @@ __global__ void evaluate_density_kernel(
     const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
     const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
 
-    const double pair_a_fractional = (position_x - pair_x) * reciprocal_lattice_vectors[0] +
-                                     (position_y - pair_y) * reciprocal_lattice_vectors[1] +
-                                     (position_z - pair_z) * reciprocal_lattice_vectors[2];
+    const double pair_a_fractional =
+        (position_x - pair_x) * reciprocal_lattice_vectors[0] +
+        (position_y - pair_y) * reciprocal_lattice_vectors[1] +
+        (position_z - pair_z) * reciprocal_lattice_vectors[2];
     const double cutoff_a_fractional = reciprocal_norm[0] * cutoff;
     const int lower_a_index = ceil(pair_a_fractional - cutoff_a_fractional);
     const int upper_a_index = floor(pair_a_fractional + cutoff_a_fractional);
 
-    const double pair_b_fractional = (position_x - pair_x) * reciprocal_lattice_vectors[3] +
-                                     (position_y - pair_y) * reciprocal_lattice_vectors[4] +
-                                     (position_z - pair_z) * reciprocal_lattice_vectors[5];
+    const double pair_b_fractional =
+        (position_x - pair_x) * reciprocal_lattice_vectors[3] +
+        (position_y - pair_y) * reciprocal_lattice_vectors[4] +
+        (position_z - pair_z) * reciprocal_lattice_vectors[5];
     const double cutoff_b_fractional = reciprocal_norm[1] * cutoff;
     const int lower_b_index = ceil(pair_b_fractional - cutoff_b_fractional);
     const int upper_b_index = floor(pair_b_fractional + cutoff_b_fractional);
 
-    const double pair_c_fractional = (position_x - pair_x) * reciprocal_lattice_vectors[6] +
-                                     (position_y - pair_y) * reciprocal_lattice_vectors[7] +
-                                     (position_z - pair_z) * reciprocal_lattice_vectors[8];
+    const double pair_c_fractional =
+        (position_x - pair_x) * reciprocal_lattice_vectors[6] +
+        (position_y - pair_y) * reciprocal_lattice_vectors[7] +
+        (position_z - pair_z) * reciprocal_lattice_vectors[8];
     const double cutoff_c_fractional = reciprocal_norm[2] * cutoff;
     const int lower_c_index = ceil(pair_c_fractional - cutoff_c_fractional);
     const int upper_c_index = floor(pair_c_fractional + cutoff_c_fractional);
@@ -640,7 +643,8 @@ __global__ void evaluate_xc_kernel(
   double i_cartesian[n_i_cartesian_functions];
   double j_cartesian[n_j_cartesian_functions];
 
-  __shared__ double shared_memory[64];
+  constexpr int block_size = 64;
+  __shared__ double shared_memory[block_size];
 
 #pragma unroll
   for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -712,23 +716,26 @@ __global__ void evaluate_xc_kernel(
       const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
       const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
 
-      const double pair_a_fractional = (position_x - pair_x) * reciprocal_lattice_vectors[0] +
-                                       (position_y - pair_y) * reciprocal_lattice_vectors[1] +
-                                       (position_z - pair_z) * reciprocal_lattice_vectors[2];
+      const double pair_a_fractional =
+          (position_x - pair_x) * reciprocal_lattice_vectors[0] +
+          (position_y - pair_y) * reciprocal_lattice_vectors[1] +
+          (position_z - pair_z) * reciprocal_lattice_vectors[2];
       const double cutoff_a_fractional = reciprocal_norm[0] * cutoff;
       const int lower_a_index = ceil(pair_a_fractional - cutoff_a_fractional);
       const int upper_a_index = floor(pair_a_fractional + cutoff_a_fractional);
 
-      const double pair_b_fractional = (position_x - pair_x) * reciprocal_lattice_vectors[3] +
-                                       (position_y - pair_y) * reciprocal_lattice_vectors[4] +
-                                       (position_z - pair_z) * reciprocal_lattice_vectors[5];
+      const double pair_b_fractional =
+          (position_x - pair_x) * reciprocal_lattice_vectors[3] +
+          (position_y - pair_y) * reciprocal_lattice_vectors[4] +
+          (position_z - pair_z) * reciprocal_lattice_vectors[5];
       const double cutoff_b_fractional = reciprocal_norm[1] * cutoff;
       const int lower_b_index = ceil(pair_b_fractional - cutoff_b_fractional);
       const int upper_b_index = floor(pair_b_fractional + cutoff_b_fractional);
 
-      const double pair_c_fractional = (position_x - pair_x) * reciprocal_lattice_vectors[6] +
-                                       (position_y - pair_y) * reciprocal_lattice_vectors[7] +
-                                       (position_z - pair_z) * reciprocal_lattice_vectors[8];
+      const double pair_c_fractional =
+          (position_x - pair_x) * reciprocal_lattice_vectors[6] +
+          (position_y - pair_y) * reciprocal_lattice_vectors[7] +
+          (position_z - pair_z) * reciprocal_lattice_vectors[8];
       const double cutoff_c_fractional = reciprocal_norm[2] * cutoff;
       const int lower_c_index = ceil(pair_c_fractional - cutoff_c_fractional);
       const int upper_c_index = floor(pair_c_fractional + cutoff_c_fractional);
@@ -778,7 +785,7 @@ __global__ void evaluate_xc_kernel(
            i_function_index++) {
         for (int j_function_index = 0;
              j_function_index < n_j_cartesian_functions; j_function_index++) {
-          reduce_and_add<double, 64>(
+          reduce_and_add<double, block_size>(
               shared_memory, fock_pointer, thread_id,
               xc_values[i_channel] * pair_prefactor *
                   neighboring_gaussian_sum[i_function_index *
@@ -862,7 +869,7 @@ void evaluate_xc_driver(
   checkCudaErrors(cudaPeekAtLastError());
 }
 
-template <int n_channels, int i_angular, int j_angular, int block_size>
+template <int n_channels, int i_angular, int j_angular>
 __global__ void evaluate_diffused_xc_kernel_non_orthogonal(
     double *fock, const double *xc_weights, const int *non_trivial_pairs,
     const double *cutoffs, const int n_pairs, const int *i_shells,
@@ -886,174 +893,246 @@ __global__ void evaluate_diffused_xc_kernel_non_orthogonal(
   double i_cartesian[n_i_cartesian_functions];
   double j_cartesian[n_j_cartesian_functions];
 
+  constexpr int block_size = 64;
+
   __shared__ double shared_memory[block_size];
 
-  for (int i_pair = 0; i_pair < n_pairs; i_pair++) {
-    const int image_index = image_indices[i_pair];
-    const double cutoff = cutoffs[i_pair];
+  const int image_index = image_indices[blockIdx.x];
+  const double cutoff = cutoffs[blockIdx.x];
 
-    const double image_x = vectors_to_neighboring_images[image_index * 3];
-    const double image_y = vectors_to_neighboring_images[image_index * 3 + 1];
-    const double image_z = vectors_to_neighboring_images[image_index * 3 + 2];
+  const double image_x = vectors_to_neighboring_images[image_index * 3];
+  const double image_y = vectors_to_neighboring_images[image_index * 3 + 1];
+  const double image_z = vectors_to_neighboring_images[image_index * 3 + 2];
 
-    const int shell_pair_index = non_trivial_pairs[i_pair];
-    const int i_shell_index = shell_pair_index / n_j_shells;
-    const int j_shell_index = shell_pair_index % n_j_shells;
-    const int i_shell = i_shells[i_shell_index];
-    const int i_function = shell_to_ao_indices[i_shell];
-    const int j_shell = j_shells[j_shell_index];
-    const int j_function = shell_to_ao_indices[j_shell];
+  const int shell_pair_index = non_trivial_pairs[blockIdx.x];
+  const int i_shell_index = shell_pair_index / n_j_shells;
+  const int j_shell_index = shell_pair_index % n_j_shells;
+  const int i_shell = i_shells[i_shell_index];
+  const int i_function = shell_to_ao_indices[i_shell];
+  const int j_shell = j_shells[j_shell_index];
+  const int j_function = shell_to_ao_indices[j_shell];
 
-    const double i_exponent = env[bas(PTR_EXP, i_shell)];
-    const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
-    const double i_x = env[i_coord_offset] - image_x;
-    const double i_y = env[i_coord_offset + 1] - image_y;
-    const double i_z = env[i_coord_offset + 2] - image_z;
-    const double i_coeff = env[bas(PTR_COEFF, i_shell)];
+  const double i_exponent = env[bas(PTR_EXP, i_shell)];
+  const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
+  const double i_x = env[i_coord_offset] - image_x;
+  const double i_y = env[i_coord_offset + 1] - image_y;
+  const double i_z = env[i_coord_offset + 2] - image_z;
+  const double i_coeff = env[bas(PTR_COEFF, i_shell)];
 
-    const double j_exponent = env[bas(PTR_EXP, j_shell)];
-    const int j_coord_offset = atm(PTR_COORD, bas(ATOM_OF, j_shell));
-    const double j_x = env[j_coord_offset];
-    const double j_y = env[j_coord_offset + 1];
-    const double j_z = env[j_coord_offset + 2];
-    const double j_coeff = env[bas(PTR_COEFF, j_shell)];
+  const double j_exponent = env[bas(PTR_EXP, j_shell)];
+  const int j_coord_offset = atm(PTR_COORD, bas(ATOM_OF, j_shell));
+  const double j_x = env[j_coord_offset];
+  const double j_y = env[j_coord_offset + 1];
+  const double j_z = env[j_coord_offset + 2];
+  const double j_coeff = env[bas(PTR_COEFF, j_shell)];
 
-    const double ij_exponent = i_exponent + j_exponent;
-    const double ij_exponent_in_prefactor =
-        i_exponent * j_exponent / ij_exponent *
-        distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
+  const double ij_exponent = i_exponent + j_exponent;
+  const double ij_exponent_in_prefactor =
+      i_exponent * j_exponent / ij_exponent *
+      distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
 
 #pragma unroll
-    for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
-         i_function_index++) {
-      for (int j_function_index = 0; j_function_index < n_j_cartesian_functions;
-           j_function_index++) {
-        neighboring_gaussian_sum[i_function_index * n_j_cartesian_functions +
-                                 j_function_index] = 0;
-      }
+  for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
+       i_function_index++) {
+    for (int j_function_index = 0; j_function_index < n_j_cartesian_functions;
+         j_function_index++) {
+      neighboring_gaussian_sum[i_function_index * n_j_cartesian_functions +
+                               j_function_index] = 0;
+    }
+  }
+
+  double pair_prefactor = 0;
+  pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff *
+                   common_fac_sp<i_angular>() * common_fac_sp<j_angular>();
+  const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
+  const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
+  const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
+
+  const double pair_a_fractional = pair_x * reciprocal_lattice_vectors[0] +
+                                   pair_y * reciprocal_lattice_vectors[1] +
+                                   pair_z * reciprocal_lattice_vectors[2];
+  const double cutoff_a_fractional = reciprocal_norm[0] * cutoff;
+  const int lower_a_index =
+      ceil((pair_a_fractional - cutoff_a_fractional) * mesh_a);
+  const int upper_a_index =
+      floor((pair_a_fractional + cutoff_a_fractional) * mesh_a);
+
+  const double pair_b_fractional = pair_x * reciprocal_lattice_vectors[3] +
+                                   pair_y * reciprocal_lattice_vectors[4] +
+                                   pair_z * reciprocal_lattice_vectors[5];
+  const double cutoff_b_fractional = reciprocal_norm[1] * cutoff;
+  const int lower_b_index =
+      ceil((pair_b_fractional - cutoff_b_fractional) * mesh_b);
+  const int upper_b_index =
+      floor((pair_b_fractional + cutoff_b_fractional) * mesh_b);
+
+  const double pair_c_fractional = pair_x * reciprocal_lattice_vectors[6] +
+                                   pair_y * reciprocal_lattice_vectors[7] +
+                                   pair_z * reciprocal_lattice_vectors[8];
+  const double cutoff_c_fractional = reciprocal_norm[2] * cutoff;
+  const int lower_c_index =
+      ceil((pair_c_fractional - cutoff_c_fractional) * mesh_c);
+  const int upper_c_index =
+      floor((pair_c_fractional + cutoff_c_fractional) * mesh_c);
+  /*
+  const double x0 =
+      (lower_a_index + threadIdx.z) * lattice_vectors[0] / mesh_a +
+      (lower_b_index + threadIdx.y) * lattice_vectors[3] / mesh_b +
+      (lower_c_index + threadIdx.x) * lattice_vectors[6] / mesh_c - pair_x;
+  const double y0 =
+      (lower_a_index + threadIdx.z) * lattice_vectors[1] / mesh_a +
+      (lower_b_index + threadIdx.y) * lattice_vectors[4] / mesh_b +
+      (lower_c_index + threadIdx.x) * lattice_vectors[7] / mesh_c - pair_y;
+  const double z0 =
+      (lower_a_index + threadIdx.z) * lattice_vectors[2] / mesh_a +
+      (lower_b_index + threadIdx.y) * lattice_vectors[5] / mesh_b +
+      (lower_c_index + threadIdx.x) * lattice_vectors[8] / mesh_c - pair_z;
+  */
+
+  for (int a = lower_a_index + threadIdx.z, a_residue = a % mesh_a;
+       a <= upper_a_index; a += blockDim.z, a_residue += blockDim.z) {
+    if (a_residue >= mesh_a) {
+      a_residue -= mesh_a;
     }
 
-    double pair_prefactor = 0;
-    pair_prefactor = exp(-ij_exponent_in_prefactor) * i_coeff * j_coeff *
-                     common_fac_sp<i_angular>() * common_fac_sp<j_angular>();
-    const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
-    const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
-    const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
+    for (int b = lower_b_index + threadIdx.y, b_residue = b % mesh_b;
+         b <= upper_b_index; b += blockDim.y, b_residue += blockDim.y) {
+      if (b_residue >= mesh_b) {
+        b_residue -= mesh_b;
+      }
 
-    const double pair_a_fractional = pair_x * reciprocal_lattice_vectors[0] +
-                                     pair_y * reciprocal_lattice_vectors[1] +
-                                     pair_z * reciprocal_lattice_vectors[2];
-    const double cutoff_a_fractional = reciprocal_norm[0] * cutoff;
-    const int lower_a_index =
-        ceil((pair_a_fractional - cutoff_a_fractional) * mesh_a);
-    const int upper_a_index =
-        floor((pair_a_fractional + cutoff_a_fractional) * mesh_a);
+      for (int c = lower_c_index + threadIdx.x, c_residue = c % mesh_c;
+           c <= upper_c_index; c += blockDim.x, c_residue += blockDim.x) {
+        if (c_residue >= mesh_c) {
+          c_residue -= mesh_c;
+        }
 
-    const double pair_b_fractional = pair_x * reciprocal_lattice_vectors[3] +
-                                     pair_y * reciprocal_lattice_vectors[4] +
-                                     pair_z * reciprocal_lattice_vectors[5];
-    const double cutoff_b_fractional = reciprocal_norm[1] * cutoff;
-    const int lower_b_index =
-        ceil((pair_b_fractional - cutoff_b_fractional) * mesh_b);
-    const int upper_b_index =
-        floor((pair_b_fractional + cutoff_b_fractional) * mesh_b);
+        const double x = a * lattice_vectors[0] / mesh_a +
+                         b * lattice_vectors[3] / mesh_b +
+                         c * lattice_vectors[6] / mesh_c;
+        const double y = a * lattice_vectors[1] / mesh_a +
+                         b * lattice_vectors[4] / mesh_b +
+                         c * lattice_vectors[7] / mesh_c;
+        const double z = a * lattice_vectors[2] / mesh_a +
+                         b * lattice_vectors[5] / mesh_b +
+                         c * lattice_vectors[8] / mesh_c;
+        gto_cartesian<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
+        gto_cartesian<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
 
-    const double pair_c_fractional = pair_x * reciprocal_lattice_vectors[6] +
-                                     pair_y * reciprocal_lattice_vectors[7] +
-                                     pair_z * reciprocal_lattice_vectors[8];
-    const double cutoff_c_fractional = reciprocal_norm[2] * cutoff;
-    const int lower_c_index =
-        ceil((pair_c_fractional - cutoff_c_fractional) * mesh_c);
-    const int upper_c_index =
-        floor((pair_c_fractional + cutoff_c_fractional) * mesh_c);
-    /*
-    const double x0 =
-        (lower_a_index + threadIdx.z) * lattice_vectors[0] / mesh_a +
-        (lower_b_index + threadIdx.y) * lattice_vectors[3] / mesh_b +
-        (lower_c_index + threadIdx.x) * lattice_vectors[6] / mesh_c - pair_x;
-    const double y0 =
-        (lower_a_index + threadIdx.z) * lattice_vectors[1] / mesh_a +
-        (lower_b_index + threadIdx.y) * lattice_vectors[4] / mesh_b +
-        (lower_c_index + threadIdx.x) * lattice_vectors[7] / mesh_c - pair_y;
-    const double z0 =
-        (lower_a_index + threadIdx.z) * lattice_vectors[2] / mesh_a +
-        (lower_b_index + threadIdx.y) * lattice_vectors[5] / mesh_b +
-        (lower_c_index + threadIdx.x) * lattice_vectors[8] / mesh_c - pair_z;
-    */
-    int a = lower_a_index + threadIdx.z;
-    int a_residue = a % mesh_a;
-    for (; a <= upper_a_index; a += blockDim.z) {
-      int b = lower_b_index + threadIdx.y;
-      int b_residue = b % mesh_b;
-      for (; b <= upper_b_index; b += blockDim.y) {
-        int c = lower_c_index + threadIdx.x;
-        int c_residue = c % mesh_c;
-        for (; c <= upper_c_index; c += blockDim.x) {
-          const double x = a * lattice_vectors[0] / mesh_a +
-                           b * lattice_vectors[3] / mesh_b +
-                           c * lattice_vectors[6] / mesh_c;
-          const double y = a * lattice_vectors[1] / mesh_a +
-                           b * lattice_vectors[4] / mesh_b +
-                           c * lattice_vectors[7] / mesh_c;
-          const double z = a * lattice_vectors[2] / mesh_a +
-                           b * lattice_vectors[5] / mesh_b +
-                           c * lattice_vectors[8] / mesh_c;
-          gto_cartesian<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
-          gto_cartesian<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
-
-          const double r_squared =
-              distance_squared(x - pair_x, y - pair_y, z - pair_z);
-          const double gaussian = exp(-ij_exponent * r_squared);
+        const double r_squared =
+            distance_squared(x - pair_x, y - pair_y, z - pair_z);
+        const double gaussian = exp(-ij_exponent * r_squared);
 #pragma unroll
-          for (int i_channel = 0; i_channel < n_channels; i_channel++) {
-            const double xc_value = xc_weights[i_channel * xc_weights_stride +
-                                               a_residue * mesh_b * mesh_c +
-                                               b_residue * mesh_c + c_residue];
+        for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+          const double xc_value = xc_weights[i_channel * xc_weights_stride +
+                                             a_residue * mesh_b * mesh_c +
+                                             b_residue * mesh_c + c_residue];
 #pragma unroll
-            for (int i_function_index = 0;
-                 i_function_index < n_i_cartesian_functions;
-                 i_function_index++) {
+          for (int i_function_index = 0;
+               i_function_index < n_i_cartesian_functions; i_function_index++) {
 #pragma unroll
-              for (int j_function_index = 0;
-                   j_function_index < n_j_cartesian_functions;
-                   j_function_index++) {
-                neighboring_gaussian_sum[i_channel * n_i_cartesian_functions *
-                                             n_j_cartesian_functions +
-                                         i_function_index *
-                                             n_j_cartesian_functions +
-                                         j_function_index] +=
-                    gaussian * i_cartesian[i_function_index] *
-                    j_cartesian[j_function_index] * xc_value;
-              }
+            for (int j_function_index = 0;
+                 j_function_index < n_j_cartesian_functions;
+                 j_function_index++) {
+              neighboring_gaussian_sum[i_channel * n_i_cartesian_functions *
+                                           n_j_cartesian_functions +
+                                       i_function_index *
+                                           n_j_cartesian_functions +
+                                       j_function_index] +=
+                  gaussian * i_cartesian[i_function_index] *
+                  j_cartesian[j_function_index] * xc_value;
             }
           }
         }
       }
     }
-    double *fock_pointer = fock + image_index * fock_stride +
-                           i_function * n_j_functions + j_function;
-#pragma unroll
-    for (int i_channel = 0; i_channel < n_channels; i_channel++) {
-      for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
-           i_function_index++) {
-        for (int j_function_index = 0;
-             j_function_index < n_j_cartesian_functions; j_function_index++) {
-          reduce_and_add<double, block_size>(
-              shared_memory, fock_pointer, thread_id,
-              pair_prefactor *
-                  neighboring_gaussian_sum[i_channel * n_i_cartesian_functions *
-                                               n_j_cartesian_functions +
-                                           i_function_index *
-                                               n_j_cartesian_functions +
-                                           j_function_index]);
-          fock_pointer++;
-        }
-        fock_pointer += n_j_functions - n_j_cartesian_functions;
-      }
-      fock_pointer +=
-          n_images * fock_stride - n_i_cartesian_functions * n_j_functions;
-    }
   }
+  double *fock_pointer = fock + image_index * fock_stride +
+                         i_function * n_j_functions + j_function;
+#pragma unroll
+  for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+    for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
+         i_function_index++) {
+      for (int j_function_index = 0; j_function_index < n_j_cartesian_functions;
+           j_function_index++) {
+        reduce_and_add<double, block_size>(
+            shared_memory, fock_pointer, thread_id,
+            pair_prefactor *
+                neighboring_gaussian_sum[i_channel * n_i_cartesian_functions *
+                                             n_j_cartesian_functions +
+                                         i_function_index *
+                                             n_j_cartesian_functions +
+                                         j_function_index]);
+        fock_pointer++;
+      }
+      fock_pointer += n_j_functions - n_j_cartesian_functions;
+    }
+    fock_pointer +=
+        n_images * fock_stride - n_i_cartesian_functions * n_j_functions;
+  }
+}
+
+#define diffused_xc_kernel_non_orthogonal_macro(li, lj)                        \
+  evaluate_diffused_xc_kernel_non_orthogonal<n_channels, li, lj>               \
+      <<<block_grid, block_size>>>(                                            \
+          fock, xc_weights, non_trivial_pairs, cutoffs, n_pairs, i_shells,     \
+          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,            \
+          n_j_functions, image_indices, vectors_to_neighboring_images,         \
+          n_images, mesh_a, mesh_b, mesh_c, atm, bas, env)
+
+#define diffused_xc_kernel_non_orthogonal_case_macro(li, lj)                   \
+  case (li * 10 + lj):                                                         \
+    diffused_xc_kernel_non_orthogonal_macro(li, lj);                           \
+    break
+
+template <int n_channels>
+void evaluate_diffused_xc_driver(
+    double *fock, const double *xc_weights, const int i_angular,
+    const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
+    const int n_pairs, const int *i_shells, const int *j_shells,
+    const int n_j_shells, const int *shell_to_ao_indices,
+    const int n_i_functions, const int n_j_functions, const int *image_indices,
+    const double *vectors_to_neighboring_images, const int n_images,
+    const int *mesh, const int *atm, const int *bas, const double *env) {
+  dim3 block_size(4, 4, 4);
+  int mesh_a = mesh[0];
+  int mesh_b = mesh[1];
+  int mesh_c = mesh[2];
+  dim3 block_grid(n_pairs, 1, 1);
+
+  switch (i_angular * 10 + j_angular) {
+    diffused_xc_kernel_non_orthogonal_case_macro(0, 0);
+    diffused_xc_kernel_non_orthogonal_case_macro(0, 1);
+    diffused_xc_kernel_non_orthogonal_case_macro(0, 2);
+    diffused_xc_kernel_non_orthogonal_case_macro(0, 3);
+    diffused_xc_kernel_non_orthogonal_case_macro(0, 4);
+    diffused_xc_kernel_non_orthogonal_case_macro(1, 0);
+    diffused_xc_kernel_non_orthogonal_case_macro(1, 1);
+    diffused_xc_kernel_non_orthogonal_case_macro(1, 2);
+    diffused_xc_kernel_non_orthogonal_case_macro(1, 3);
+    diffused_xc_kernel_non_orthogonal_case_macro(1, 4);
+    diffused_xc_kernel_non_orthogonal_case_macro(2, 0);
+    diffused_xc_kernel_non_orthogonal_case_macro(2, 1);
+    diffused_xc_kernel_non_orthogonal_case_macro(2, 2);
+    diffused_xc_kernel_non_orthogonal_case_macro(2, 3);
+    diffused_xc_kernel_non_orthogonal_case_macro(2, 4);
+    diffused_xc_kernel_non_orthogonal_case_macro(3, 0);
+    diffused_xc_kernel_non_orthogonal_case_macro(3, 1);
+    diffused_xc_kernel_non_orthogonal_case_macro(3, 2);
+    diffused_xc_kernel_non_orthogonal_case_macro(3, 3);
+    diffused_xc_kernel_non_orthogonal_case_macro(3, 4);
+    diffused_xc_kernel_non_orthogonal_case_macro(4, 0);
+    diffused_xc_kernel_non_orthogonal_case_macro(4, 1);
+    diffused_xc_kernel_non_orthogonal_case_macro(4, 2);
+    diffused_xc_kernel_non_orthogonal_case_macro(4, 3);
+    diffused_xc_kernel_non_orthogonal_case_macro(4, 4);
+  default:
+    fprintf(stderr,
+            "angular momentum pair %d, %d is not supported in "
+            "evaluate_diffused_xc_driver\n",
+            i_angular, j_angular);
+  }
+  checkCudaErrors(cudaPeekAtLastError());
 }
 
 extern "C" {
@@ -1162,6 +1241,32 @@ void evaluate_xc_driver(
     }
   } else {
     fprintf(stderr, "blocking_sizes other than 4 is not supported.\n");
+  }
+}
+
+void evaluate_diffused_xc_driver(
+    double *fock, const double *xc_weights, const int i_angular,
+    const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
+    const int n_pairs, const int *i_shells, const int *j_shells,
+    const int n_j_shells, const int *shell_to_ao_indices,
+    const int n_i_functions, const int n_j_functions, const int *image_indices,
+    const double *vectors_to_neighboring_images, const int n_images,
+    const int *mesh, const int *atm, const int *bas, const double *env,
+    const int n_channels) {
+  if (n_channels == 1) {
+    evaluate_diffused_xc_driver<1>(
+        fock, xc_weights, i_angular, j_angular, non_trivial_pairs, cutoffs,
+        n_pairs, i_shells, j_shells, n_j_shells, shell_to_ao_indices,
+        n_i_functions, n_j_functions, image_indices,
+        vectors_to_neighboring_images, n_images, mesh, atm, bas, env);
+  } else if (n_channels == 2) {
+    evaluate_diffused_xc_driver<2>(
+        fock, xc_weights, i_angular, j_angular, non_trivial_pairs, cutoffs,
+        n_pairs, i_shells, j_shells, n_j_shells, shell_to_ao_indices,
+        n_i_functions, n_j_functions, image_indices,
+        vectors_to_neighboring_images, n_images, mesh, atm, bas, env);
+  } else {
+    fprintf(stderr, "n_channels more than 2 is not supported.\n");
   }
 }
 }
