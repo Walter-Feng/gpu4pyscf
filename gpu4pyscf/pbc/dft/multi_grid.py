@@ -886,8 +886,8 @@ def convert_xc_on_g_mesh_to_fock(
         else:
             n_ao_in_sparse = len(pairs["ao_indices_in_dense"])
 
-            # fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
-            fock_slice = evaluate_xc_diffused_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
+            fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
+            # fock_slice = evaluate_xc_diffused_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
 
             # print("diff: ", cp.max(cp.abs(fock_slice - fock_slice_diffused)))
             fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_dense"])

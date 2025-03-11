@@ -609,6 +609,7 @@ def eval_nucG(cell, mesh):
 
 def get_nuc(ni, kpts=None):
     assert kpts is None or all(kpts == 0)
+    is_single_kpt = False
     if kpts is None or kpts.ndim == 1:
         is_single_kpt = True
     kpts = np.zeros((1, 3))
@@ -703,6 +704,7 @@ def get_pp(ni, kpts=None):
     from pyscf import gto
     from pyscf.pbc.gto.pseudo import pp_int
     assert kpts is None or all(kpts == 0)
+    is_single_kpt = False
     if kpts is None or kpts.ndim == 1:
         is_single_kpt = True
     kpts = np.zeros((1, 3))
