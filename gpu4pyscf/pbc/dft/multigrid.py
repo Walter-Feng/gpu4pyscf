@@ -494,6 +494,7 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
 
     cell = ni.cell
     log = logger.new_logger(cell, verbose)
+    t0 = log.init_timer()
     dm_kpts = cp.asarray(dm_kpts, order='C')
     dms = _format_dms(dm_kpts, kpts)
     nset, nkpts, nao = dms.shape[:3]
@@ -525,6 +526,7 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
     vG = rhoG[:,0] * coulG
     ecoul = .5 * float(rhoG[0,0].conj().dot(vG[0]).real) / vol
     log.debug('Multigrid Coulomb energy %s', ecoul)
+    t0 = log.timer("coulomb", *t0)
 
     weight = vol / ngrids
     # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
@@ -559,7 +561,7 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
         if xctype == 'MGGA':
             veff += _get_tau_pass2(ni, wv_freq[:,4], hermi, kpts_band, verbose=log)
     veff = _format_jks(veff, dm_kpts, input_band, kpts)
-
+    t0 = log.timer("xc", *t0)
     shape = list(dm_kpts.shape)
     if len(shape) == 3 and shape[0] != kpts_band.shape[0]:
         shape[0] = kpts_band.shape[0]
