@@ -1,8 +1,8 @@
-#include <cuda_runtime.h>
+
+#include <cub/cub.cuh>
+#include <gint/cuda_alloc.cuh>
 #include <gint/gint.h>
 #include <stdio.h>
-
-#include <gint/cuda_alloc.cuh>
 
 #define atm(SLOT, I) atm[ATM_SLOTS * (I) + (SLOT)]
 #define bas(SLOT, I) bas[BAS_SLOTS * (I) + (SLOT)]
@@ -29,57 +29,74 @@ template <int ANG> __inline__ __device__ constexpr double common_fac_sp() {
   }
 }
 
-template <typename T, unsigned int blockSize>
-__device__ void warpReduce(volatile T *sdata, unsigned int tid) {
-  if constexpr (blockSize >= 64)
-    sdata[tid] += sdata[tid + 32];
-  if constexpr (blockSize >= 32)
-    sdata[tid] += sdata[tid + 16];
-  if constexpr (blockSize >= 16)
-    sdata[tid] += sdata[tid + 8];
-  if constexpr (blockSize >= 8)
-    sdata[tid] += sdata[tid + 4];
-  if constexpr (blockSize >= 4)
-    sdata[tid] += sdata[tid + 2];
-  if constexpr (blockSize >= 2)
-    sdata[tid] += sdata[tid + 1];
+inline __device__ void gto_cartesian_s(double values[], double fx, double fy,
+                                       double fz) {
+  values[0] = 1;
 }
 
-template <typename T, unsigned int blockSize>
-__device__ void reduce_and_add(volatile T *shared_memory, T *output,
-                               unsigned int thread_id, T number_to_be_added) {
-  __syncthreads();
-  shared_memory[thread_id] = number_to_be_added;
-  __syncthreads();
-  if constexpr (blockSize >= 512) {
-    if (thread_id < 256)
-      shared_memory[thread_id] += shared_memory[thread_id + 256];
-    __syncthreads();
-  }
-  if constexpr (blockSize >= 256) {
-    if (thread_id < 128)
-      shared_memory[thread_id] += shared_memory[thread_id + 128];
-    __syncthreads();
-  }
-  if constexpr (blockSize >= 128) {
-    if (thread_id < 64)
-      shared_memory[thread_id] += shared_memory[thread_id + 64];
-    __syncthreads();
-  }
-  if (thread_id < 32)
-    warpReduce<T, blockSize>(shared_memory, thread_id);
-  if (thread_id == 0)
-    atomicAdd(output, shared_memory[0]);
+inline __device__ void gto_cartesian_p(double values[], double fx, double fy,
+                                       double fz) {
+  values[0] = fx;
+  values[1] = fy;
+  values[2] = fz;
+}
+
+inline __device__ void gto_cartesian_d(double values[], double fx, double fy,
+                                       double fz) {
+  values[0] = fx * fx;
+  values[1] = fx * fy;
+  values[2] = fx * fz;
+  values[3] = fy * fy;
+  values[4] = fy * fz;
+  values[5] = fz * fz;
+}
+
+inline __device__ void gto_cartesian_f(double values[], double fx, double fy,
+                                       double fz) {
+  values[0] = fx * fx * fx;
+  values[1] = fx * fx * fy;
+  values[2] = fx * fx * fz;
+  values[3] = fx * fy * fy;
+  values[4] = fx * fy * fz;
+  values[5] = fx * fz * fz;
+  values[6] = fy * fy * fy;
+  values[7] = fy * fy * fz;
+  values[8] = fy * fz * fz;
+  values[9] = fz * fz * fz;
+}
+
+inline __device__ void gto_cartesian_g(double values[], double fx, double fy,
+                                       double fz) {
+  values[0] = fx * fx * fx * fx;
+  values[1] = fx * fx * fx * fy;
+  values[2] = fx * fx * fx * fz;
+  values[3] = fx * fx * fy * fy;
+  values[4] = fx * fx * fy * fz;
+  values[5] = fx * fx * fz * fz;
+  values[6] = fx * fy * fy * fy;
+  values[7] = fx * fy * fy * fz;
+  values[8] = fx * fy * fz * fz;
+  values[9] = fx * fz * fz * fz;
+  values[10] = fy * fy * fy * fy;
+  values[11] = fy * fy * fy * fz;
+  values[12] = fy * fy * fz * fz;
+  values[13] = fy * fz * fz * fz;
+  values[14] = fz * fz * fz * fz;
 }
 
 template <int ANG>
-__device__ static void gto_cartesian(double *g, double fx, double fy,
+inline __device__ void gto_cartesian(double values[], double fx, double fy,
                                      double fz) {
-  for (int lx = ANG, i = 0; lx >= 0; lx--) {
-    for (int ly = ANG - lx; ly >= 0; ly--, i++) {
-      int lz = ANG - lx - ly;
-      g[i] = pow(fx, lx) * pow(fy, ly) * pow(fz, lz);
-    }
+  if constexpr (ANG == 0) {
+    gto_cartesian_s(values, fx, fy, fz);
+  } else if constexpr (ANG == 1) {
+    gto_cartesian_p(values, fx, fy, fz);
+  } else if constexpr (ANG == 2) {
+    gto_cartesian_d(values, fx, fy, fz);
+  } else if constexpr (ANG == 3) {
+    gto_cartesian_f(values, fx, fy, fz);
+  } else if constexpr (ANG == 4) {
+    gto_cartesian_g(values, fx, fy, fz);
   }
 }
 
@@ -242,9 +259,11 @@ __global__ void evaluate_density_kernel(
 
 #pragma unroll
           for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+#pragma unroll
             for (int i_function_index = 0;
                  i_function_index < n_i_cartesian_functions;
                  i_function_index++) {
+#pragma unroll
               for (int j_function_index = 0;
                    j_function_index < n_j_cartesian_functions;
                    j_function_index++) {
@@ -644,7 +663,6 @@ __global__ void evaluate_xc_kernel(
   double j_cartesian[n_j_cartesian_functions];
 
   constexpr int block_size = 64;
-  __shared__ double shared_memory[block_size];
 
 #pragma unroll
   for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -658,7 +676,6 @@ __global__ void evaluate_xc_kernel(
 
   const uint local_grid_index =
       blockIdx.x + gridDim.x * blockIdx.y + gridDim.x * gridDim.y * blockIdx.z;
-
   for (int i_pair_index = accumulated_n_pairs_per_local_grid[local_grid_index];
        i_pair_index < accumulated_n_pairs_per_local_grid[local_grid_index + 1];
        i_pair_index++) {
@@ -779,18 +796,29 @@ __global__ void evaluate_xc_kernel(
 
     double *fock_pointer = fock + image_index * fock_stride +
                            i_function * n_j_functions + j_function;
+    using BlockReduce =
+        cub::BlockReduce<double, 4, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY,
+                         4, 4>;
+    __shared__ typename BlockReduce::TempStorage shared_memory;
+
 #pragma unroll
     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+#pragma unroll
       for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
            i_function_index++) {
+#pragma unroll
         for (int j_function_index = 0;
-             j_function_index < n_j_cartesian_functions; j_function_index++) {
-          reduce_and_add<double, block_size>(
-              shared_memory, fock_pointer, thread_id,
+             j_function_index < n_j_cartesian_functions;
+             j_function_index++, __syncthreads()) {
+          const double value =
               xc_values[i_channel] * pair_prefactor *
-                  neighboring_gaussian_sum[i_function_index *
-                                               n_j_cartesian_functions +
-                                           j_function_index]);
+              neighboring_gaussian_sum[i_function_index *
+                                           n_j_cartesian_functions +
+                                       j_function_index];
+          const double reduced = BlockReduce(shared_memory).Sum(value);
+          if (thread_id == 0) {
+            atomicAdd(fock_pointer, reduced);
+          }
           fock_pointer++;
         }
         fock_pointer += n_j_functions - n_j_cartesian_functions;
@@ -894,8 +922,6 @@ __global__ void evaluate_diffused_xc_kernel_non_orthogonal(
   double j_cartesian[n_j_cartesian_functions];
 
   constexpr int block_size = 64;
-
-  __shared__ double shared_memory[block_size];
 
   const int image_index = image_indices[blockIdx.x];
   const double cutoff = cutoffs[blockIdx.x];
@@ -1015,7 +1041,7 @@ __global__ void evaluate_diffused_xc_kernel_non_orthogonal(
           c_residue -= mesh_c;
         } else if (c_residue < 0) {
           c_residue += mesh_c;
-        } 
+        }
 
         const double x = a * lattice_vectors[0] / mesh_a +
                          b * lattice_vectors[3] / mesh_b +
@@ -1059,20 +1085,26 @@ __global__ void evaluate_diffused_xc_kernel_non_orthogonal(
   }
   double *fock_pointer = fock + image_index * fock_stride +
                          i_function * n_j_functions + j_function;
+
+  using BlockReduce = cub::BlockReduce<double, block_size>;
+  __shared__ typename BlockReduce::TempStorage shared_memory;
 #pragma unroll
   for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+#pragma unroll
     for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
          i_function_index++) {
+#pragma unroll
       for (int j_function_index = 0; j_function_index < n_j_cartesian_functions;
            j_function_index++) {
-        reduce_and_add<double, block_size>(
-            shared_memory, fock_pointer, thread_id,
+        const double value =
             pair_prefactor *
-                neighboring_gaussian_sum[i_channel * n_i_cartesian_functions *
-                                             n_j_cartesian_functions +
-                                         i_function_index *
-                                             n_j_cartesian_functions +
-                                         j_function_index]);
+            neighboring_gaussian_sum
+                [i_channel * n_i_cartesian_functions * n_j_cartesian_functions +
+                 i_function_index * n_j_cartesian_functions + j_function_index];
+        const double reduced = BlockReduce(shared_memory).Sum(value);
+        if (thread_id == 0) {
+          atomicAdd(fock_pointer, reduced);
+        }
         fock_pointer++;
       }
       fock_pointer += n_j_functions - n_j_cartesian_functions;
