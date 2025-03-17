@@ -68,7 +68,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
     libgpbc.update_lattice_vectors(
         ctypes.cast(lattice_vectors.data.ptr, ctypes.c_void_p),
         ctypes.cast(reciprocal_lattice_vectors.data.ptr, ctypes.c_void_p),
-        ctypes.cast(reciprocal_norms.data.ptr, ctypes.c_void_p)
+        ctypes.cast(reciprocal_norms.data.ptr, ctypes.c_void_p),
     )
 
     tasks = getattr(mydf, "tasks", None)
@@ -342,6 +342,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         )
 
                     contributing_indices_for_pairs = []
+                    contributing_indices_per_pair = []
 
                     for i_pair in range(n_pairs):
                         contributing_local_grid = np.add.outer(
@@ -357,16 +358,12 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         contributing_indices_for_pairs.append(
                             contributing_local_grid.flatten()
                         )
+                        contributing_indices_per_pair.append(
+                            cp.full(len(contributing_indices_for_pairs), i_pair)
+                        )
 
-                    pair_indices = cp.concatenate(
-                        [
-                            cp.full(len(contributing_indices_for_pairs[i]), i)
-                            for i in range(n_pairs)
-                        ]
-                    )
-                    contributing_indices_for_pairs = cp.asarray(
-                        np.concatenate(contributing_indices_for_pairs)
-                    )
+                    pair_indices = cp.concatenate(contributing_indices_per_pair)
+                    contributing_indices_for_pairs = cp.concatenate(contributing_indices_for_pairs)
                     sort_indices = cp.argsort(contributing_indices_for_pairs)
                     contributing_indices_for_pairs = contributing_indices_for_pairs[
                         sort_indices
@@ -391,6 +388,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                             "contributing_area_begin": contributing_area_begin,
                             "non_trivial_pairs_at_local_points": non_trivial_pairs_at_local_points,
                             "accumulated_n_pairs_per_point": accumulated_n_pairs_per_point,
+                            "sorted_block_index": cp.arange(
+                                len(accumulated_n_pairs_per_point) - 1, dtype=cp.int32
+                            ),
                             "image_indices": image_indices,
                             "i_shells": cp.asarray(i_shells, dtype=cp.int32),
                             "j_shells": cp.asarray(j_shells, dtype=cp.int32),
@@ -488,6 +488,11 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
                 ctypes.c_void_p,
             ),
             ctypes.cast(
+                gaussians_per_angular_pair["sorted_block_index"].data.ptr,
+                ctypes.c_void_p,
+            ),
+            ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
+            ctypes.cast(
                 gaussians_per_angular_pair["image_indices"].data.ptr, ctypes.c_void_p
             ),
             ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p),
@@ -579,9 +584,7 @@ def evaluate_density_diffused_wrapper(pairs_info, dm_slice, ignore_imag=True):
     return density
 
 
-def evaluate_density_on_g_mesh(
-    mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0
-):
+def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0):
     dm_kpts = cp.asarray(dm_kpts, order="C")
     dms = fft_jk._format_dms(dm_kpts, kpts)
     n_channels, n_k_points, nao = dms.shape[:3]
@@ -762,6 +765,7 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, xc_type="LDA"):
             n_channels, n_k_points, n_i_functions, n_j_functions
         )
 
+
 def evaluate_xc_diffused_wrapper(pairs_info, xc_weights, xc_type="LDA"):
     c_driver = libgpbc.evaluate_diffused_xc_driver
     n_i_functions = len(pairs_info["coeff_in_dense"])
@@ -822,7 +826,6 @@ def evaluate_xc_diffused_wrapper(pairs_info, xc_weights, xc_type="LDA"):
         return cp.sum(fock, axis=1).reshape(
             n_channels, n_k_points, n_i_functions, n_j_functions
         )
-
 
 
 def convert_xc_on_g_mesh_to_fock(

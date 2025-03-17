@@ -29,7 +29,7 @@ cell = gto.M(
 )
 cell.exp_to_discard = 0.1
 
-cell = tools.super_cell(cell, [3, 3, 3])
+cell = tools.super_cell(cell, [1, 1, 1])
 cell.build()
 
 print("="*100)
