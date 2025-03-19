@@ -157,16 +157,13 @@ __launch_bounds__(512) __global__ void evaluate_density_kernel(
                             lattice_vectors[5] * b_index / mesh_b +
                             lattice_vectors[8] * c_index / mesh_c;
 
-  for (int i_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x];
-       i_pair_index < accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
+  for (int i_pair_index = accumulated_n_pairs_per_local_grid[block_index];
+       i_pair_index < accumulated_n_pairs_per_local_grid[block_index + 1];
        i_pair_index++) {
     const int i_pair = sorted_pairs_per_local_grid[i_pair_index];
     const int image_index = image_indices[i_pair];
-
-    const double cutoff = cutoffs[i_pair];
-    const double image_x = vectors_to_neighboring_images[image_index * 3];
-    const double image_y = vectors_to_neighboring_images[image_index * 3 + 1];
-    const double image_z = vectors_to_neighboring_images[image_index * 3 + 2];
+    const int image_index_i = image_index / n_images;
+    const int image_index_j = image_index % n_images;
 
     const int shell_pair_index = non_trivial_pairs[i_pair];
     const int i_shell_index = shell_pair_index / n_j_shells;
@@ -178,16 +175,16 @@ __launch_bounds__(512) __global__ void evaluate_density_kernel(
 
     const double i_exponent = env[bas(PTR_EXP, i_shell)];
     const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
-    const double i_x = env[i_coord_offset] - image_x;
-    const double i_y = env[i_coord_offset + 1] - image_y;
-    const double i_z = env[i_coord_offset + 2] - image_z;
+    const double i_x = env[i_coord_offset] + vectors_to_neighboring_images[image_index_i * 3];
+    const double i_y = env[i_coord_offset + 1] + vectors_to_neighboring_images[image_index_i * 3 + 1];
+    const double i_z = env[i_coord_offset + 2] + vectors_to_neighboring_images[image_index_i * 3 + 2];
     const double i_coeff = env[bas(PTR_COEFF, i_shell)];
 
     const double j_exponent = env[bas(PTR_EXP, j_shell)];
     const int j_coord_offset = atm(PTR_COORD, bas(ATOM_OF, j_shell));
-    const double j_x = env[j_coord_offset];
-    const double j_y = env[j_coord_offset + 1];
-    const double j_z = env[j_coord_offset + 2];
+    const double j_x = env[j_coord_offset] + vectors_to_neighboring_images[image_index_j * 3];
+    const double j_y = env[j_coord_offset + 1] + vectors_to_neighboring_images[image_index_j * 3 + 1];
+    const double j_z = env[j_coord_offset + 2] + vectors_to_neighboring_images[image_index_j * 3 + 2];
     const double j_coeff = env[bas(PTR_COEFF, j_shell)];
 
     const double ij_exponent = i_exponent + j_exponent;
@@ -206,7 +203,6 @@ __launch_bounds__(512) __global__ void evaluate_density_kernel(
              j_function_index < n_j_cartesian_functions; j_function_index++) {
           const double density_matrix_value =
               density_matrices[density_matrix_channel_stride * i_channel +
-                               image_index * density_matrix_stride +
                                (i_function + i_function_index) * n_j_functions +
                                j_function + j_function_index];
 
@@ -222,69 +218,30 @@ __launch_bounds__(512) __global__ void evaluate_density_kernel(
     const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
     const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
 
-    const double pair_a_fractional =
-        (position_x - pair_x) * reciprocal_lattice_vectors[0] +
-        (position_y - pair_y) * reciprocal_lattice_vectors[1] +
-        (position_z - pair_z) * reciprocal_lattice_vectors[2];
-    const double cutoff_a_fractional = reciprocal_norm[0] * cutoff;
-    const int lower_a_index = ceil(pair_a_fractional - cutoff_a_fractional);
-    const int upper_a_index = floor(pair_a_fractional + cutoff_a_fractional);
+    gto_cartesian<i_angular>(i_cartesian, position_x - i_x, position_y - i_y,
+                             position_z - i_z);
+    gto_cartesian<j_angular>(j_cartesian, position_x - j_x, position_y - j_y,
+                             position_z - j_z);
 
-    const double pair_b_fractional =
-        (position_x - pair_x) * reciprocal_lattice_vectors[3] +
-        (position_y - pair_y) * reciprocal_lattice_vectors[4] +
-        (position_z - pair_z) * reciprocal_lattice_vectors[5];
-    const double cutoff_b_fractional = reciprocal_norm[1] * cutoff;
-    const int lower_b_index = ceil(pair_b_fractional - cutoff_b_fractional);
-    const int upper_b_index = floor(pair_b_fractional + cutoff_b_fractional);
-
-    const double pair_c_fractional =
-        (position_x - pair_x) * reciprocal_lattice_vectors[6] +
-        (position_y - pair_y) * reciprocal_lattice_vectors[7] +
-        (position_z - pair_z) * reciprocal_lattice_vectors[8];
-    const double cutoff_c_fractional = reciprocal_norm[2] * cutoff;
-    const int lower_c_index = ceil(pair_c_fractional - cutoff_c_fractional);
-    const int upper_c_index = floor(pair_c_fractional + cutoff_c_fractional);
-
-    for (int a_cell = lower_a_index; a_cell <= upper_a_index; a_cell++) {
-      for (int b_cell = lower_b_index; b_cell <= upper_b_index; b_cell++) {
-        for (int c_cell = lower_c_index; c_cell <= upper_c_index; c_cell++) {
-          const double x = position_x - a_cell * lattice_vectors[0] -
-                           b_cell * lattice_vectors[3] -
-                           c_cell * lattice_vectors[6];
-          const double y = position_y - a_cell * lattice_vectors[1] -
-                           b_cell * lattice_vectors[4] -
-                           c_cell * lattice_vectors[7];
-          const double z = position_z - a_cell * lattice_vectors[2] -
-                           b_cell * lattice_vectors[5] -
-                           c_cell * lattice_vectors[8];
-          gto_cartesian<i_angular>(i_cartesian, x - i_x, y - i_y, z - i_z);
-          gto_cartesian<j_angular>(j_cartesian, x - j_x, y - j_y, z - j_z);
-
-          const double r_squared =
-              distance_squared(x - pair_x, y - pair_y, z - pair_z);
-          const double gaussian = exp(-ij_exponent * r_squared);
+    const double r_squared = distance_squared(
+        position_x - pair_x, position_y - pair_y, position_z - pair_z);
+    const double gaussian = exp(-ij_exponent * r_squared);
 
 #pragma unroll
-          for (int i_channel = 0; i_channel < n_channels; i_channel++) {
+    for (int i_channel = 0; i_channel < n_channels; i_channel++) {
 #pragma unroll
-            for (int i_function_index = 0;
-                 i_function_index < n_i_cartesian_functions;
-                 i_function_index++) {
+      for (int i_function_index = 0; i_function_index < n_i_cartesian_functions;
+           i_function_index++) {
 #pragma unroll
-              for (int j_function_index = 0;
-                   j_function_index < n_j_cartesian_functions;
-                   j_function_index++) {
-                density_value[i_channel] +=
-                    prefactor[i_channel * n_i_cartesian_functions *
-                                  n_j_cartesian_functions +
-                              i_function_index * n_j_cartesian_functions +
-                              j_function_index] *
-                    gaussian * i_cartesian[i_function_index] *
-                    j_cartesian[j_function_index];
-              }
-            }
-          }
+        for (int j_function_index = 0;
+             j_function_index < n_j_cartesian_functions; j_function_index++) {
+          density_value[i_channel] +=
+              prefactor[i_channel * n_i_cartesian_functions *
+                            n_j_cartesian_functions +
+                        i_function_index * n_j_cartesian_functions +
+                        j_function_index] *
+              gaussian * i_cartesian[i_function_index] *
+              j_cartesian[j_function_index];
         }
       }
     }

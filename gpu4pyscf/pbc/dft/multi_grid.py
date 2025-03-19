@@ -120,12 +120,14 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
             threshold_in_log = np.log(precision * multigrid.EXTRA_PREC)
             n_primitive_gtos_in_dense = multigrid._pgto_shells(subcell_in_dense_region)
             n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
-            vectors_to_neighboring_images = gto.eval_gto.get_lattice_Ls(grouped_cell)
+            vectors_to_neighboring_images = cp.asarray(
+                gto.eval_gto.get_lattice_Ls(grouped_cell)
+            )
+            n_images = len(vectors_to_neighboring_images)
             phase_diff_among_images = cp.exp(
                 1j
                 * cp.asarray(
-                    mydf.kpts.reshape(-1, 3).dot(vectors_to_neighboring_images.T)
-                )
+                    mydf.kpts.reshape(-1, 3)).dot(vectors_to_neighboring_images.T)
             )
             shell_to_ao_indices = gto.moleintor.make_loc(grouped_cell._bas, "cart")
             per_angular_pairs = []
@@ -137,6 +139,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF]
                     == i_angular
                 )[0]
+                n_i_shells = len(i_shells)
                 i_basis = grouped_cell._bas[i_shells]
 
                 i_exponents = cp.asarray(
@@ -163,37 +166,56 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         ]
                         == j_angular
                     )[0]
+                    n_j_shells = len(j_shells)
                     j_basis = grouped_cell._bas[j_shells]
 
-                    j_exponents = cp.asarray(
-                        grouped_cell._env[j_basis[:, multigrid.PTR_EXP]]
+                    j_exponents = cp.tile(
+                        cp.asarray(grouped_cell._env[j_basis[:, multigrid.PTR_EXP]]),
+                        n_images,
                     )
                     j_coord_pointers = np.array(
                         grouped_cell._atm[j_basis[:, multigrid.ATOM_OF], PTR_COORD]
                     )
-                    j_x = cp.asarray(grouped_cell._env[j_coord_pointers])
-                    j_y = cp.asarray(grouped_cell._env[j_coord_pointers + 1])
-                    j_z = cp.asarray(grouped_cell._env[j_coord_pointers + 2])
-                    j_coeffs = cp.asarray(
-                        grouped_cell._env[j_basis[:, multigrid.PTR_COEFF]]
+                    j_x = cp.add.outer(
+                        vectors_to_neighboring_images[:, 0],
+                        cp.asarray(grouped_cell._env[j_coord_pointers]),
+                    ).flatten()
+                    j_y = cp.add.outer(
+                        vectors_to_neighboring_images[:, 1],
+                        cp.asarray(grouped_cell._env[j_coord_pointers + 1]),
+                    ).flatten()
+                    j_z = cp.add.outer(
+                        vectors_to_neighboring_images[:, 2],
+                        cp.asarray(grouped_cell._env[j_coord_pointers + 2]),
+                    ).flatten()
+                    j_coeffs = cp.tile(
+                        cp.asarray(grouped_cell._env[j_basis[:, multigrid.PTR_COEFF]]),
+                        n_images,
                     ) * CINTcommon_fac_sp(j_angular)
                     pair_exponents = cp.add.outer(i_exponents, j_exponents).flatten()
                     multiplied = cp.outer(i_exponents, j_exponents).flatten()
                     exponent_in_prefactor = multiplied / pair_exponents
                     pair_coefficients = cp.outer(i_coeffs, j_coeffs).flatten()
+                    j_image_indices = cp.repeat(
+                        cp.arange(n_images, dtype=cp.int32), n_j_shells
+                    )
+                    gaussian_pair_indices = cp.add.outer(
+                        cp.arange(n_i_shells) * n_j_shells,
+                        cp.tile(cp.arange(n_j_shells), n_images),
+                    ).flatten()
 
-                    non_trivial_pairs_from_images = []
+                    shell_pair_indices_from_images = []
                     image_indices = []
                     cutoffs = []
-                    contributing_area_begin = []
-                    contributing_area_end = []
+                    contributing_block_begin = []
+                    contributing_block_end = []
 
                     for image_index, i_image in enumerate(
                         vectors_to_neighboring_images
                     ):
-                        shifted_i_x = i_x - i_image[0]
-                        shifted_i_y = i_y - i_image[1]
-                        shifted_i_z = i_z - i_image[2]
+                        shifted_i_x = i_x + i_image[0]
+                        shifted_i_y = i_y + i_image[1]
+                        shifted_i_z = i_z + i_image[2]
 
                         interatomic_distance = cp.square(
                             cp.subtract.outer(shifted_i_x, j_x)
@@ -251,154 +273,120 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         cutoffs_in_fractional = cp.outer(
                             reciprocal_norms, gaussian_cutoffs
                         )
-                        begin = cp.ceil(
-                            (centers_in_fractional - cutoffs_in_fractional).T * mesh
+                        begin = cp.asarray(
+                            cp.ceil(
+                                (centers_in_fractional - cutoffs_in_fractional).T * mesh
+                            ),
+                            dtype=cp.int32,
                         )
-                        end = cp.floor(
-                            (centers_in_fractional + cutoffs_in_fractional).T * mesh
+                        end = cp.asarray(
+                            cp.floor(
+                                (centers_in_fractional + cutoffs_in_fractional).T * mesh
+                            ),
+                            dtype=cp.int32,
                         )
 
                         broad_enough_pairs = cp.where(cp.all(begin <= end, axis=1))[0]
-                        non_trivial_pairs = non_trivial_pairs[broad_enough_pairs]
-                        begin = begin[broad_enough_pairs]
-                        end = end[broad_enough_pairs]
-                        gaussian_cutoffs = gaussian_cutoffs[broad_enough_pairs]
+                        in_range_pairs = broad_enough_pairs[
+                            cp.where(cp.all(begin[broad_enough_pairs] < mesh, axis=1))[
+                                0
+                            ]
+                        ]
+                        in_range_pairs = in_range_pairs[
+                            cp.where(cp.all(end[in_range_pairs] >= 0, axis=1))[0]
+                        ]
+                        non_trivial_pairs = non_trivial_pairs[in_range_pairs]
+                        begin = begin[in_range_pairs]
+                        begin[begin < 0] = 0
+                        begin //= 4
+                        end = end[in_range_pairs]
+                        end -= mesh
+                        end[end >= 0] = 0
+                        end += mesh
+                        end //= 4
+                        gaussian_cutoffs = gaussian_cutoffs[in_range_pairs]
 
-                        contributing_area_begin.append(
-                            begin - blocking_sizes_on_gpu + 1
-                        )
-                        contributing_area_end.append(end)
+                        contributing_block_begin.append(begin)
+                        contributing_block_end.append(end)
                         cutoffs.append(gaussian_cutoffs)
-                        non_trivial_pairs_from_images.append(non_trivial_pairs)
-                        image_indices.append(
-                            cp.full(len(non_trivial_pairs), image_index)
+                        shell_pair_indices_from_images.append(
+                            gaussian_pair_indices[non_trivial_pairs]
                         )
+                        tiled_image_indices = (
+                            cp.tile(j_image_indices, n_i_shells)
+                            + n_images * image_index
+                        )
+                        image_indices.append(tiled_image_indices[non_trivial_pairs])
 
-                    non_trivial_pairs_from_images = cp.asarray(
-                        cp.concatenate(non_trivial_pairs_from_images), dtype=cp.int32
+                    shell_pair_indices_from_images = cp.asarray(
+                        cp.concatenate(shell_pair_indices_from_images), dtype=cp.int32
                     )
                     cutoffs = cp.concatenate(cutoffs)
-                    image_indices = cp.asarray(
-                        cp.concatenate(image_indices), dtype=cp.int32
+                    image_indices = cp.concatenate(image_indices)
+                    contributing_block_begin = cp.concatenate(contributing_block_begin)
+                    contributing_block_end = cp.concatenate(contributing_block_end)
+                    contributing_block_ranges = (
+                        contributing_block_end - contributing_block_begin
                     )
-                    contributing_area_begin = cp.asarray(
-                        cp.concatenate(contributing_area_begin), dtype=cp.int32
-                    ).T
-                    contributing_area_end = cp.asarray(
-                        cp.concatenate(contributing_area_end), dtype=cp.int32
-                    ).T
-                    bin = cp.array([8, 8, 8])
-                    binned_ranges = (
-                        cp.asarray(
-                            cp.ceil(
-                                (contributing_area_end - contributing_area_begin).T
-                                / bin
-                            ),
-                            dtype=cp.int32,
-                        )
-                        * bin
-                    )
-                    binned_ranges = binned_ranges.get()
-                    indices = []
-                    unique = np.unique(binned_ranges, axis=0)
-                    for unique_range in unique:
-                        indices.append(
-                            cp.asarray(
-                                np.where(np.all(binned_ranges == unique_range, axis=1))[
-                                    0
-                                ],
-                                dtype=cp.int32,
-                            )
-                        )
-                    n_pairs = len(non_trivial_pairs_from_images)
-                    contributing_indices = []
-                    for xyz_index in range(3):
-                        local_grid_size = granularized_mesh_size[xyz_index]
-                        begin_translation = cp.asarray(
-                            cp.ceil(
-                                cp.subtract.outer(
-                                    cp.arange(local_grid_size)
-                                    * blocking_sizes[xyz_index],
-                                    contributing_area_end[xyz_index],
-                                )
-                                / mesh[xyz_index]
-                            ),
-                            dtype=cp.int32,
-                        )
-                        end_translation = cp.asarray(
-                            cp.floor(
-                                cp.subtract.outer(
-                                    cp.arange(local_grid_size)
-                                    * blocking_sizes[xyz_index],
-                                    contributing_area_begin[xyz_index],
-                                )
-                                / mesh[xyz_index]
-                            ),
-                            dtype=cp.int32,
-                        )
-                        contributing = (begin_translation <= end_translation).T.get()
-                        contributing_indices.append(
-                            list(map(lambda bools: np.where(bools)[0], contributing))
-                        )
+                    n_contributing_blocks_per_pair = cp.prod(contributing_block_ranges, axis=1)
+                    sort_index = cp.argsort(-n_contributing_blocks_per_pair)
 
+                    shell_pair_indices_from_images = shell_pair_indices_from_images[sort_index]
+                    image_indices = image_indices[sort_index]
+                    contributing_block_begin = contributing_block_begin[sort_index]
+                    contributing_block_end = contributing_block_end[sort_index]
                     contributing_indices_for_pairs = []
                     contributing_indices_per_pair = []
-
+                    n_pairs = len(shell_pair_indices_from_images)
+                    contributing_block_begin_cpu = contributing_block_begin.get()
+                    contributing_block_end_cpu = contributing_block_end.get()
                     for i_pair in range(n_pairs):
+                        begin = contributing_block_begin_cpu[i_pair]
+                        end = contributing_block_end_cpu[i_pair]
+                        ranges = end - begin + 1
                         contributing_local_grid = np.add.outer(
-                            contributing_indices[0][i_pair]
+                            np.linspace(begin[0], end[0], ranges[0], dtype=np.int32)
                             * granularized_mesh_size[1]
                             * granularized_mesh_size[2],
                             np.add.outer(
-                                contributing_indices[1][i_pair]
+                                np.linspace(begin[1], end[1], ranges[1], dtype=np.int32)
                                 * granularized_mesh_size[2],
-                                contributing_indices[2][i_pair],
+                                np.linspace(begin[2], end[2], ranges[2], dtype=np.int32),
                             ),
                         )
                         contributing_indices_for_pairs.append(
                             contributing_local_grid.flatten()
                         )
                         contributing_indices_per_pair.append(
-                            cp.full(len(contributing_indices_for_pairs), i_pair)
+                            np.full(len(contributing_local_grid.flatten()), i_pair, dtype=np.int32)
                         )
 
-                    pair_indices = cp.concatenate(contributing_indices_per_pair)
-                    contributing_indices_for_pairs = cp.concatenate(contributing_indices_for_pairs)
-                    sort_indices = cp.argsort(contributing_indices_for_pairs)
-                    contributing_indices_for_pairs = contributing_indices_for_pairs[
-                        sort_indices
-                    ]
-                    non_trivial_pairs_at_local_points = cp.asarray(
-                        pair_indices[sort_indices], dtype=cp.int32
-                    )
-                    effective_local_grid_points, counts = np.unique(
-                        contributing_indices_for_pairs.get(), return_counts=True
-                    )
-                    n_pairs_per_point = cp.zeros(cp.prod(granularized_mesh_size) + 1)
-                    n_pairs_per_point[effective_local_grid_points + 1] = counts
-                    accumulated_n_pairs_per_point = cp.asarray(
-                        cp.ufunc.accumulate(cp.add, n_pairs_per_point), dtype=cp.int32
-                    )
+                    contributing_indices_for_pairs = np.concatenate(contributing_indices_for_pairs)
+                    sort_indices = np.argsort(contributing_indices_for_pairs)
+                    gaussian_pair_indices = np.concatenate(contributing_indices_per_pair)[sort_indices]
+                    contributing_indices_for_pairs = contributing_indices_for_pairs[sort_indices]
+                    contributing_blocks, counts = np.unique(contributing_indices_for_pairs, return_counts=True)
+                    count_sort_index = np.argsort(-counts)
+                    counts_per_block = np.zeros(np.prod(granularized_mesh_size) + 1, dtype=np.int32)
+                    counts_per_block[contributing_blocks + 1] = counts
+                    accumulated_counts = np.cumsum(counts_per_block)
+                    sorted_contributing_blocks = contributing_blocks[count_sort_index]
 
                     per_angular_pairs.append(
                         {
                             "angular": (i_angular, j_angular),
-                            "non_trivial_pairs": non_trivial_pairs_from_images,
+                            "non_trivial_pairs": shell_pair_indices_from_images,
                             "cutoffs": cutoffs,
-                            "contributing_area_begin": contributing_area_begin,
-                            "non_trivial_pairs_at_local_points": non_trivial_pairs_at_local_points,
-                            "accumulated_n_pairs_per_point": accumulated_n_pairs_per_point,
-                            "sorted_block_index": cp.arange(
-                                len(accumulated_n_pairs_per_point) - 1, dtype=cp.int32
-                            ),
+                            "contributing_area_begin": contributing_block_begin,
+                            "non_trivial_pairs_at_local_points": cp.asarray(gaussian_pair_indices, dtype=cp.int32),
+                            "accumulated_n_pairs_per_point": cp.asarray(accumulated_counts, dtype=cp.int32),
+                            "sorted_block_index": cp.asarray(sorted_contributing_blocks, dtype=cp.int32),
                             "image_indices": image_indices,
                             "i_shells": cp.asarray(i_shells, dtype=cp.int32),
                             "j_shells": cp.asarray(j_shells, dtype=cp.int32),
                             "shell_to_ao_indices": cp.asarray(
                                 shell_to_ao_indices, dtype=cp.int32
-                            ),
-                            "block_sizes": unique,
-                            "indices_with_same_block": indices,
+                            )
                         }
                     )
 
@@ -406,7 +394,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                 {
                     "per_angular_pairs": per_angular_pairs,
                     "neighboring_images": cp.asarray(vectors_to_neighboring_images),
-                    "phase_diff_among_images": phase_diff_among_images,
                     "grouped_cell": grouped_cell,
                     "mesh": grids_dense.mesh,
                     "ao_indices_in_dense": cp.asarray(grids_dense.ao_idx),
@@ -423,6 +410,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     "bas": cp.asarray(grouped_cell._bas, dtype=cp.int32),
                     "env": cp.asarray(grouped_cell._env),
                     "blocking_sizes": blocking_sizes,
+                    "phase_diff_among_images": phase_diff_among_images
                 }
             )
 
@@ -1101,6 +1089,12 @@ def nr_rks(
     density_on_G_mesh = evaluate_density_on_g_mesh(
         mydf, dm_kpts, hermi, kpts, derivative_order
     )
+    cpu_df = multigrid.MultiGridFFTDF(cell, kpts=kpts)
+    density_on_G_mesh_cpu = multigrid._eval_rhoG(cpu_df, dm_kpts.get(), hermi, kpts, derivative_order)
+    print("diff: ", cp.max(cp.abs(density_on_G_mesh - cp.asarray(density_on_G_mesh_cpu))))
+    print("density_on_G_mesh: ", cp.max(cp.abs(density_on_G_mesh)))
+    print("density_on_G_mesh_cpu: ", cp.max(cp.abs(cp.asarray(density_on_G_mesh_cpu))))
+    assert 0
     t0 = log.timer("density", *t0)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum(
