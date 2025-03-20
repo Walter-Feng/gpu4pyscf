@@ -732,6 +732,11 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, xc_type="LDA"):
                 ctypes.c_void_p,
             ),
             ctypes.cast(
+                gaussians_per_angular_pair["sorted_block_index"].data.ptr,
+                ctypes.c_void_p,
+            ),
+            ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
+            ctypes.cast(
                 gaussians_per_angular_pair["image_indices"].data.ptr, ctypes.c_void_p
             ),
             ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p),
@@ -1089,12 +1094,7 @@ def nr_rks(
     density_on_G_mesh = evaluate_density_on_g_mesh(
         mydf, dm_kpts, hermi, kpts, derivative_order
     )
-    cpu_df = multigrid.MultiGridFFTDF(cell, kpts=kpts)
-    density_on_G_mesh_cpu = multigrid._eval_rhoG(cpu_df, dm_kpts.get(), hermi, kpts, derivative_order)
-    print("diff: ", cp.max(cp.abs(density_on_G_mesh - cp.asarray(density_on_G_mesh_cpu))))
-    print("density_on_G_mesh: ", cp.max(cp.abs(density_on_G_mesh)))
-    print("density_on_G_mesh_cpu: ", cp.max(cp.abs(cp.asarray(density_on_G_mesh_cpu))))
-    assert 0
+
     t0 = log.timer("density", *t0)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum(
