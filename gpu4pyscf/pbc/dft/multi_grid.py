@@ -126,8 +126,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
             n_images = len(vectors_to_neighboring_images)
             phase_diff_among_images = cp.exp(
                 1j
-                * cp.asarray(
-                    mydf.kpts.reshape(-1, 3)).dot(vectors_to_neighboring_images.T)
+                * cp.asarray(mydf.kpts.reshape(-1, 3)).dot(
+                    vectors_to_neighboring_images.T
+                )
             )
             shell_to_ao_indices = gto.moleintor.make_loc(grouped_cell._bas, "cart")
             per_angular_pairs = []
@@ -298,12 +299,12 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         non_trivial_pairs = non_trivial_pairs[in_range_pairs]
                         begin = begin[in_range_pairs]
                         begin[begin < 0] = 0
-                        begin //= 4
+                        begin //= blocking_sizes_on_gpu
                         end = end[in_range_pairs]
                         end -= mesh
                         end[end >= 0] = 0
                         end += mesh
-                        end //= 4
+                        end //= blocking_sizes_on_gpu
                         gaussian_cutoffs = gaussian_cutoffs[in_range_pairs]
 
                         contributing_block_begin.append(begin)
@@ -328,10 +329,14 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     contributing_block_ranges = (
                         contributing_block_end - contributing_block_begin
                     )
-                    n_contributing_blocks_per_pair = cp.prod(contributing_block_ranges, axis=1)
+                    n_contributing_blocks_per_pair = cp.prod(
+                        contributing_block_ranges, axis=1
+                    )
                     sort_index = cp.argsort(-n_contributing_blocks_per_pair)
 
-                    shell_pair_indices_from_images = shell_pair_indices_from_images[sort_index]
+                    shell_pair_indices_from_images = shell_pair_indices_from_images[
+                        sort_index
+                    ]
                     image_indices = image_indices[sort_index]
                     contributing_block_begin = contributing_block_begin[sort_index]
                     contributing_block_end = contributing_block_end[sort_index]
@@ -351,23 +356,39 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                             np.add.outer(
                                 np.linspace(begin[1], end[1], ranges[1], dtype=np.int32)
                                 * granularized_mesh_size[2],
-                                np.linspace(begin[2], end[2], ranges[2], dtype=np.int32),
+                                np.linspace(
+                                    begin[2], end[2], ranges[2], dtype=np.int32
+                                ),
                             ),
                         )
                         contributing_indices_for_pairs.append(
                             contributing_local_grid.flatten()
                         )
                         contributing_indices_per_pair.append(
-                            np.full(len(contributing_local_grid.flatten()), i_pair, dtype=np.int32)
+                            np.full(
+                                len(contributing_local_grid.flatten()),
+                                i_pair,
+                                dtype=np.int32,
+                            )
                         )
 
-                    contributing_indices_for_pairs = np.concatenate(contributing_indices_for_pairs)
+                    contributing_indices_for_pairs = np.concatenate(
+                        contributing_indices_for_pairs
+                    )
                     sort_indices = np.argsort(contributing_indices_for_pairs)
-                    gaussian_pair_indices = np.concatenate(contributing_indices_per_pair)[sort_indices]
-                    contributing_indices_for_pairs = contributing_indices_for_pairs[sort_indices]
-                    contributing_blocks, counts = np.unique(contributing_indices_for_pairs, return_counts=True)
+                    gaussian_pair_indices = np.concatenate(
+                        contributing_indices_per_pair
+                    )[sort_indices]
+                    contributing_indices_for_pairs = contributing_indices_for_pairs[
+                        sort_indices
+                    ]
+                    contributing_blocks, counts = np.unique(
+                        contributing_indices_for_pairs, return_counts=True
+                    )
                     count_sort_index = np.argsort(-counts)
-                    counts_per_block = np.zeros(np.prod(granularized_mesh_size) + 1, dtype=np.int32)
+                    counts_per_block = np.zeros(
+                        np.prod(granularized_mesh_size) + 1, dtype=np.int32
+                    )
                     counts_per_block[contributing_blocks + 1] = counts
                     accumulated_counts = np.cumsum(counts_per_block)
                     sorted_contributing_blocks = contributing_blocks[count_sort_index]
@@ -378,15 +399,21 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                             "non_trivial_pairs": shell_pair_indices_from_images,
                             "cutoffs": cutoffs,
                             "contributing_area_begin": contributing_block_begin,
-                            "non_trivial_pairs_at_local_points": cp.asarray(gaussian_pair_indices, dtype=cp.int32),
-                            "accumulated_n_pairs_per_point": cp.asarray(accumulated_counts, dtype=cp.int32),
-                            "sorted_block_index": cp.asarray(sorted_contributing_blocks, dtype=cp.int32),
+                            "non_trivial_pairs_at_local_points": cp.asarray(
+                                gaussian_pair_indices, dtype=cp.int32
+                            ),
+                            "accumulated_n_pairs_per_point": cp.asarray(
+                                accumulated_counts, dtype=cp.int32
+                            ),
+                            "sorted_block_index": cp.asarray(
+                                sorted_contributing_blocks, dtype=cp.int32
+                            ),
                             "image_indices": image_indices,
                             "i_shells": cp.asarray(i_shells, dtype=cp.int32),
                             "j_shells": cp.asarray(j_shells, dtype=cp.int32),
                             "shell_to_ao_indices": cp.asarray(
                                 shell_to_ao_indices, dtype=cp.int32
-                            )
+                            ),
                         }
                     )
 
@@ -410,7 +437,8 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     "bas": cp.asarray(grouped_cell._bas, dtype=cp.int32),
                     "env": cp.asarray(grouped_cell._env),
                     "blocking_sizes": blocking_sizes,
-                    "phase_diff_among_images": phase_diff_among_images
+                    "phase_diff_among_images": phase_diff_among_images,
+                    "dxyz_dabc": cp.asarray((lattice_vectors.T / mesh).T, order="C"),
                 }
             )
 
@@ -438,6 +466,7 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
 
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
+
         c_driver(
             ctypes.cast(density.data.ptr, ctypes.c_void_p),
             ctypes.cast(
@@ -494,83 +523,6 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
         )
 
     return density
-
-
-def evaluate_density_diffused_wrapper(pairs_info, dm_slice, ignore_imag=True):
-    c_driver = libgpbc.evaluate_diffused_density_driver
-    n_k_points, n_images = pairs_info["phase_diff_among_images"].shape
-    if n_k_points == 0:
-        density_matrix_with_translation = cp.repeat(dm_slice, n_images, axis=1)
-    else:
-        density_matrix_with_translation = cp.einsum(
-            "kt, ikpq->itpq", pairs_info["phase_diff_among_images"], dm_slice
-        )
-
-    n_channels, _, n_i_functions, n_j_functions = density_matrix_with_translation.shape
-
-    if ignore_imag is False:
-        raise NotImplementedError
-    density_matrix_with_translation_real_part = (
-        density_matrix_with_translation.real.flatten()
-    )
-    density = cp.zeros((n_channels,) + tuple(pairs_info["mesh"]))
-
-    for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
-        for blocking_size, corresponding_indices in zip(
-            gaussians_per_angular_pair["block_sizes"],
-            gaussians_per_angular_pair["indices_with_same_block"],
-        ):
-            selected_pairs = gaussians_per_angular_pair["non_trivial_pairs"][
-                corresponding_indices
-            ]
-            selected_image_indices = gaussians_per_angular_pair["image_indices"][
-                selected_pairs
-            ]
-            selected_pairs_area_begin = gaussians_per_angular_pair[
-                "contributing_area_begin"
-            ][:, selected_pairs]
-
-            assert selected_pairs.dtype == cp.int32
-            assert selected_image_indices.dtype == cp.int32
-            assert selected_pairs_area_begin.dtype == cp.int32
-
-            (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
-            c_driver(
-                ctypes.cast(density.data.ptr, ctypes.c_void_p),
-                ctypes.cast(
-                    density_matrix_with_translation_real_part.data.ptr, ctypes.c_void_p
-                ),
-                ctypes.c_int(i_angular),
-                ctypes.c_int(j_angular),
-                ctypes.cast(selected_pairs.data.ptr, ctypes.c_void_p),
-                ctypes.c_int(len(selected_pairs)),
-                ctypes.cast(
-                    gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p
-                ),
-                ctypes.cast(
-                    gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p
-                ),
-                ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
-                ctypes.cast(
-                    gaussians_per_angular_pair["shell_to_ao_indices"].data.ptr,
-                    ctypes.c_void_p,
-                ),
-                ctypes.c_int(n_i_functions),
-                ctypes.c_int(n_j_functions),
-                ctypes.cast(selected_pairs_area_begin.data.ptr, ctypes.c_void_p),
-                ctypes.cast(selected_image_indices.data.ptr, ctypes.c_void_p),
-                ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p),
-                ctypes.c_int(n_images),
-                (ctypes.c_int * 3)(*pairs_info["mesh"]),
-                ctypes.cast(pairs_info["atm"].data.ptr, ctypes.c_void_p),
-                ctypes.cast(pairs_info["bas"].data.ptr, ctypes.c_void_p),
-                ctypes.cast(pairs_info["env"].data.ptr, ctypes.c_void_p),
-                (ctypes.c_int * 3)(*blocking_size),
-                ctypes.c_int(n_channels),
-            )
-
-    return density
-
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0):
     dm_kpts = cp.asarray(dm_kpts, order="C")
@@ -661,6 +613,10 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
                     "nkpj, qj -> nkpq",
                     coeff_sandwiched_density_matrix,
                     pairs["concatenated_coeff"],
+                )
+
+                libgpbc.update_dxyz_dabc(
+                    ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
                 )
 
                 density = evaluate_density_wrapper(
@@ -758,69 +714,6 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, xc_type="LDA"):
             n_channels, n_k_points, n_i_functions, n_j_functions
         )
 
-
-def evaluate_xc_diffused_wrapper(pairs_info, xc_weights, xc_type="LDA"):
-    c_driver = libgpbc.evaluate_diffused_xc_driver
-    n_i_functions = len(pairs_info["coeff_in_dense"])
-    n_j_functions = len(pairs_info["concatenated_coeff"])
-
-    n_channels = xc_weights.shape[0]
-    n_k_points, n_images = pairs_info["phase_diff_among_images"].shape
-
-    if xc_type != "LDA":
-        raise NotImplementedError
-
-    fock = cp.zeros((n_channels, n_images, n_i_functions, n_j_functions))
-    for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
-        (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
-        c_driver(
-            ctypes.cast(fock.data.ptr, ctypes.c_void_p),
-            ctypes.cast(xc_weights.data.ptr, ctypes.c_void_p),
-            ctypes.c_int(i_angular),
-            ctypes.c_int(j_angular),
-            ctypes.cast(
-                gaussians_per_angular_pair["non_trivial_pairs"].data.ptr,
-                ctypes.c_void_p,
-            ),
-            ctypes.cast(
-                gaussians_per_angular_pair["cutoffs"].data.ptr, ctypes.c_void_p
-            ),
-            ctypes.c_int(len(gaussians_per_angular_pair["non_trivial_pairs"])),
-            ctypes.cast(
-                gaussians_per_angular_pair["i_shells"].data.ptr, ctypes.c_void_p
-            ),
-            ctypes.cast(
-                gaussians_per_angular_pair["j_shells"].data.ptr, ctypes.c_void_p
-            ),
-            ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
-            ctypes.cast(
-                gaussians_per_angular_pair["shell_to_ao_indices"].data.ptr,
-                ctypes.c_void_p,
-            ),
-            ctypes.c_int(n_i_functions),
-            ctypes.c_int(n_j_functions),
-            ctypes.cast(
-                gaussians_per_angular_pair["image_indices"].data.ptr, ctypes.c_void_p
-            ),
-            ctypes.cast(pairs_info["neighboring_images"].data.ptr, ctypes.c_void_p),
-            ctypes.c_int(n_images),
-            (ctypes.c_int * 3)(*pairs_info["mesh"]),
-            ctypes.cast(pairs_info["atm"].data.ptr, ctypes.c_void_p),
-            ctypes.cast(pairs_info["bas"].data.ptr, ctypes.c_void_p),
-            ctypes.cast(pairs_info["env"].data.ptr, ctypes.c_void_p),
-            ctypes.c_int(n_channels),
-        )
-
-    if n_k_points > 1:
-        return cp.einsum(
-            "kt, ntij -> nkij", pairs_info["phase_diff_among_images"], fock
-        )
-    else:
-        return cp.sum(fock, axis=1).reshape(
-            n_channels, n_k_points, n_i_functions, n_j_functions
-        )
-
-
 def convert_xc_on_g_mesh_to_fock(
     mydf, xc_on_g_mesh, hermi=1, kpts=np.zeros((1, 3)), verbose=None
 ):
@@ -881,7 +774,9 @@ def convert_xc_on_g_mesh_to_fock(
 
         else:
             n_ao_in_sparse = len(pairs["ao_indices_in_dense"])
-
+            libgpbc.update_dxyz_dabc(
+                ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
+            )
             fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
             # fock_slice = evaluate_xc_diffused_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
 
@@ -1188,6 +1083,6 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
 
 
 def fftdf(mf):
-    mf.with_df, old_df = FFTDF(mf.cell), mf.with_df
+    mf.with_df, old_df = FFTDF(mf.cell, kpts=mf.kpts), mf.with_df
     mf.with_df.__dict__.update(old_df.__dict__)
     return mf
