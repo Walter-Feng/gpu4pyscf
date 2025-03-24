@@ -727,8 +727,6 @@ def convert_xc_on_g_mesh_to_fock(
     nao = cell.nao_nr()
     xc_on_g_mesh = xc_on_g_mesh.reshape(-1, *mydf.mesh)
     n_channels = xc_on_g_mesh.shape[0]
-    log = logger.new_logger(mydf, mydf.verbose)
-    t0 = log.init_timer()
     at_gamma_point = multigrid.gamma_point(kpts)
 
     if hermi != 1:
@@ -745,22 +743,19 @@ def convert_xc_on_g_mesh_to_fock(
     ):
         mesh = pairs["mesh"]
         n_grid_points = np.prod(mesh)
-        
+
         fft_grids = map(
             lambda mesh_points: np.fft.fftfreq(mesh_points, 1.0 / mesh_points).astype(
                 np.int32
             ),
             mesh,
         )
-        t0 = log.timer("fft_grids_construction", *t0)
         interpolated_xc_on_g_mesh = xc_on_g_mesh[
             cp.ix_(cp.arange(xc_on_g_mesh.shape[0]), *fft_grids)
         ].reshape(n_channels, n_grid_points)
-        t0 = log.timer("interpolation", *t0)
         reordered_xc_on_real_mesh = tools.ifft(interpolated_xc_on_g_mesh, mesh).reshape(
             n_channels, n_grid_points
         )
-        t0 = log.timer("ifft", *t0)
         # order='C' forces a copy. otherwise the array is not contiguous
         reordered_xc_on_real_mesh = cp.asarray(
             reordered_xc_on_real_mesh.real, order="C"
@@ -768,32 +763,28 @@ def convert_xc_on_g_mesh_to_fock(
 
         if grids_sparse is None:
             ao_index_in_dense = grids_dense.ao_idx
-            for ao_on_sliced_grid_in_dense, p0, p1 in mydf.aoR_loop(grids_dense, kpts):
-                ao_values = ao_on_sliced_grid_in_dense[0]
-                for k in range(n_k_points):
-                    for i in range(n_channels):
-                        xc_scaled_ao = numint._scale_ao(
-                            ao_values[k], reordered_xc_on_real_mesh[i, p0:p1]
-                        )
-                        xc_sub_block = cp.dot(ao_values[k].conj().T, xc_scaled_ao)
-                        fock[
-                            i, k, ao_index_in_dense[:, None], ao_index_in_dense
-                        ] += xc_sub_block
-                ao_values = ao_on_sliced_grid_in_dense = None
-                t0 = log.timer("ao_on_sliced_grid_in_dense", *t0)
+            for k in range(n_k_points):
+                for i in range(n_channels):
+                    xc_sub_block = cp.einsum(
+                        "gi, g, gj -> ij",
+                        pairs["ao_values"][k].conj(),
+                        reordered_xc_on_real_mesh[i],
+                        pairs["ao_values"][k],
+                    )
+                    fock[
+                        i, k, ao_index_in_dense[:, None], ao_index_in_dense
+                    ] += xc_sub_block
+            ao_values = ao_on_sliced_grid_in_dense = None
         else:
             n_ao_in_sparse = len(pairs["ao_indices_in_dense"])
             libgpbc.update_dxyz_dabc(
                 ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
             )
             fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
-            t0 = log.timer("evaluate_xc_wrapper", *t0)
             fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_dense"])
-            t0 = log.timer("einsum 1", *t0)
             fock_slice = cp.einsum(
                 "nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"]
             )
-            t0 = log.timer("einsum 2", *t0)
 
             fock[
                 :,
@@ -818,7 +809,6 @@ def convert_xc_on_g_mesh_to_fock(
                 )
             else:
                 raise NotImplementedError
-            t0 = log.timer("addition", *t0)
     return fock
 
 
