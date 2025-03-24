@@ -778,16 +778,21 @@ def convert_xc_on_g_mesh_to_fock(
                 ao_values = ao_on_sliced_grid_in_dense = None
 
         else:
+            log = logger.new_logger(cell)
             n_ao_in_sparse = len(pairs["ao_indices_in_dense"])
             libgpbc.update_dxyz_dabc(
                 ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
             )
+            t0 = log.init_timer()
             fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
+            t1 = log.timer_debug1("evaluate_xc_wrapper", *t0)
 
             fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_dense"])
             fock_slice = cp.einsum(
                 "nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"]
             )
+
+            t2 = log.timer_debug1("einsum", *t1)
 
             fock[
                 :,
@@ -801,6 +806,7 @@ def convert_xc_on_g_mesh_to_fock(
                 pairs["ao_indices_in_dense"][:, None],
                 pairs["ao_indices_in_sparse"],
             ] += fock_slice[:, :, :, n_ao_in_sparse:]
+            t3 = log.timer_debug1("addition", *t2)
             if hermi == 1:
                 fock[
                     :,
@@ -812,7 +818,7 @@ def convert_xc_on_g_mesh_to_fock(
                 )
             else:
                 raise NotImplementedError
-
+            t4 = log.timer_debug1("transpose", *t3)
     return fock
 
 
