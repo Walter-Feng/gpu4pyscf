@@ -3,6 +3,7 @@ import gpu4pyscf.pbc.df.fft_jk as fft_jk
 from gpu4pyscf.lib import logger
 from gpu4pyscf.pbc.dft import numint
 from gpu4pyscf.pbc import tools
+import gpu4pyscf.pbc.dft.multigrid as multigrid_qiming
 import gpu4pyscf.lib.cupy_helper as cupy_helper
 
 import pyscf.pbc.gto as gto
@@ -57,8 +58,9 @@ def gaussian_summation_cutoff(exponents, angular, prefactors, threshold_in_log):
 
 
 def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4])):
+    log = logger.new_logger(mydf, mydf.verbose)
+    t0 = log.init_timer()
     blocking_sizes_on_gpu = cp.asarray(blocking_sizes)
-    log = logger.Logger(mydf.stdout, mydf.verbose)
     cell = mydf.cell
     lattice_vectors = cp.asarray(cell.lattice_vectors())
     reciprocal_lattice_vectors = cp.asarray(cp.linalg.inv(lattice_vectors).T, order="C")
@@ -443,6 +445,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
             )
 
     mydf.sorted_gaussian_pairs = pairs
+    t0 = log.timer("sort_gaussian_pairs", *t0)
 
 
 def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
@@ -523,6 +526,7 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
         )
 
     return density
+
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), deriv=0):
     dm_kpts = cp.asarray(dm_kpts, order="C")
@@ -714,6 +718,7 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, xc_type="LDA"):
             n_channels, n_k_points, n_i_functions, n_j_functions
         )
 
+
 def convert_xc_on_g_mesh_to_fock(
     mydf, xc_on_g_mesh, hermi=1, kpts=np.zeros((1, 3)), verbose=None
 ):
@@ -778,9 +783,7 @@ def convert_xc_on_g_mesh_to_fock(
                 ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
             )
             fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
-            # fock_slice = evaluate_xc_diffused_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
 
-            # print("diff: ", cp.max(cp.abs(fock_slice - fock_slice_diffused)))
             fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_dense"])
             fock_slice = cp.einsum(
                 "nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"]
@@ -798,7 +801,6 @@ def convert_xc_on_g_mesh_to_fock(
                 pairs["ao_indices_in_dense"][:, None],
                 pairs["ao_indices_in_sparse"],
             ] += fock_slice[:, :, :, n_ao_in_sparse:]
-
             if hermi == 1:
                 fock[
                     :,
@@ -837,121 +839,33 @@ def get_pp(mydf, kpts=None):
     """Get the periodic pseudopotential nuc-el AO matrix, with G=0 removed."""
     from pyscf import gto
 
-    kpts, is_single_kpt = fft._check_kpts(mydf, kpts)
+    assert kpts is None or all(kpts == 0)
+    is_single_kpt = False
+    if kpts is None or kpts.ndim == 1:
+        is_single_kpt = True
+    kpts = np.zeros((1, 3))
+
     cell = mydf.cell
+    log = logger.new_logger(cell)
+    t0 = log.init_timer()
     mesh = mydf.mesh
-    Gv = cell.get_Gv(mesh)
+    # Compute the vpplocG as
+    # -einsum('ij,ij->j', pseudo.get_vlocG(cell, Gv), cell.get_SI(Gv))
+    vpplocG = multigrid_qiming.eval_vpplocG(cell, mesh)
+    vpp = convert_xc_on_g_mesh_to_fock(mydf, vpplocG, hermi=1, kpts=kpts)[0]
+    t1 = log.timer_debug1("vpploc", *t0)
 
-    ngrids = len(Gv)
-    vpplocG = cp.empty((ngrids,), dtype=cp.complex128)
-
-    for ig0, ig1 in cpu_lib.prange(0, ngrids, ngrids):
-        vpplocG_batch = cp.asarray(pp_int.get_gth_vlocG_part1(cell, Gv[ig0:ig1]))
-        SI = cell.get_SI(Gv[ig0:ig1])
-        vpplocG[ig0:ig1] = -cp.einsum("ij,ij->j", SI, vpplocG_batch)
-
-    hermi = 1
-    vpp = convert_xc_on_g_mesh_to_fock(mydf, vpplocG, hermi, kpts)[0]
-    vpp2 = cp.asarray(pp_int.get_pp_loc_part2(cell, kpts))
+    vppnl = pp_int.get_pp_nl(cell, kpts)
     for k, kpt in enumerate(kpts):
-        vpp[k] += vpp2[k]
-
-    # vppnonloc evaluated in reciprocal space
-    fakemol = gto.Mole()
-    fakemol._atm = np.zeros((1, gto.ATM_SLOTS), dtype=cp.int32)
-    fakemol._bas = np.zeros((1, gto.BAS_SLOTS), dtype=cp.int32)
-    ptr = gto.PTR_ENV_START
-    fakemol._env = np.zeros(ptr + 10)
-    fakemol._bas[0, gto.NPRIM_OF] = 1
-    fakemol._bas[0, gto.NCTR_OF] = 1
-    fakemol._bas[0, gto.PTR_EXP] = ptr + 3
-    fakemol._bas[0, gto.PTR_COEFF] = ptr + 4
-
-    def vppnl_by_k(kpt):
-        SPG_lm_aoGs = []
-        for ia in range(cell.natm):
-            symb = cell.atom_symbol(ia)
-            if symb not in cell._pseudo:
-                SPG_lm_aoGs.append(None)
-                continue
-            pp = cell._pseudo[symb]
-            p1 = 0
-            for l, proj in enumerate(pp[5:]):
-                rl, nl, hl = proj
-                if nl > 0:
-                    p1 = p1 + nl * (l * 2 + 1)
-            SPG_lm_aoGs.append(np.zeros((p1, cell.nao), dtype=np.complex128))
-
-        vppnl = 0
-        for ig0, ig1 in cpu_lib.prange(0, ngrids, ngrids):
-            ng = ig1 - ig0
-            # buf for SPG_lmi upto l=0..3 and nl=3
-            buf = np.empty((48, ng), dtype=np.complex128)
-            Gk = Gv[ig0:ig1] + kpt
-            G_rad = np.linalg.norm(Gk, axis=1)
-            aokG = ft_ao.ft_ao(cell, Gv[ig0:ig1], kpt=kpt) * (ngrids / cell.vol)
-            for ia in range(cell.natm):
-                symb = cell.atom_symbol(ia)
-                if symb not in cell._pseudo:
-                    continue
-                pp = cell._pseudo[symb]
-                p1 = 0
-                for l, proj in enumerate(pp[5:]):
-                    rl, nl, hl = proj
-                    if nl > 0:
-                        fakemol._bas[0, gto.ANG_OF] = l
-                        fakemol._env[ptr + 3] = 0.5 * rl**2
-                        fakemol._env[ptr + 4] = rl ** (l + 1.5) * np.pi**1.25
-                        pYlm_part = fakemol.eval_gto("GTOval", Gk)
-
-                        p0, p1 = p1, p1 + nl * (l * 2 + 1)
-                        # pYlm is real, SI[ia] is complex
-                        pYlm = np.ndarray(
-                            (nl, l * 2 + 1, ng), dtype=np.complex128, buffer=buf[p0:p1]
-                        )
-                        for k in range(nl):
-                            qkl = pseudo.pp._qli(G_rad * rl, l, k)
-                            pYlm[k] = pYlm_part.T * qkl
-                        #:SPG_lmi = numpy.einsum('g,nmg->nmg', SI[ia].conj(), pYlm)
-                        #:SPG_lm_aoG = numpy.einsum('nmg,gp->nmp', SPG_lmi, aokG)
-                        #:tmp = numpy.einsum('ij,jmp->imp', hl, SPG_lm_aoG)
-                        #:vppnl += numpy.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
-                if p1 > 0:
-                    SPG_lmi = buf[:p1]
-                    SPG_lmi *= cell.get_SI(
-                        Gv[ig0:ig1],
-                        atmlst=[
-                            ia,
-                        ],
-                    ).conj()
-                    SPG_lm_aoGs[ia] += cpu_lib.zdot(SPG_lmi, aokG)
-            buf = None
-        for ia in range(cell.natm):
-            symb = cell.atom_symbol(ia)
-            if symb not in cell._pseudo:
-                continue
-            pp = cell._pseudo[symb]
-            p1 = 0
-            for l, proj in enumerate(pp[5:]):
-                rl, nl, hl = proj
-                if nl > 0:
-                    p0, p1 = p1, p1 + nl * (l * 2 + 1)
-                    hl = np.asarray(hl)
-                    SPG_lm_aoG = SPG_lm_aoGs[ia][p0:p1].reshape(nl, l * 2 + 1, -1)
-                    tmp = np.einsum("ij,jmp->imp", hl, SPG_lm_aoG)
-                    vppnl += np.einsum("imp,imq->pq", SPG_lm_aoG.conj(), tmp)
-        SPG_lm_aoGs = None
-        return vppnl * (1.0 / ngrids**2)
-
-    for k, kpt in enumerate(kpts):
-        vppnl = cp.asarray(vppnl_by_k(kpt))
-        if gamma_point(kpt):
-            vpp[k] = vpp[k].real + vppnl.real
+        if is_single_kpt:
+            vpp[k] += cp.asarray(vppnl[k].real)
         else:
-            vpp[k] += vppnl
+            vpp[k] += cp.asarray(vppnl[k])
 
     if is_single_kpt:
         vpp = vpp[0]
+    log.timer_debug1("vppnl", *t1)
+    log.timer("get_pp", *t0)
     return vpp
 
 
@@ -1052,14 +966,7 @@ def nr_rks(
 
     else:
         raise NotImplementedError
-    if return_j:
-        vj = convert_xc_on_g_mesh_to_fock(
-            mydf, coulomb_on_g_mesh, hermi, kpts_band, verbose=log
-        )
-        vj = fft_jk._format_jks(vj, dm_kpts, input_band, kpts)
-    else:
-        vj = None
-
+    
     t0 = log.timer("xc", *t0)
 
     shape = dm_kpts.shape
@@ -1067,7 +974,7 @@ def nr_rks(
         shape[0] = kpts_band.shape[0]
     xc_for_fock = xc_for_fock.reshape(shape)
     xc_for_fock = cupy_helper.tag_array(
-        xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=vj, vk=None
+        xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None
     )
     return n_electrons, xc_energy_sum, xc_for_fock
 
