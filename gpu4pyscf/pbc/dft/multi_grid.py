@@ -778,21 +778,16 @@ def convert_xc_on_g_mesh_to_fock(
                 ao_values = ao_on_sliced_grid_in_dense = None
 
         else:
-            log = logger.new_logger(cell)
             n_ao_in_sparse = len(pairs["ao_indices_in_dense"])
             libgpbc.update_dxyz_dabc(
                 ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
             )
-            t0 = log.init_timer()
             fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
-            t1 = log.timer_debug1("evaluate_xc_wrapper", *t0)
 
             fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_dense"])
             fock_slice = cp.einsum(
                 "nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"]
             )
-
-            t2 = log.timer_debug1("einsum", *t1)
 
             fock[
                 :,
@@ -806,7 +801,6 @@ def convert_xc_on_g_mesh_to_fock(
                 pairs["ao_indices_in_dense"][:, None],
                 pairs["ao_indices_in_sparse"],
             ] += fock_slice[:, :, :, n_ao_in_sparse:]
-            t3 = log.timer_debug1("addition", *t2)
             if hermi == 1:
                 fock[
                     :,
@@ -818,7 +812,7 @@ def convert_xc_on_g_mesh_to_fock(
                 )
             else:
                 raise NotImplementedError
-            t4 = log.timer_debug1("transpose", *t3)
+
     return fock
 
 
@@ -910,7 +904,6 @@ def nr_rks(
         mydf, dm_kpts, hermi, kpts, derivative_order
     )
 
-    t0 = log.timer("density", *t0)
     coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum(
         "ng,g->ng", density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh
@@ -934,11 +927,11 @@ def nr_rks(
     ).real * (1.0 / weight)
     density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
     n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight
-
+    t0 = log.timer("n_electrons", *t0)
     weighted_xc_for_fock_on_g_mesh = cp.ndarray(
         (nset, *density_in_real_space.shape), dtype=cp.complex128
     )
-    xc_energy_sum = cp.zeros(nset)
+    xc_energy_sum = np.zeros(nset)
     for i in range(nset):
         if xc_type == "LDA":
             xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(
@@ -954,6 +947,7 @@ def nr_rks(
         ).sum() * weight
 
         weighted_xc_for_fock_on_g_mesh[i] = tools.fft(xc_for_fock * weight, mesh)
+    t0 = log.timer("libxc related", *t0)
     density_in_real_space = density_on_G_mesh = None
     if nset == 1:
         coulomb_energy = coulomb_energy[0]
@@ -965,14 +959,13 @@ def nr_rks(
     if xc_type == "LDA":
         if with_j:
             weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
-
+        log.timer("before call", *t0)
         xc_for_fock = convert_xc_on_g_mesh_to_fock(
             mydf, weighted_xc_for_fock_on_g_mesh, hermi, kpts_band
         )
 
     else:
         raise NotImplementedError
-    
     t0 = log.timer("xc", *t0)
 
     shape = dm_kpts.shape
