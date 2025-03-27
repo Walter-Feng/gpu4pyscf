@@ -4,6 +4,11 @@
 #include <gint/gint.h>
 #include <stdio.h>
 
+#include <algorithm>
+#include <mutex>
+#include <numeric>
+#include <vector>
+
 #define atm(SLOT, I) atm[ATM_SLOTS * (I) + (SLOT)]
 #define bas(SLOT, I) bas[BAS_SLOTS * (I) + (SLOT)]
 
@@ -29,20 +34,46 @@ template <int ANG> __inline__ __device__ constexpr double common_fac_sp() {
   }
 }
 
-inline __device__ void gto_cartesian_s(double values[], double fx, double fy,
-                                       double fz) {
+template <int angular>
+__inline__ __device__ double
+gaussian_summation_cutoff(const double exponent, const double prefactor_in_log,
+                          const double threshold_in_log) {
+  constexpr int l = angular + 1;
+  constexpr int approximate_factor = (l + 4) / 2;
+  constexpr double log_r = 2.302585092994046; // log(10)
+  const double log_of_doubled_exponents = log(2 * exponent);
+
+  double approximated_log_of_sum;
+  if ((l + 1) * log_r + log_of_doubled_exponents > 1) {
+    approximated_log_of_sum = -((l + 4) / 2) * log_of_doubled_exponents;
+  } else {
+    approximated_log_of_sum =
+        approximate_factor * log_r - log_of_doubled_exponents;
+  }
+  approximated_log_of_sum += prefactor_in_log - threshold_in_log;
+  if (approximated_log_of_sum < exponent) {
+    approximated_log_of_sum = prefactor_in_log - threshold_in_log;
+  }
+  if (approximated_log_of_sum < 0) {
+    approximated_log_of_sum = 0;
+  }
+  return sqrt(approximated_log_of_sum / exponent);
+}
+
+__inline__ __device__ void gto_cartesian_s(double values[], double fx,
+                                           double fy, double fz) {
   values[0] = 1;
 }
 
-inline __device__ void gto_cartesian_p(double values[], double fx, double fy,
-                                       double fz) {
+__inline__ __device__ void gto_cartesian_p(double values[], double fx,
+                                           double fy, double fz) {
   values[0] = fx;
   values[1] = fy;
   values[2] = fz;
 }
 
-inline __device__ void gto_cartesian_d(double values[], double fx, double fy,
-                                       double fz) {
+__inline__ __device__ void gto_cartesian_d(double values[], double fx,
+                                           double fy, double fz) {
   values[0] = fx * fx;
   values[1] = fx * fy;
   values[2] = fx * fz;
@@ -51,8 +82,8 @@ inline __device__ void gto_cartesian_d(double values[], double fx, double fy,
   values[5] = fz * fz;
 }
 
-inline __device__ void gto_cartesian_f(double values[], double fx, double fy,
-                                       double fz) {
+__inline__ __device__ void gto_cartesian_f(double values[], double fx,
+                                           double fy, double fz) {
   values[0] = fx * fx * fx;
   values[1] = fx * fx * fy;
   values[2] = fx * fx * fz;
@@ -65,8 +96,8 @@ inline __device__ void gto_cartesian_f(double values[], double fx, double fy,
   values[9] = fz * fz * fz;
 }
 
-inline __device__ void gto_cartesian_g(double values[], double fx, double fy,
-                                       double fz) {
+__inline__ __device__ void gto_cartesian_g(double values[], double fx,
+                                           double fy, double fz) {
   values[0] = fx * fx * fx * fx;
   values[1] = fx * fx * fx * fy;
   values[2] = fx * fx * fx * fz;
@@ -85,8 +116,8 @@ inline __device__ void gto_cartesian_g(double values[], double fx, double fy,
 }
 
 template <int ANG>
-inline __device__ void gto_cartesian(double values[], double fx, double fy,
-                                     double fz) {
+__inline__ __device__ void gto_cartesian(double values[], double fx, double fy,
+                                         double fz) {
   if constexpr (ANG == 0) {
     gto_cartesian_s(values, fx, fy, fz);
   } else if constexpr (ANG == 1) {
@@ -162,9 +193,9 @@ __global__ void evaluate_density_kernel(
     reduced_density_values[i_channel * n_threads + thread_id] = 0;
   }
 
-  const int start_pair_index = accumulated_n_pairs_per_local_grid[block_index];
+  const int start_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x];
   const int end_pair_index =
-      accumulated_n_pairs_per_local_grid[block_index + 1];
+      accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
@@ -465,9 +496,9 @@ __global__ void evaluate_xc_kernel(
   double i_cartesian[n_i_cartesian_functions];
   double j_cartesian[n_j_cartesian_functions];
 
-  const int start_pair_index = accumulated_n_pairs_per_local_grid[block_index];
+  const int start_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x];
   const int end_pair_index =
-      accumulated_n_pairs_per_local_grid[block_index + 1];
+      accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
@@ -737,6 +768,46 @@ void evaluate_xc_driver(
   checkCudaErrors(cudaPeekAtLastError());
 }
 
+template <typename T>
+std::vector<size_t> sort_index(const std::vector<T> &vec) {
+  std::vector<size_t> idx(vec.size());
+  std::iota(idx.begin(), idx.end(), 0);
+  std::stable_sort(idx.begin(), idx.end(),
+                   [&](size_t i, size_t j) { return vec[i] > vec[j]; });
+  return idx;
+}
+
+std::vector<std::vector<int>>
+invert_map(const int *pair_begin_blocks, const int *pair_end_blocks,
+           const int n_pairs, const int n_blocks_a, const int n_blocks_b,
+           const int n_blocks_c) {
+  const int n_blocks = n_blocks_a * n_blocks_b * n_blocks_c;
+  std::vector<std::vector<int>> inverse_map(n_blocks);
+  std::vector<std::mutex> locks(n_blocks);
+
+#pragma omp parallel for
+  for (int i_pair = 0; i_pair < n_pairs; ++i_pair) {
+    const int pair_begin_x = pair_begin_blocks[3 * i_pair];
+    const int pair_end_x = pair_end_blocks[3 * i_pair];
+    const int pair_begin_y = pair_begin_blocks[3 * i_pair + 1];
+    const int pair_end_y = pair_end_blocks[3 * i_pair + 1];
+    const int pair_begin_z = pair_begin_blocks[3 * i_pair + 2];
+    const int pair_end_z = pair_end_blocks[3 * i_pair + 2];
+
+    for (int x = pair_begin_x; x <= pair_end_x; ++x) {
+      for (int y = pair_begin_y; y <= pair_end_y; ++y) {
+        for (int z = pair_begin_z; z <= pair_end_z; ++z) {
+          const int block_index =
+              x * n_blocks_b * n_blocks_c + y * n_blocks_c + z;
+          std::lock_guard<std::mutex> lock(locks[block_index]);
+          inverse_map[block_index].push_back(i_pair);
+        }
+      }
+    }
+  }
+  return inverse_map;
+}
+
 extern "C" {
 void update_lattice_vectors(const double *lattice_vectors_on_device,
                             const double *reciprocal_lattice_vectors_on_device,
@@ -751,6 +822,38 @@ void update_lattice_vectors(const double *lattice_vectors_on_device,
 
 void update_dxyz_dabc(const double *dxyz_dabc_on_device) {
   cudaMemcpyToSymbol(dxyz_dabc, dxyz_dabc_on_device, 9 * sizeof(double));
+}
+
+void assign_pairs_to_blocks(int *sorted_pairs_per_block, int *n_pairs_per_block,
+                            int *block_index, const int *pairs_to_blocks_begin,
+                            const int *pairs_to_blocks_end,
+                            const int n_blocks[3], const int n_pairs) {
+  const int n_blocks_a = n_blocks[0];
+  const int n_blocks_b = n_blocks[1];
+  const int n_blocks_c = n_blocks[2];
+
+  const std::vector<std::vector<int>> inverse_map =
+      invert_map(pairs_to_blocks_begin, pairs_to_blocks_end, n_pairs,
+                 n_blocks_a, n_blocks_b, n_blocks_c);
+
+  std::vector<int> n_pairs_per_block_unsorted(n_blocks_a * n_blocks_b *
+                                              n_blocks_c);
+  for (int i = 0; i < inverse_map.size(); ++i) {
+    n_pairs_per_block_unsorted[i] = inverse_map[i].size();
+  }
+  std::vector<size_t> sorted_index = sort_index(n_pairs_per_block_unsorted);
+  for (int i = 0; i < n_blocks_a * n_blocks_b * n_blocks_c; ++i) {
+    const int sorted_block_index = sorted_index[i];
+    const int n_pairs_in_block = n_pairs_per_block_unsorted[sorted_block_index];
+    if (n_pairs_in_block > 0) {
+      std::memcpy(sorted_pairs_per_block,
+                  inverse_map[sorted_block_index].data(),
+                  n_pairs_in_block * sizeof(int));
+      n_pairs_per_block[i] = n_pairs_in_block;
+      block_index[i] = sorted_block_index;
+      sorted_pairs_per_block += n_pairs_in_block;
+    }
+  }
 }
 
 void evaluate_density_driver(

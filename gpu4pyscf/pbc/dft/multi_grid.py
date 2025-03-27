@@ -36,6 +36,15 @@ def CINTcommon_fac_sp(angular):
         return 1
 
 
+def cast_to_pointer(array):
+    if isinstance(array, cp.ndarray):
+        return ctypes.cast(array.data.ptr, ctypes.c_void_p)
+    elif isinstance(array, np.ndarray):
+        return array.ctypes.data_as(ctypes.c_void_p)
+    else:
+        raise ValueError("Invalid array type")
+
+
 def gaussian_summation_cutoff(exponents, angular, prefactors, threshold_in_log):
     prefactors_in_log = cp.log(cp.abs(prefactors))
     l = angular + 1
@@ -55,6 +64,35 @@ def gaussian_summation_cutoff(exponents, angular, prefactors, threshold_in_log):
             prefactors_in_log[another_estimate_indices] - threshold_in_log
         )
     return cp.sqrt(cp.clip(approximated_log_of_sum, 0, None) / exponents)
+
+
+def assign_pairs_to_blocks(
+    pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks, n_pairs, n_indices
+):
+    sorted_pairs_per_block = np.full(n_indices, -1, dtype=np.int32)
+    n_pairs_per_block = np.full(np.prod(n_blocks), -1, dtype=np.int32)
+    block_index = np.full(np.prod(n_blocks), -1, dtype=np.int32)
+    libgpbc.assign_pairs_to_blocks(
+        cast_to_pointer(sorted_pairs_per_block),
+        cast_to_pointer(n_pairs_per_block),
+        cast_to_pointer(block_index),
+        cast_to_pointer(pairs_to_blocks_begin),
+        cast_to_pointer(pairs_to_blocks_end),
+        cast_to_pointer(n_blocks),
+        ctypes.c_int(n_pairs),
+    )
+    non_trivial_blocks = np.where(n_pairs_per_block > 0)[0]
+    n_pairs_per_block = n_pairs_per_block[non_trivial_blocks]
+    prepended_n_pairs_per_block = np.insert(n_pairs_per_block, 0, 0)
+    accumulated_n_pairs_per_block = np.cumsum(
+        prepended_n_pairs_per_block, dtype=np.int32
+    )
+    block_index = block_index[non_trivial_blocks]
+    return (
+        cp.asarray(sorted_pairs_per_block),
+        cp.asarray(accumulated_n_pairs_per_block),
+        cp.asarray(block_index),
+    )
 
 
 def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4])):
@@ -163,6 +201,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                         0:n_primitive_gtos_in_two_regions, multigrid.ANG_OF
                     ]
                 ):
+                    t1 = log.init_timer()
                     j_shells = np.where(
                         grouped_cell._bas[
                             0:n_primitive_gtos_in_two_regions, multigrid.ANG_OF
@@ -329,71 +368,37 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     contributing_block_begin = cp.concatenate(contributing_block_begin)
                     contributing_block_end = cp.concatenate(contributing_block_end)
                     contributing_block_ranges = (
-                        contributing_block_end - contributing_block_begin
+                        contributing_block_end - contributing_block_begin + 1
                     )
                     n_contributing_blocks_per_pair = cp.prod(
                         contributing_block_ranges, axis=1
                     )
+                    n_indices = int(cp.sum(n_contributing_blocks_per_pair))
                     sort_index = cp.argsort(-n_contributing_blocks_per_pair)
 
                     shell_pair_indices_from_images = shell_pair_indices_from_images[
                         sort_index
                     ]
+                    t1 = log.timer("pair generation", *t1)
                     image_indices = image_indices[sort_index]
                     contributing_block_begin = contributing_block_begin[sort_index]
                     contributing_block_end = contributing_block_end[sort_index]
-                    contributing_indices_for_pairs = []
-                    contributing_indices_per_pair = []
                     n_pairs = len(shell_pair_indices_from_images)
                     contributing_block_begin_cpu = contributing_block_begin.get()
                     contributing_block_end_cpu = contributing_block_end.get()
-                    for i_pair in range(n_pairs):
-                        begin = contributing_block_begin_cpu[i_pair]
-                        end = contributing_block_end_cpu[i_pair]
-                        ranges = end - begin + 1
-                        contributing_local_grid = np.add.outer(
-                            np.linspace(begin[0], end[0], ranges[0], dtype=np.int32)
-                            * granularized_mesh_size[1]
-                            * granularized_mesh_size[2],
-                            np.add.outer(
-                                np.linspace(begin[1], end[1], ranges[1], dtype=np.int32)
-                                * granularized_mesh_size[2],
-                                np.linspace(
-                                    begin[2], end[2], ranges[2], dtype=np.int32
-                                ),
-                            ),
-                        )
-                        contributing_indices_for_pairs.append(
-                            contributing_local_grid.flatten()
-                        )
-                        contributing_indices_per_pair.append(
-                            np.full(
-                                len(contributing_local_grid.flatten()),
-                                i_pair,
-                                dtype=np.int32,
-                            )
-                        )
+                    (
+                        gaussian_pair_indices,
+                        accumulated_counts,
+                        sorted_contributing_blocks,
+                    ) = assign_pairs_to_blocks(
+                        contributing_block_begin_cpu,
+                        contributing_block_end_cpu,
+                        granularized_mesh_size,
+                        n_pairs,
+                        n_indices,
+                    )
 
-                    contributing_indices_for_pairs = np.concatenate(
-                        contributing_indices_for_pairs
-                    )
-                    sort_indices = np.argsort(contributing_indices_for_pairs)
-                    gaussian_pair_indices = np.concatenate(
-                        contributing_indices_per_pair
-                    )[sort_indices]
-                    contributing_indices_for_pairs = contributing_indices_for_pairs[
-                        sort_indices
-                    ]
-                    contributing_blocks, counts = np.unique(
-                        contributing_indices_for_pairs, return_counts=True
-                    )
-                    count_sort_index = np.argsort(-counts)
-                    counts_per_block = np.zeros(
-                        np.prod(granularized_mesh_size) + 1, dtype=np.int32
-                    )
-                    counts_per_block[contributing_blocks + 1] = counts
-                    accumulated_counts = np.cumsum(counts_per_block)
-                    sorted_contributing_blocks = contributing_blocks[count_sort_index]
+                    t1 = log.timer("inverse mapping", *t1)
 
                     per_angular_pairs.append(
                         {
