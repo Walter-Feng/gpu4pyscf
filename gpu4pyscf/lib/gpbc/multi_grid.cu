@@ -131,6 +131,122 @@ __inline__ __device__ void gto_cartesian(double values[], double fx, double fy,
   }
 }
 
+template <int i_angular, int j_angular>
+__global__ void screen_gaussian_pairs(
+    int *non_trivial_pairs, int *pairs_to_blocks_begin,
+    int *pairs_to_blocks_end, const int *i_shells, const int n_i_shells,
+    const int *j_shells, const int n_j_shells,
+    const int *vectors_to_neighboring_images, const int n_images,
+    const int mesh_a, const int mesh_b, const int mesh_c, const int *atm,
+    const int *bas, const double *env, const double threshold_in_log) {
+
+  const int i_shell_index = threadIdx.x + blockDim.x * blockIdx.x;
+  const int j_shell_index = threadIdx.y + blockDim.y * blockIdx.y;
+  bool is_valid_pair = i_shell_index < n_i_shells * n_images &&
+                             j_shell_index < n_j_shells * n_images;
+
+  const int i_image = is_valid_pair ? i_shell_index / n_images : 0;
+  const int i_shell = is_valid_pair ? i_shell_index % n_images : 0;
+  const int j_image = is_valid_pair ? j_shell_index / n_images : 0;
+  const int j_shell = is_valid_pair ? j_shell_index % n_images : 0;
+  const int i_shell_stride = n_j_shells * n_images;
+  const int n_pairs = n_i_shells * n_j_shells * n_images * n_images;
+  const int pair_index = i_shell_index * i_shell_stride + j_shell_index;
+  
+  const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
+  const double i_x =
+      env[i_coord_offset] + vectors_to_neighboring_images[i_image * 3];
+  const double i_y =
+      env[i_coord_offset + 1] + vectors_to_neighboring_images[i_image * 3 + 1];
+  const double i_z =
+      env[i_coord_offset + 2] + vectors_to_neighboring_images[i_image * 3 + 2];
+
+  const int j_coord_offset = atm(PTR_COORD, bas(ATOM_OF, j_shell));
+  const double j_x =
+      env[j_coord_offset] + vectors_to_neighboring_images[j_image * 3];
+  const double j_y =
+      env[j_coord_offset + 1] + vectors_to_neighboring_images[j_image * 3 + 1];
+  const double j_z =
+      env[j_coord_offset + 2] + vectors_to_neighboring_images[j_image * 3 + 2];
+
+  const double i_exponent = env[bas(PTR_EXP, i_shell)];
+  const double j_exponent = env[bas(PTR_EXP, j_shell)];
+
+  const double ij_exponent = i_exponent + j_exponent;
+  const double ij_exponent_in_prefactor =
+      i_exponent * j_exponent / ij_exponent *
+      distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
+
+  if (ij_exponent_in_prefactor > EIJ_CUTOFF) {
+    is_valid_pair = false;
+  }
+
+  const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
+  const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
+  const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
+
+  const double pair_a = pair_x * reciprocal_lattice_vectors[0] +
+                        pair_y * reciprocal_lattice_vectors[1] +
+                        pair_z * reciprocal_lattice_vectors[2];
+  const double pair_b = pair_x * reciprocal_lattice_vectors[3] +
+                        pair_y * reciprocal_lattice_vectors[4] +
+                        pair_z * reciprocal_lattice_vectors[5];
+  const double pair_c = pair_x * reciprocal_lattice_vectors[6] +
+                        pair_y * reciprocal_lattice_vectors[7] +
+                        pair_z * reciprocal_lattice_vectors[8];
+
+  const double pair_prefactor = exp(-ij_exponent_in_prefactor) *
+                                common_fac_sp<i_angular>() *
+                                common_fac_sp<j_angular>();
+
+  const double prefactor_in_log =
+      -ij_exponent_in_prefactor +
+      log(common_fac_sp<i_angular>() * common_fac_sp<j_angular>());
+
+  const double cutoff = gaussian_summation_cutoff<i_angular + j_angular>(
+      ij_exponent, prefactor_in_log, threshold_in_log);
+  const double cutoff_a = cutoff * reciprocal_norm[0];
+  const double cutoff_b = cutoff * reciprocal_norm[1];
+  const double cutoff_c = cutoff * reciprocal_norm[2];
+
+  int begin_a = ceil((pair_a - cutoff_a) * mesh_a);
+  int end_a = floor((pair_a + cutoff_a) * mesh_a);
+  int begin_b = ceil((pair_b - cutoff_b) * mesh_b);
+  int end_b = floor((pair_b + cutoff_b) * mesh_b);
+  int begin_c = ceil((pair_c - cutoff_c) * mesh_c);
+  int end_c = floor((pair_c + cutoff_c) * mesh_c);
+
+  if (begin_a > end_a || begin_b > end_b || begin_c > end_c || end_a < 0 ||
+      end_b < 0 || end_c < 0 || begin_a >= mesh_a || begin_b >= mesh_b ||
+      begin_c >= mesh_c) {
+    is_valid_pair = false;
+  }
+
+  const int blocking_sizes_on_gpu = 4;
+  begin_a = max(begin_a, 0);
+  begin_b = max(begin_b, 0);
+  begin_c = max(begin_c, 0);
+  end_a = min(end_a, mesh_a - 1);
+  end_b = min(end_b, mesh_b - 1);
+  end_c = min(end_c, mesh_c - 1);
+  begin_a /= blocking_sizes_on_gpu;
+  end_a /= blocking_sizes_on_gpu;
+  begin_b /= blocking_sizes_on_gpu;
+  end_b /= blocking_sizes_on_gpu;
+  begin_c /= blocking_sizes_on_gpu;
+  end_c /= blocking_sizes_on_gpu;
+
+  if (is_valid_pair) {
+    non_trivial_pairs[pair_index] = 1;
+    pairs_to_blocks_begin[pair_index] = begin_a;
+    pairs_to_blocks_begin[pair_index + n_pairs] = begin_b;
+    pairs_to_blocks_begin[pair_index + 2 * n_pairs] = begin_c;
+    pairs_to_blocks_end[pair_index] = end_a;
+    pairs_to_blocks_end[pair_index + n_pairs] = end_b;
+    pairs_to_blocks_end[pair_index + 2 * n_pairs] = end_c;
+  }
+}
+
 template <int n_channels, int i_angular, int j_angular, int block_dim_a,
           int block_dim_b, int block_dim_c>
 __global__ void evaluate_density_kernel(
@@ -194,8 +310,7 @@ __global__ void evaluate_density_kernel(
   }
 
   const int start_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x];
-  const int end_pair_index =
-      accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
+  const int end_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
@@ -497,8 +612,7 @@ __global__ void evaluate_xc_kernel(
   double j_cartesian[n_j_cartesian_functions];
 
   const int start_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x];
-  const int end_pair_index =
-      accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
+  const int end_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
