@@ -120,43 +120,43 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
     t0 = log.timer("task generation", *t0)
 
     pairs = []
-    for grids_dense, grids_sparse in tasks:
-        subcell_in_dense_region = grids_dense.cell
-        mesh = cp.asarray(grids_dense.mesh)
+    for grids_localized, grids_diffused in tasks:
+        subcell_in_localized_region = grids_localized.cell
+        mesh = cp.asarray(grids_localized.mesh)
         granularized_mesh_size = cp.asarray(
             cp.ceil(mesh / blocking_sizes_on_gpu), dtype=cp.int32
         ).get()
 
-        equivalent_cell_in_dense, coeff_in_dense = (
-            subcell_in_dense_region.decontract_basis(to_cart=True, aggregate=True)
+        equivalent_cell_in_localized, coeff_in_localized = (
+            subcell_in_localized_region.decontract_basis(to_cart=True, aggregate=True)
         )
 
-        n_primitive_gtos_in_dense = multigrid._pgto_shells(subcell_in_dense_region)
+        n_primitive_gtos_in_localized = multigrid._pgto_shells(subcell_in_localized_region)
 
         vectors_to_neighboring_images = cp.asarray(
-            gto.eval_gto.get_lattice_Ls(subcell_in_dense_region)
+            gto.eval_gto.get_lattice_Ls(subcell_in_localized_region)
         )
         n_images = len(vectors_to_neighboring_images)
         phase_diff_among_images = cp.exp(
             1j
             * cp.asarray(mydf.kpts.reshape(-1, 3)).dot(vectors_to_neighboring_images.T)
         )
-        if grids_sparse is None:
-            grouped_cell = equivalent_cell_in_dense 
-            concatenated_coeff = scipy.linalg.block_diag(coeff_in_dense)
+        if grids_diffused is None:
+            grouped_cell = equivalent_cell_in_localized 
+            concatenated_coeff = scipy.linalg.block_diag(coeff_in_localized)
         else:
-            subcell_in_sparse_region = grids_sparse.cell
-            equivalent_cell_in_sparse, coeff_in_sparse = (
-                subcell_in_sparse_region.decontract_basis(to_cart=True, aggregate=True)
+            subcell_in_diffused_region = grids_diffused.cell
+            equivalent_cell_in_diffused, coeff_in_diffused = (
+                subcell_in_diffused_region.decontract_basis(to_cart=True, aggregate=True)
             )
-            grouped_cell = equivalent_cell_in_dense + equivalent_cell_in_sparse
+            grouped_cell = equivalent_cell_in_localized + equivalent_cell_in_diffused
             concatenated_coeff = scipy.linalg.block_diag(
-                coeff_in_dense, coeff_in_sparse
+                coeff_in_localized, coeff_in_diffused
             )
 
         n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
-        if grids_sparse is None:
-            assert n_primitive_gtos_in_dense == n_primitive_gtos_in_two_regions
+        if grids_diffused is None:
+            assert n_primitive_gtos_in_localized == n_primitive_gtos_in_two_regions
         weight_penalty = np.prod(grouped_cell.mesh) / vol
         minimum_exponent = np.hstack(grouped_cell.bas_exps()).min()
         theta_ij = minimum_exponent / 2
@@ -171,10 +171,10 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
         per_angular_pairs = []
 
         for i_angular in set(
-            grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF]
+            grouped_cell._bas[0:n_primitive_gtos_in_localized, multigrid.ANG_OF]
         ):
             i_shells = np.where(
-                grouped_cell._bas[0:n_primitive_gtos_in_dense, multigrid.ANG_OF]
+                grouped_cell._bas[0:n_primitive_gtos_in_localized, multigrid.ANG_OF]
                 == i_angular
             )[0]
             n_i_shells = len(i_shells)
@@ -407,23 +407,23 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                     }
                 )
 
-        ao_indices_in_dense = cp.asarray(grids_dense.ao_idx)
-        if grids_sparse is None:
-            ao_indices_in_sparse = cp.array([], dtype=cp.int32)
+        ao_indices_in_localized = cp.asarray(grids_localized.ao_idx)
+        if grids_diffused is None:
+            ao_indices_in_diffused = cp.array([], dtype=cp.int32)
         else:
-            ao_indices_in_sparse = cp.asarray(grids_sparse.ao_idx)
+            ao_indices_in_diffused = cp.asarray(grids_diffused.ao_idx)
         pairs.append(
             {
                 "per_angular_pairs": per_angular_pairs,
                 "neighboring_images": cp.asarray(vectors_to_neighboring_images),
                 "grouped_cell": grouped_cell,
-                "mesh": grids_dense.mesh,
-                "ao_indices_in_dense": ao_indices_in_dense,
-                "ao_indices_in_sparse": ao_indices_in_sparse,
+                "mesh": grids_localized.mesh,
+                "ao_indices_in_localized": ao_indices_in_localized,
+                "ao_indices_in_diffused": ao_indices_in_diffused,
                 "concatenated_ao_indices": cp.concatenate(
-                    (ao_indices_in_dense, ao_indices_in_sparse)
+                    (ao_indices_in_localized, ao_indices_in_diffused)
                 ),
-                "coeff_in_dense": cp.asarray(coeff_in_dense),
+                "coeff_in_localized": cp.asarray(coeff_in_localized),
                 "concatenated_coeff": cp.asarray(concatenated_coeff),
                 "atm": cp.asarray(grouped_cell._atm, dtype=cp.int32),
                 "bas": cp.asarray(grouped_cell._bas, dtype=cp.int32),
@@ -550,29 +550,29 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
         n_grid_points = np.prod(mesh)
         weight_per_grid_point = 1.0 / n_k_points * mydf.cell.vol / n_grid_points
 
-        density_matrix_with_rows_in_dense = dms[
+        density_matrix_with_rows_in_localized = dms[
             :,
             :,
-            pairs["ao_indices_in_dense"][:, None],
+            pairs["ao_indices_in_localized"][:, None],
             pairs["concatenated_ao_indices"],
         ]
-        density_matrix_with_rows_in_sparse = dms[
+        density_matrix_with_rows_in_diffused = dms[
             :,
             :,
-            pairs["ao_indices_in_sparse"][:, None],
-            pairs["ao_indices_in_dense"],
+            pairs["ao_indices_in_diffused"][:, None],
+            pairs["ao_indices_in_localized"],
         ]
 
         if deriv == 0:
-            n_ao_in_sparse, n_ao_in_dense = density_matrix_with_rows_in_sparse.shape[2:]
-            density_matrix_with_rows_in_dense[
-                :, :, :, n_ao_in_dense:
-            ] += density_matrix_with_rows_in_sparse.transpose(0, 1, 3, 2)
+            n_ao_in_diffused, n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[2:]
+            density_matrix_with_rows_in_localized[
+                :, :, :, n_ao_in_localized:
+            ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2)
 
             coeff_sandwiched_density_matrix = cp.einsum(
                 "nkij,pi->nkpj",
-                density_matrix_with_rows_in_dense,
-                pairs["coeff_in_dense"],
+                density_matrix_with_rows_in_localized,
+                pairs["coeff_in_localized"],
             )
 
             coeff_sandwiched_density_matrix = cp.einsum(
@@ -604,7 +604,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), de
 
 def evaluate_xc_wrapper(pairs_info, xc_weights, xc_type="LDA"):
     c_driver = libgpbc.evaluate_xc_driver
-    n_i_functions = len(pairs_info["coeff_in_dense"])
+    n_i_functions = len(pairs_info["coeff_in_localized"])
     n_j_functions = len(pairs_info["concatenated_coeff"])
 
     n_channels = xc_weights.shape[0]
@@ -718,34 +718,34 @@ def convert_xc_on_g_mesh_to_fock(
         reordered_xc_on_real_mesh = cp.asarray(
             reordered_xc_on_real_mesh.real, order="C"
         )
-        n_ao_in_dense = len(pairs["ao_indices_in_dense"])
+        n_ao_in_localized = len(pairs["ao_indices_in_localized"])
         libgpbc.update_dxyz_dabc(
             ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
         )
         fock_slice = evaluate_xc_wrapper(pairs, reordered_xc_on_real_mesh, "LDA")
-        fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_dense"])
+        fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_localized"])
         fock_slice = cp.einsum("nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"])
 
         fock[
             :,
             :,
-            pairs["ao_indices_in_dense"][:, None],
-            pairs["ao_indices_in_dense"],
-        ] += fock_slice[:, :, :, :n_ao_in_dense]
+            pairs["ao_indices_in_localized"][:, None],
+            pairs["ao_indices_in_localized"],
+        ] += fock_slice[:, :, :, :n_ao_in_localized]
         fock[
             :,
             :,
-            pairs["ao_indices_in_dense"][:, None],
-            pairs["ao_indices_in_sparse"],
-        ] += fock_slice[:, :, :, n_ao_in_dense:]
+            pairs["ao_indices_in_localized"][:, None],
+            pairs["ao_indices_in_diffused"],
+        ] += fock_slice[:, :, :, n_ao_in_localized:]
         if hermi == 1:
             fock[
                 :,
                 :,
-                pairs["ao_indices_in_sparse"][:, None],
-                pairs["ao_indices_in_dense"],
+                pairs["ao_indices_in_diffused"][:, None],
+                pairs["ao_indices_in_localized"],
             ] += (
-                fock_slice[:, :, :, n_ao_in_dense:].transpose(0, 1, 3, 2).conj()
+                fock_slice[:, :, :, n_ao_in_localized:].transpose(0, 1, 3, 2).conj()
             )
         else:
             raise NotImplementedError
