@@ -210,8 +210,11 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         bas = cp.asarray(grouped_cell._bas, dtype=cp.int32)
         env = cp.asarray(grouped_cell._env)
 
+        total_screening_time = 0
+        total_inverse_mapping_time = 0
         for i_angular, i_shells in zip(i_angulars_unique, sorted_i_shells):
             for j_angular, j_shells in zip(j_angulars_unique, sorted_j_shells):
+                t1 = log.init_timer()
                 i_angular = int(i_angular)
                 j_angular = int(j_angular)
                 (
@@ -231,6 +234,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     env,
                     threshold_in_log,
                 )
+                t2 = log.timer("screen_gaussian_pairs", *t1)
+                total_screening_time += cp.cuda.get_elapsed_time(t1[2], t2[2])
+                t1 = t2
                 contributing_block_ranges = (
                     pairs_to_blocks_end - pairs_to_blocks_begin + 1
                 )
@@ -252,7 +258,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     n_pairs,
                     n_indices,
                 )
-
+                t2 = log.timer("assign_pairs_to_blocks", *t1)
+                total_inverse_mapping_time += cp.cuda.get_elapsed_time(t1[2], t2[2])
+                t1 = t2
                 per_angular_pairs.append(
                     {
                         "angular": (i_angular, j_angular),
@@ -306,6 +314,8 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
 
     mydf.sorted_gaussian_pairs = pairs
     t0 = log.timer("sort_gaussian_pairs", *t0)
+    log.debug("total_screening_time: %9.2f ms", total_screening_time)
+    log.debug("total_inverse_mapping_time: %9.2f ms", total_inverse_mapping_time)
 
 
 def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
