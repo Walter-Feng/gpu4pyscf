@@ -24,6 +24,7 @@ import gpu4pyscf.lib.cupy_helper as cupy_helper
 
 libgpbc = cupy_helper.load_library("libgpbc")
 
+
 def cast_to_pointer(array):
     if isinstance(array, cp.ndarray):
         return ctypes.cast(array.data.ptr, ctypes.c_void_p)
@@ -31,6 +32,7 @@ def cast_to_pointer(array):
         return array.ctypes.data_as(ctypes.c_void_p)
     else:
         raise ValueError("Invalid array type")
+
 
 def screen_gaussian_pairs(
     i_angular,
@@ -80,18 +82,18 @@ def screen_gaussian_pairs(
 
 
 def assign_pairs_to_blocks(
-    pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks, n_pairs, n_indices
+    pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks_abc, n_pairs, n_indices
 ):
     sorted_pairs_per_block = np.full(n_indices, -1, dtype=np.int32)
-    n_pairs_per_block = np.full(np.prod(n_blocks), -1, dtype=np.int32)
-    block_index = np.full(np.prod(n_blocks), -1, dtype=np.int32)
+    n_pairs_per_block = np.full(np.prod(n_blocks_abc), -1, dtype=np.int32)
+    block_index = np.full(np.prod(n_blocks_abc), -1, dtype=np.int32)
     libgpbc.assign_pairs_to_blocks(
         cast_to_pointer(sorted_pairs_per_block),
         cast_to_pointer(n_pairs_per_block),
         cast_to_pointer(block_index),
         cast_to_pointer(pairs_to_blocks_begin),
         cast_to_pointer(pairs_to_blocks_end),
-        cast_to_pointer(n_blocks),
+        cast_to_pointer(n_blocks_abc),
         ctypes.c_int(n_pairs),
     )
     non_trivial_blocks = np.where(n_pairs_per_block > 0)[0]
@@ -108,12 +110,12 @@ def assign_pairs_to_blocks(
     )
 
 
-def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4])):
+def sort_gaussian_pairs(mydf, xc_type="LDA"):
     log = logger.new_logger(mydf, mydf.verbose)
     t0 = log.init_timer()
-    blocking_sizes_on_gpu = cp.asarray(blocking_sizes)
     cell = mydf.cell
     vol = cell.vol
+    block_size = np.array([4, 4, 4])
     lattice_vectors = cp.asarray(cell.lattice_vectors())
     reciprocal_lattice_vectors = cp.asarray(cp.linalg.inv(lattice_vectors).T, order="C")
 
@@ -136,9 +138,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
     for grids_localized, grids_diffused in tasks:
         subcell_in_localized_region = grids_localized.cell
         mesh = grids_localized.mesh
-        granularized_mesh_size = cp.asarray(
-            cp.ceil(cp.asarray(mesh) / blocking_sizes_on_gpu), dtype=cp.int32
-        ).get()
+        n_blocks_abc = np.asarray(np.ceil(mesh / block_size), dtype=cp.int32)
 
         equivalent_cell_in_localized, coeff_in_localized = (
             subcell_in_localized_region.decontract_basis(to_cart=True, aggregate=True)
@@ -242,7 +242,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                 ) = assign_pairs_to_blocks(
                     pairs_to_blocks_begin_cpu,
                     pairs_to_blocks_end_cpu,
-                    granularized_mesh_size,
+                    n_blocks_abc,
                     n_pairs,
                     n_indices,
                 )
@@ -290,7 +290,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA", blocking_sizes=np.array([4, 4, 4]))
                 "atm": cp.asarray(grouped_cell._atm, dtype=cp.int32),
                 "bas": cp.asarray(grouped_cell._bas, dtype=cp.int32),
                 "env": cp.asarray(grouped_cell._env),
-                "blocking_sizes": np.asarray(blocking_sizes, dtype=np.int32),
                 "phase_diff_among_images": phase_diff_among_images,
                 "dxyz_dabc": cp.asarray(
                     (lattice_vectors.T / cp.asarray(mesh)).T, order="C"
@@ -333,24 +332,18 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
             cast_to_pointer(gaussians_per_angular_pair["i_shells"]),
             cast_to_pointer(gaussians_per_angular_pair["j_shells"]),
             ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
-            cast_to_pointer(
-                gaussians_per_angular_pair["shell_to_ao_indices"]),
+            cast_to_pointer(gaussians_per_angular_pair["shell_to_ao_indices"]),
             ctypes.c_int(n_i_functions),
             ctypes.c_int(n_j_functions),
             cast_to_pointer(
-                gaussians_per_angular_pair[
-                    "non_trivial_pairs_at_local_points"
-                ]),
+                gaussians_per_angular_pair["non_trivial_pairs_at_local_points"]
+            ),
             cast_to_pointer(
                 gaussians_per_angular_pair["accumulated_n_pairs_per_point"]
             ),
-            cast_to_pointer(
-                gaussians_per_angular_pair["sorted_block_index"]
-            ),
+            cast_to_pointer(gaussians_per_angular_pair["sorted_block_index"]),
             ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
-            cast_to_pointer(
-                gaussians_per_angular_pair["image_indices"]
-            ),
+            cast_to_pointer(gaussians_per_angular_pair["image_indices"]),
             cast_to_pointer(pairs_info["neighboring_images"]),
             ctypes.c_int(n_images),
             (ctypes.c_int * 3)(*pairs_info["mesh"]),
@@ -476,16 +469,12 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, xc_type="LDA"):
             ctypes.c_int(n_i_functions),
             ctypes.c_int(n_j_functions),
             cast_to_pointer(
-                gaussians_per_angular_pair[
-                    "non_trivial_pairs_at_local_points"
-                ]
+                gaussians_per_angular_pair["non_trivial_pairs_at_local_points"]
             ),
             cast_to_pointer(
                 gaussians_per_angular_pair["accumulated_n_pairs_per_point"]
             ),
-            cast_to_pointer(
-                gaussians_per_angular_pair["sorted_block_index"]
-            ),
+            cast_to_pointer(gaussians_per_angular_pair["sorted_block_index"]),
             ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
             cast_to_pointer(gaussians_per_angular_pair["image_indices"]),
             cast_to_pointer(pairs_info["neighboring_images"]),
