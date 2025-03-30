@@ -257,7 +257,7 @@ __global__ void screen_gaussian_pairs_kernel(
   }
 }
 
-template <int n_channels, int i_angular, int j_angular>
+template <int n_channels, int i_angular, int j_angular, bool is_non_orthogonal>
 __global__ void evaluate_density_kernel(
     double *density, const double *density_matrices,
     const int *non_trivial_pairs, const int *i_shells, const int *j_shells,
@@ -373,10 +373,12 @@ __global__ void evaluate_density_kernel(
     const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
     const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
 
+    const double x0 = start_position_x - pair_x;
+    const double y0 = start_position_y - pair_y;
+    const double z0 = start_position_z - pair_z;
+
     const double gaussian_exponent_at_reference =
-        ij_exponent * distance_squared(start_position_x - pair_x,
-                                       start_position_y - pair_y,
-                                       start_position_z - pair_z);
+        ij_exponent * distance_squared(x0, y0, z0);
 
     const double pair_prefactor =
         is_valid_pair
@@ -409,17 +411,23 @@ __global__ void evaluate_density_kernel(
     // Shouldn't be too hard to extend to non-orthogonal lattices.
 
     const double exp_cross_term_a =
-        exp(-2 * ij_exponent * dxyz_dabc[0] * (start_position_x - pair_x));
+        exp(-2 * ij_exponent *
+            (dxyz_dabc[0] * x0 + dxyz_dabc[1] * y0 + dxyz_dabc[2] * z0));
     const double exp_cross_term_b =
-        exp(-2 * ij_exponent * dxyz_dabc[4] * (start_position_y - pair_y));
+        exp(-2 * ij_exponent *
+            (dxyz_dabc[3] * x0 + dxyz_dabc[4] * y0 + dxyz_dabc[5] * z0));
     const double exp_cross_term_c =
-        exp(-2 * ij_exponent * dxyz_dabc[8] * (start_position_z - pair_z));
+        exp(-2 * ij_exponent *
+            (dxyz_dabc[6] * x0 + dxyz_dabc[7] * y0 + dxyz_dabc[8] * z0));
     const double exp_da_squared =
-        exp(-ij_exponent * dxyz_dabc[0] * dxyz_dabc[0]);
+        exp(-ij_exponent *
+            distance_squared(dxyz_dabc[0], dxyz_dabc[1], dxyz_dabc[2]));
     const double exp_db_squared =
-        exp(-ij_exponent * dxyz_dabc[4] * dxyz_dabc[4]);
+        exp(-ij_exponent *
+            distance_squared(dxyz_dabc[3], dxyz_dabc[4], dxyz_dabc[5]));
     const double exp_dc_squared =
-        exp(-ij_exponent * dxyz_dabc[8] * dxyz_dabc[8]);
+        exp(-ij_exponent *
+            distance_squared(dxyz_dabc[6], dxyz_dabc[7], dxyz_dabc[8]));
 
     double gaussian_x, gaussian_y, gaussian_z, exp_n_dx_squared,
         exp_n_dy_squared, exp_n_dz_squared;
@@ -480,7 +488,19 @@ __global__ void evaluate_density_kernel(
                   reduced;
             }
           }
+          if constexpr (is_non_orthogonal) {
+            x += dxyz_dabc[6];
+            y += dxyz_dabc[7];
+          }
         }
+        if constexpr (is_non_orthogonal) {
+          x += dxyz_dabc[3];
+          z += dxyz_dabc[5];
+        }
+      }
+      if constexpr (is_non_orthogonal) {
+        y += dxyz_dabc[1];
+        z += dxyz_dabc[2];
       }
     }
   }
@@ -501,19 +521,20 @@ __global__ void evaluate_density_kernel(
 }
 
 #define density_kernel_macro(li, lj)                                           \
-  evaluate_density_kernel<n_channels, li, lj><<<block_grid, block_size>>>(      \
-      density, density_matrices, non_trivial_pairs, i_shells, j_shells,        \
-      n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,           \
-      sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,         \
-      sorted_block_index, image_indices, vectors_to_neighboring_images,        \
-      n_images, mesh_a, mesh_b, mesh_c, atm, bas, env)
+  evaluate_density_kernel<n_channels, li, lj, is_non_orthogonal>               \
+      <<<block_grid, block_size>>>(                                            \
+          density, density_matrices, non_trivial_pairs, i_shells, j_shells,    \
+          n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,       \
+          sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,     \
+          sorted_block_index, image_indices, vectors_to_neighboring_images,    \
+          n_images, mesh_a, mesh_b, mesh_c, atm, bas, env)
 
 #define density_kernel_case_macro(li, lj)                                      \
   case (li * 10 + lj):                                                         \
     density_kernel_macro(li, lj);                                              \
     break
 
-template <int n_channels>
+template <int n_channels, bool is_non_orthogonal>
 void evaluate_density_driver(
     double *density, const double *density_matrices, const int i_angular,
     const int j_angular, const int *non_trivial_pairs, const int *i_shells,
@@ -566,7 +587,7 @@ void evaluate_density_driver(
   checkCudaErrors(cudaPeekAtLastError());
 }
 
-template <int n_channels, int i_angular, int j_angular>
+template <int n_channels, int i_angular, int j_angular, bool is_non_orthogonal>
 __global__ void evaluate_xc_kernel(
     double *fock, const double *xc_weights, const int *non_trivial_pairs,
     const int *i_shells, const int *j_shells, const int n_j_shells,
@@ -622,8 +643,8 @@ __global__ void evaluate_xc_kernel(
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
-  __shared__ double xc_values[n_channels * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ *
-                              BLOCK_DIM_XYZ];
+  __shared__ double
+      xc_values[n_channels * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ];
 
   int a_index = a_start + threadIdx.z;
   int b_index = b_start + threadIdx.y;
@@ -695,10 +716,13 @@ __global__ void evaluate_xc_kernel(
     const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
     const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
     const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
+
+    const double x0 = start_position_x - pair_x;
+    const double y0 = start_position_y - pair_y;
+    const double z0 = start_position_z - pair_z;
+
     const double gaussian_exponent_at_reference =
-        ij_exponent * distance_squared(start_position_x - pair_x,
-                                       start_position_y - pair_y,
-                                       start_position_z - pair_z);
+        ij_exponent * distance_squared(x0, y0, z0);
 
     const double pair_prefactor =
         is_valid_pair
@@ -706,20 +730,25 @@ __global__ void evaluate_xc_kernel(
                   i_coeff * j_coeff * common_fac_sp<i_angular>() *
                   common_fac_sp<j_angular>()
             : 0;
-
     const double exp_cross_term_a =
-        exp(-2 * ij_exponent * dxyz_dabc[0] * (start_position_x - pair_x));
+        exp(-2 * ij_exponent *
+            (dxyz_dabc[0] * x0 + dxyz_dabc[1] * y0 + dxyz_dabc[2] * z0));
     const double exp_cross_term_b =
-        exp(-2 * ij_exponent * dxyz_dabc[4] * (start_position_y - pair_y));
+        exp(-2 * ij_exponent *
+            (dxyz_dabc[3] * x0 + dxyz_dabc[4] * y0 + dxyz_dabc[5] * z0));
     const double exp_cross_term_c =
-        exp(-2 * ij_exponent * dxyz_dabc[8] * (start_position_z - pair_z));
+        exp(-2 * ij_exponent *
+            (dxyz_dabc[6] * x0 + dxyz_dabc[7] * y0 + dxyz_dabc[8] * z0));
 
     const double exp_da_squared =
-        exp(-ij_exponent * dxyz_dabc[0] * dxyz_dabc[0]);
+        exp(-ij_exponent *
+            distance_squared(dxyz_dabc[0], dxyz_dabc[1], dxyz_dabc[2]));
     const double exp_db_squared =
-        exp(-ij_exponent * dxyz_dabc[4] * dxyz_dabc[4]);
+        exp(-ij_exponent *
+            distance_squared(dxyz_dabc[3], dxyz_dabc[4], dxyz_dabc[5]));
     const double exp_dc_squared =
-        exp(-ij_exponent * dxyz_dabc[8] * dxyz_dabc[8]);
+        exp(-ij_exponent *
+            distance_squared(dxyz_dabc[6], dxyz_dabc[7], dxyz_dabc[8]));
 
 #pragma unroll
     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -764,11 +793,10 @@ __global__ void evaluate_xc_kernel(
 #pragma unroll
           for (int i_channel = 0; i_channel < n_channels; i_channel++) {
             xc_value =
-                gaussian *
-                xc_values[i_channel * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ *
-                          BLOCK_DIM_XYZ +
-                          a_index * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ +
-                          b_index * BLOCK_DIM_XYZ + c_index];
+                gaussian * xc_values[i_channel * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ *
+                                         BLOCK_DIM_XYZ +
+                                     a_index * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ +
+                                     b_index * BLOCK_DIM_XYZ + c_index];
 #pragma unroll
             for (int i_function_index = 0;
                  i_function_index < n_i_cartesian_functions;
@@ -787,7 +815,19 @@ __global__ void evaluate_xc_kernel(
               }
             }
           }
+          if constexpr (is_non_orthogonal) {
+            x += dxyz_dabc[6];
+            y += dxyz_dabc[7];
+          }
         }
+        if constexpr (!is_non_orthogonal) {
+          x += dxyz_dabc[3];
+          z += dxyz_dabc[5];
+        }
+      }
+      if constexpr (is_non_orthogonal) {
+        y += dxyz_dabc[1];
+        z += dxyz_dabc[2];
       }
     }
 
@@ -822,19 +862,20 @@ __global__ void evaluate_xc_kernel(
 }
 
 #define xc_kernel_macro(li, lj)                                                \
-  evaluate_xc_kernel<n_channels, li, lj><<<block_grid, block_size>>>(          \
-      fock, xc_weights, non_trivial_pairs, i_shells, j_shells, n_j_shells,     \
-      shell_to_ao_indices, n_i_functions, n_j_functions,                       \
-      sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,         \
-      sorted_block_index, image_indices, vectors_to_neighboring_images,        \
-      n_images, mesh_a, mesh_b, mesh_c, atm, bas, env)
+  evaluate_xc_kernel<n_channels, li, lj, is_non_orthogonal>                    \
+      <<<block_grid, block_size>>>(                                            \
+          fock, xc_weights, non_trivial_pairs, i_shells, j_shells, n_j_shells, \
+          shell_to_ao_indices, n_i_functions, n_j_functions,                   \
+          sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,     \
+          sorted_block_index, image_indices, vectors_to_neighboring_images,    \
+          n_images, mesh_a, mesh_b, mesh_c, atm, bas, env)
 
 #define xc_kernel_case_macro(li, lj)                                           \
   case (li * 10 + lj):                                                         \
     xc_kernel_macro(li, lj);                                                   \
     break
 
-template <int n_channels>
+template <int n_channels, bool is_non_orthogonal>
 void evaluate_xc_driver(
     double *fock, const double *xc_weights, const int i_angular,
     const int j_angular, const int *non_trivial_pairs, const int *i_shells,
@@ -1046,28 +1087,50 @@ void evaluate_density_driver(
     const int n_i_functions, const int n_j_functions,
     const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
-    const int *sorted_block_index, const int n_blocks, const int *image_indices,
-    const double *vectors_to_neighboring_images, const int n_images,
-    const int *mesh, const int *atm, const int *bas, const double *env,
-    const int n_channels) {
-  if (n_channels == 1) {
-    evaluate_density_driver<1>(
-        density, density_matrices, i_angular, j_angular, non_trivial_pairs,
-        i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-        n_j_functions, sorted_pairs_per_local_grid,
-        accumulated_n_pairs_per_local_grid, sorted_block_index, n_blocks,
-        image_indices, vectors_to_neighboring_images, n_images, mesh, atm, bas,
-        env);
-  } else if (n_channels == 2) {
-    evaluate_density_driver<2>(
-        density, density_matrices, i_angular, j_angular, non_trivial_pairs,
-        i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-        n_j_functions, sorted_pairs_per_local_grid,
-        accumulated_n_pairs_per_local_grid, sorted_block_index, n_blocks,
-        image_indices, vectors_to_neighboring_images, n_images, mesh, atm, bas,
-        env);
+    const int *sorted_block_index, const int n_contributing_blocks,
+    const int *image_indices, const double *vectors_to_neighboring_images,
+    const int n_images, const int *mesh, const int *atm, const int *bas,
+    const double *env, const int n_channels, const int is_non_orthogonal) {
+  if (is_non_orthogonal) {
+    if (n_channels == 1) {
+      evaluate_density_driver<1, true>(
+          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
+          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+          n_j_functions, sorted_pairs_per_local_grid,
+          accumulated_n_pairs_per_local_grid, sorted_block_index,
+          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+          n_images, mesh, atm, bas, env);
+    } else if (n_channels == 2) {
+      evaluate_density_driver<2, true>(
+          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
+          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+          n_j_functions, sorted_pairs_per_local_grid,
+          accumulated_n_pairs_per_local_grid, sorted_block_index,
+          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+          n_images, mesh, atm, bas, env);
+    } else {
+      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+    }
   } else {
-    fprintf(stderr, "n_channels more than 2 is not supported.\n");
+    if (n_channels == 1) {
+      evaluate_density_driver<1, false>(
+          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
+          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+          n_j_functions, sorted_pairs_per_local_grid,
+          accumulated_n_pairs_per_local_grid, sorted_block_index,
+          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+          n_images, mesh, atm, bas, env);
+    } else if (n_channels == 2) {
+      evaluate_density_driver<2, false>(
+          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
+          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+          n_j_functions, sorted_pairs_per_local_grid,
+          accumulated_n_pairs_per_local_grid, sorted_block_index,
+          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+          n_images, mesh, atm, bas, env);
+    } else {
+      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+    }
   }
 }
 
@@ -1081,23 +1144,47 @@ void evaluate_xc_driver(
     const int *sorted_block_index, const int n_contributing_blocks,
     const int *image_indices, const double *vectors_to_neighboring_images,
     const int n_images, const int *mesh, const int *atm, const int *bas,
-    const double *env, const int n_channels) {
-  if (n_channels == 1) {
-    evaluate_xc_driver<1>(
-        fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
-        j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
-        sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
-        sorted_block_index, n_contributing_blocks, image_indices,
-        vectors_to_neighboring_images, n_images, mesh, atm, bas, env);
-  } else if (n_channels == 2) {
-    evaluate_xc_driver<2>(
-        fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
-        j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
-        sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
-        sorted_block_index, n_contributing_blocks, image_indices,
-        vectors_to_neighboring_images, n_images, mesh, atm, bas, env);
+    const double *env, const int n_channels, const int is_non_orthogonal) {
+  if (is_non_orthogonal) {
+    if (n_channels == 1) {
+      evaluate_xc_driver<1, true>(
+          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
+          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+          n_j_functions, sorted_pairs_per_local_grid,
+          accumulated_n_pairs_per_local_grid, sorted_block_index,
+          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+          n_images, mesh, atm, bas, env);
+    } else if (n_channels == 2) {
+      evaluate_xc_driver<2, true>(
+          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
+          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+          n_j_functions, sorted_pairs_per_local_grid,
+          accumulated_n_pairs_per_local_grid, sorted_block_index,
+          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+          n_images, mesh, atm, bas, env);
+    } else {
+      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+    }
   } else {
-    fprintf(stderr, "n_channels more than 2 is not supported.\n");
+    if (n_channels == 1) {
+      evaluate_xc_driver<1, false>(
+          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
+          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+          n_j_functions, sorted_pairs_per_local_grid,
+          accumulated_n_pairs_per_local_grid, sorted_block_index,
+          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+          n_images, mesh, atm, bas, env);
+    } else if (n_channels == 2) {
+      evaluate_xc_driver<2, false>(
+          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
+          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+          n_j_functions, sorted_pairs_per_local_grid,
+          accumulated_n_pairs_per_local_grid, sorted_block_index,
+          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+          n_images, mesh, atm, bas, env);
+    } else {
+      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+    }
   }
 }
 }

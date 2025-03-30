@@ -117,6 +117,12 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     vol = cell.vol
     block_size = np.array([4, 4, 4])
     lattice_vectors = cp.asarray(cell.lattice_vectors())
+    off_diagonal = lattice_vectors - cp.diag(lattice_vectors.diagonal())
+    is_non_orthogonal = cp.any(cp.abs(off_diagonal) > 1e-10)
+    if is_non_orthogonal:
+        is_non_orthogonal = 1
+    else:
+        is_non_orthogonal = 0
     reciprocal_lattice_vectors = cp.asarray(cp.linalg.inv(lattice_vectors).T, order="C")
 
     reciprocal_norms = cp.linalg.norm(reciprocal_lattice_vectors, axis=1)
@@ -294,6 +300,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 "dxyz_dabc": cp.asarray(
                     (lattice_vectors.T / cp.asarray(mesh)).T, order="C"
                 ),
+                "is_non_orthogonal": is_non_orthogonal,
             }
         )
 
@@ -351,6 +358,7 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
             cast_to_pointer(pairs_info["bas"]),
             cast_to_pointer(pairs_info["env"]),
             ctypes.c_int(n_channels),
+            ctypes.c_int(pairs_info["is_non_orthogonal"]),
         )
 
     return density
@@ -484,6 +492,7 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, xc_type="LDA"):
             cast_to_pointer(pairs_info["bas"]),
             cast_to_pointer(pairs_info["env"]),
             ctypes.c_int(n_channels),
+            ctypes.c_int(pairs_info["is_non_orthogonal"]),
         )
 
     if n_k_points > 1:
