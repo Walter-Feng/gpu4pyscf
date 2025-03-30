@@ -1,4 +1,3 @@
-
 #include <cub/cub.cuh>
 #include <gint/cuda_alloc.cuh>
 #include <gint/gint.h>
@@ -13,6 +12,7 @@
 #define bas(SLOT, I) bas[BAS_SLOTS * (I) + (SLOT)]
 
 #define EIJ_CUTOFF 60
+#define BLOCK_DIM_XYZ 4
 
 __constant__ double lattice_vectors[9];
 __constant__ double reciprocal_lattice_vectors[9];
@@ -31,6 +31,16 @@ template <int ANG> __inline__ __device__ constexpr double common_fac_sp() {
     return 0.488602511902919921;
   } else {
     return 1.0;
+  }
+}
+
+template <int ANG> __inline__ __device__ double log_common_fac_sp() {
+  if constexpr (ANG == 0) {
+    return -1.26551212348464540;
+  } else if constexpr (ANG == 1) {
+    return -0.71620597915059055;
+  } else {
+    return 0;
   }
 }
 
@@ -132,27 +142,31 @@ __inline__ __device__ void gto_cartesian(double values[], double fx, double fy,
 }
 
 template <int i_angular, int j_angular>
-__global__ void screen_gaussian_pairs(
-    int *non_trivial_pairs, int *pairs_to_blocks_begin,
+__global__ void screen_gaussian_pairs_kernel(
+    int *shell_pair_indices, int *image_indices, int *pairs_to_blocks_begin,
     int *pairs_to_blocks_end, const int *i_shells, const int n_i_shells,
     const int *j_shells, const int n_j_shells,
-    const int *vectors_to_neighboring_images, const int n_images,
+    const double *vectors_to_neighboring_images, const int n_images,
     const int mesh_a, const int mesh_b, const int mesh_c, const int *atm,
     const int *bas, const double *env, const double threshold_in_log) {
 
-  const int i_shell_index = threadIdx.x + blockDim.x * blockIdx.x;
-  const int j_shell_index = threadIdx.y + blockDim.y * blockIdx.y;
-  bool is_valid_pair = i_shell_index < n_i_shells * n_images &&
-                             j_shell_index < n_j_shells * n_images;
+  const int i_shell_image_index = threadIdx.x + blockDim.x * blockIdx.x;
+  const int j_shell_image_index = threadIdx.y + blockDim.y * blockIdx.y;
+  bool is_valid_pair = i_shell_image_index < n_i_shells * n_images &&
+                       j_shell_image_index < n_j_shells * n_images;
 
-  const int i_image = is_valid_pair ? i_shell_index / n_images : 0;
-  const int i_shell = is_valid_pair ? i_shell_index % n_images : 0;
-  const int j_image = is_valid_pair ? j_shell_index / n_images : 0;
-  const int j_shell = is_valid_pair ? j_shell_index % n_images : 0;
+  const int i_image = is_valid_pair ? i_shell_image_index / n_i_shells : 0;
+  const int i_shell_index = i_shell_image_index - i_image * n_i_shells;
+  const int j_image = is_valid_pair ? j_shell_image_index / n_j_shells : 0;
+  const int j_shell_index = j_shell_image_index - j_image * n_j_shells;
+  const int i_shell = is_valid_pair ? i_shells[i_shell_index] : 0;
+  const int j_shell = is_valid_pair ? j_shells[j_shell_index] : 0;
   const int i_shell_stride = n_j_shells * n_images;
   const int n_pairs = n_i_shells * n_j_shells * n_images * n_images;
-  const int pair_index = i_shell_index * i_shell_stride + j_shell_index;
-  
+  const int pair_index =
+      i_shell_image_index * i_shell_stride + j_shell_image_index;
+  const int shell_pair_index = i_shell_index * n_j_shells + j_shell_index;
+
   const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
   const double i_x =
       env[i_coord_offset] + vectors_to_neighboring_images[i_image * 3];
@@ -195,13 +209,9 @@ __global__ void screen_gaussian_pairs(
                         pair_y * reciprocal_lattice_vectors[7] +
                         pair_z * reciprocal_lattice_vectors[8];
 
-  const double pair_prefactor = exp(-ij_exponent_in_prefactor) *
-                                common_fac_sp<i_angular>() *
-                                common_fac_sp<j_angular>();
-
-  const double prefactor_in_log =
-      -ij_exponent_in_prefactor +
-      log(common_fac_sp<i_angular>() * common_fac_sp<j_angular>());
+  const double prefactor_in_log = -ij_exponent_in_prefactor +
+                                  log_common_fac_sp<i_angular>() +
+                                  log_common_fac_sp<j_angular>();
 
   const double cutoff = gaussian_summation_cutoff<i_angular + j_angular>(
       ij_exponent, prefactor_in_log, threshold_in_log);
@@ -222,22 +232,22 @@ __global__ void screen_gaussian_pairs(
     is_valid_pair = false;
   }
 
-  const int blocking_sizes_on_gpu = 4;
   begin_a = max(begin_a, 0);
   begin_b = max(begin_b, 0);
   begin_c = max(begin_c, 0);
   end_a = min(end_a, mesh_a - 1);
   end_b = min(end_b, mesh_b - 1);
   end_c = min(end_c, mesh_c - 1);
-  begin_a /= blocking_sizes_on_gpu;
-  end_a /= blocking_sizes_on_gpu;
-  begin_b /= blocking_sizes_on_gpu;
-  end_b /= blocking_sizes_on_gpu;
-  begin_c /= blocking_sizes_on_gpu;
-  end_c /= blocking_sizes_on_gpu;
+  begin_a >>= 2;
+  end_a >>= 2;
+  begin_b >>= 2;
+  end_b >>= 2;
+  begin_c >>= 2;
+  end_c >>= 2;
 
   if (is_valid_pair) {
-    non_trivial_pairs[pair_index] = 1;
+    shell_pair_indices[pair_index] = shell_pair_index;
+    image_indices[pair_index] = i_image * n_images + j_image;
     pairs_to_blocks_begin[pair_index] = begin_a;
     pairs_to_blocks_begin[pair_index + n_pairs] = begin_b;
     pairs_to_blocks_begin[pair_index + 2 * n_pairs] = begin_c;
@@ -247,12 +257,11 @@ __global__ void screen_gaussian_pairs(
   }
 }
 
-template <int n_channels, int i_angular, int j_angular, int block_dim_a,
-          int block_dim_b, int block_dim_c>
+template <int n_channels, int i_angular, int j_angular>
 __global__ void evaluate_density_kernel(
     double *density, const double *density_matrices,
-    const int *non_trivial_pairs, const double *cutoffs, const int *i_shells,
-    const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
+    const int *non_trivial_pairs, const int *i_shells, const int *j_shells,
+    const int n_j_shells, const int *shell_to_ao_indices,
     const int n_i_functions, const int n_j_functions,
     const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
@@ -263,14 +272,14 @@ __global__ void evaluate_density_kernel(
 
   constexpr int n_i_cartesian_functions = (i_angular + 1) * (i_angular + 2) / 2;
   constexpr int n_j_cartesian_functions = (j_angular + 1) * (j_angular + 2) / 2;
-  constexpr int n_threads = block_dim_a * block_dim_b * block_dim_c;
+  constexpr int n_threads = BLOCK_DIM_XYZ * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
 
   const int density_matrix_stride = n_i_functions * n_j_functions;
   const int density_matrix_channel_stride = density_matrix_stride * n_images;
 
   const int block_index = sorted_block_index[blockIdx.x];
-  const int n_blocks_b = (mesh_b + block_dim_b - 1) / block_dim_b;
-  const int n_blocks_c = (mesh_c + block_dim_c - 1) / block_dim_c;
+  const int n_blocks_b = (mesh_b + BLOCK_DIM_XYZ - 1) / BLOCK_DIM_XYZ;
+  const int n_blocks_c = (mesh_c + BLOCK_DIM_XYZ - 1) / BLOCK_DIM_XYZ;
 
   const int block_a_stride = n_blocks_b * n_blocks_c;
   const int block_a_index = block_index / block_a_stride;
@@ -278,9 +287,9 @@ __global__ void evaluate_density_kernel(
   const int block_b_index = block_ab_index / n_blocks_c;
   const int block_c_index = block_ab_index % n_blocks_c;
 
-  const int a_start = block_a_index * block_dim_a;
-  const int b_start = block_b_index * block_dim_b;
-  const int c_start = block_c_index * block_dim_c;
+  const int a_start = block_a_index * BLOCK_DIM_XYZ;
+  const int b_start = block_b_index * BLOCK_DIM_XYZ;
+  const int c_start = block_c_index * BLOCK_DIM_XYZ;
 
   const double start_position_x =
       dxyz_dabc[0] * a_start + dxyz_dabc[3] * b_start + dxyz_dabc[6] * c_start;
@@ -289,12 +298,12 @@ __global__ void evaluate_density_kernel(
   const double start_position_z =
       dxyz_dabc[2] * a_start + dxyz_dabc[5] * b_start + dxyz_dabc[8] * c_start;
 
-  const int a_upper = min(a_start + block_dim_a, mesh_a) - a_start;
-  const int b_upper = min(b_start + block_dim_b, mesh_b) - b_start;
-  const int c_upper = min(c_start + block_dim_c, mesh_c) - c_start;
+  const int a_upper = min(a_start + BLOCK_DIM_XYZ, mesh_a) - a_start;
+  const int b_upper = min(b_start + BLOCK_DIM_XYZ, mesh_b) - b_start;
+  const int c_upper = min(c_start + BLOCK_DIM_XYZ, mesh_c) - c_start;
 
-  const int thread_id = threadIdx.x + threadIdx.y * block_dim_c +
-                        threadIdx.z * block_dim_c * block_dim_b;
+  const int thread_id = threadIdx.x + threadIdx.y * BLOCK_DIM_XYZ +
+                        threadIdx.z * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
 
   double i_cartesian[n_i_cartesian_functions];
   double j_cartesian[n_j_cartesian_functions];
@@ -460,14 +469,14 @@ __global__ void evaluate_density_kernel(
             density_value_to_be_shared *= gaussian;
 
             double reduced =
-                cub::BlockReduce<double, block_dim_c,
+                cub::BlockReduce<double, BLOCK_DIM_XYZ,
                                  cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY,
-                                 block_dim_b, block_dim_a>()
+                                 BLOCK_DIM_XYZ, BLOCK_DIM_XYZ>()
                     .Sum(density_value_to_be_shared);
             if (thread_id == 0) {
               reduced_density_values[i_channel * n_threads +
-                                     a_index * block_dim_b * block_dim_c +
-                                     b_index * block_dim_c + c_index] +=
+                                     a_index * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ +
+                                     b_index * BLOCK_DIM_XYZ + c_index] +=
                   reduced;
             }
           }
@@ -492,10 +501,9 @@ __global__ void evaluate_density_kernel(
 }
 
 #define density_kernel_macro(li, lj)                                           \
-  evaluate_density_kernel<n_channels, li, lj, block_dim_a, block_dim_b,        \
-                          block_dim_c><<<block_grid, block_size>>>(            \
-      density, density_matrices, non_trivial_pairs, cutoffs, i_shells,         \
-      j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions, \
+  evaluate_density_kernel<n_channels, li, lj><<<block_grid, block_size>>>(      \
+      density, density_matrices, non_trivial_pairs, i_shells, j_shells,        \
+      n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,           \
       sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,         \
       sorted_block_index, image_indices, vectors_to_neighboring_images,        \
       n_images, mesh_a, mesh_b, mesh_c, atm, bas, env)
@@ -505,19 +513,19 @@ __global__ void evaluate_density_kernel(
     density_kernel_macro(li, lj);                                              \
     break
 
-template <int n_channels, int block_dim_a, int block_dim_b, int block_dim_c>
+template <int n_channels>
 void evaluate_density_driver(
     double *density, const double *density_matrices, const int i_angular,
-    const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
-    const int *i_shells, const int *j_shells, const int n_j_shells,
-    const int *shell_to_ao_indices, const int n_i_functions,
-    const int n_j_functions, const int *sorted_pairs_per_local_grid,
+    const int j_angular, const int *non_trivial_pairs, const int *i_shells,
+    const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
+    const int n_i_functions, const int n_j_functions,
+    const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
     const int *sorted_block_index, const int n_contributing_blocks,
     const int *image_indices, const double *vectors_to_neighboring_images,
     const int n_images, const int *mesh, const int *atm, const int *bas,
     const double *env) {
-  dim3 block_size(block_dim_c, block_dim_b, block_dim_a);
+  dim3 block_size(BLOCK_DIM_XYZ, BLOCK_DIM_XYZ, BLOCK_DIM_XYZ);
   int mesh_a = mesh[0];
   int mesh_b = mesh[1];
   int mesh_c = mesh[2];
@@ -558,14 +566,12 @@ void evaluate_density_driver(
   checkCudaErrors(cudaPeekAtLastError());
 }
 
-template <int n_channels, int i_angular, int j_angular, int block_dim_a,
-          int block_dim_b, int block_dim_c>
+template <int n_channels, int i_angular, int j_angular>
 __global__ void evaluate_xc_kernel(
     double *fock, const double *xc_weights, const int *non_trivial_pairs,
-    const double *cutoffs, const int *i_shells, const int *j_shells,
-    const int n_j_shells, const int *shell_to_ao_indices,
-    const int n_i_functions, const int n_j_functions,
-    const int *sorted_pairs_per_local_grid,
+    const int *i_shells, const int *j_shells, const int n_j_shells,
+    const int *shell_to_ao_indices, const int n_i_functions,
+    const int n_j_functions, const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
     const int *sorted_block_index, const int *image_indices,
     const double *vectors_to_neighboring_images, const int n_images,
@@ -574,15 +580,15 @@ __global__ void evaluate_xc_kernel(
 
   constexpr int n_i_cartesian_functions = (i_angular + 1) * (i_angular + 2) / 2;
   constexpr int n_j_cartesian_functions = (j_angular + 1) * (j_angular + 2) / 2;
-  constexpr int n_threads = block_dim_a * block_dim_b * block_dim_c;
+  constexpr int n_threads = BLOCK_DIM_XYZ * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
 
   const int xc_weights_stride = mesh_a * mesh_b * mesh_c;
   const int fock_stride = n_i_functions * n_j_functions;
 
   const int block_index = sorted_block_index[blockIdx.x];
 
-  const int n_blocks_b = (mesh_b + block_dim_b - 1) / block_dim_b;
-  const int n_blocks_c = (mesh_c + block_dim_c - 1) / block_dim_c;
+  const int n_blocks_b = (mesh_b + BLOCK_DIM_XYZ - 1) / BLOCK_DIM_XYZ;
+  const int n_blocks_c = (mesh_c + BLOCK_DIM_XYZ - 1) / BLOCK_DIM_XYZ;
 
   const int block_a_stride = n_blocks_b * n_blocks_c;
   const int block_a_index = block_index / block_a_stride;
@@ -590,9 +596,9 @@ __global__ void evaluate_xc_kernel(
   const int block_b_index = block_ab_index / n_blocks_c;
   const int block_c_index = block_ab_index % n_blocks_c;
 
-  const int a_start = block_a_index * block_dim_a;
-  const int b_start = block_b_index * block_dim_b;
-  const int c_start = block_c_index * block_dim_c;
+  const int a_start = block_a_index * BLOCK_DIM_XYZ;
+  const int b_start = block_b_index * BLOCK_DIM_XYZ;
+  const int c_start = block_c_index * BLOCK_DIM_XYZ;
 
   const double start_position_x =
       dxyz_dabc[0] * a_start + dxyz_dabc[3] * b_start + dxyz_dabc[6] * c_start;
@@ -601,9 +607,9 @@ __global__ void evaluate_xc_kernel(
   const double start_position_z =
       dxyz_dabc[2] * a_start + dxyz_dabc[5] * b_start + dxyz_dabc[8] * c_start;
 
-  const int a_upper = min(a_start + block_dim_a, mesh_a) - a_start;
-  const int b_upper = min(b_start + block_dim_b, mesh_b) - b_start;
-  const int c_upper = min(c_start + block_dim_c, mesh_c) - c_start;
+  const int a_upper = min(a_start + BLOCK_DIM_XYZ, mesh_a) - a_start;
+  const int b_upper = min(b_start + BLOCK_DIM_XYZ, mesh_b) - b_start;
+  const int c_upper = min(c_start + BLOCK_DIM_XYZ, mesh_c) - c_start;
 
   double neighboring_gaussian_sum[n_channels * n_i_cartesian_functions *
                                   n_j_cartesian_functions];
@@ -616,8 +622,8 @@ __global__ void evaluate_xc_kernel(
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
-  __shared__ double
-      xc_values[n_channels * block_dim_a * block_dim_b * block_dim_c];
+  __shared__ double xc_values[n_channels * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ *
+                              BLOCK_DIM_XYZ];
 
   int a_index = a_start + threadIdx.z;
   int b_index = b_start + threadIdx.y;
@@ -627,8 +633,8 @@ __global__ void evaluate_xc_kernel(
       a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c;
   double xc_value = 0;
 
-  const int thread_id = threadIdx.x + threadIdx.y * block_dim_c +
-                        threadIdx.z * block_dim_c * block_dim_b;
+  const int thread_id = threadIdx.x + threadIdx.y * BLOCK_DIM_XYZ +
+                        threadIdx.z * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
 
 #pragma unroll
   for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -638,8 +644,8 @@ __global__ void evaluate_xc_kernel(
                      b_index * mesh_c + c_index];
     }
 
-    xc_values[i_channel * block_dim_a * block_dim_b * block_dim_c + thread_id] =
-        xc_value;
+    xc_values[i_channel * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ +
+              thread_id] = xc_value;
   }
   __syncthreads();
   double x, y, z;
@@ -759,9 +765,10 @@ __global__ void evaluate_xc_kernel(
           for (int i_channel = 0; i_channel < n_channels; i_channel++) {
             xc_value =
                 gaussian *
-                xc_values[i_channel * block_dim_a * block_dim_b * block_dim_c +
-                          a_index * block_dim_b * block_dim_c +
-                          b_index * block_dim_c + c_index];
+                xc_values[i_channel * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ *
+                          BLOCK_DIM_XYZ +
+                          a_index * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ +
+                          b_index * BLOCK_DIM_XYZ + c_index];
 #pragma unroll
             for (int i_function_index = 0;
                  i_function_index < n_i_cartesian_functions;
@@ -815,10 +822,9 @@ __global__ void evaluate_xc_kernel(
 }
 
 #define xc_kernel_macro(li, lj)                                                \
-  evaluate_xc_kernel<n_channels, li, lj, block_dim_a, block_dim_b,             \
-                     block_dim_c><<<block_grid, block_size>>>(                 \
-      fock, xc_weights, non_trivial_pairs, cutoffs, i_shells, j_shells,        \
-      n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,           \
+  evaluate_xc_kernel<n_channels, li, lj><<<block_grid, block_size>>>(          \
+      fock, xc_weights, non_trivial_pairs, i_shells, j_shells, n_j_shells,     \
+      shell_to_ao_indices, n_i_functions, n_j_functions,                       \
       sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,         \
       sorted_block_index, image_indices, vectors_to_neighboring_images,        \
       n_images, mesh_a, mesh_b, mesh_c, atm, bas, env)
@@ -828,19 +834,19 @@ __global__ void evaluate_xc_kernel(
     xc_kernel_macro(li, lj);                                                   \
     break
 
-template <int n_channels, int block_dim_a, int block_dim_b, int block_dim_c>
+template <int n_channels>
 void evaluate_xc_driver(
     double *fock, const double *xc_weights, const int i_angular,
-    const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
-    const int *i_shells, const int *j_shells, const int n_j_shells,
-    const int *shell_to_ao_indices, const int n_i_functions,
-    const int n_j_functions, const int *sorted_pairs_per_local_grid,
+    const int j_angular, const int *non_trivial_pairs, const int *i_shells,
+    const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
+    const int n_i_functions, const int n_j_functions,
+    const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
     const int *sorted_block_index, const int n_contributing_blocks,
     const int *image_indices, const double *vectors_to_neighboring_images,
     const int n_images, const int *mesh, const int *atm, const int *bas,
     const double *env) {
-  dim3 block_size(block_dim_c, block_dim_b, block_dim_a);
+  dim3 block_size(BLOCK_DIM_XYZ, BLOCK_DIM_XYZ, BLOCK_DIM_XYZ);
   int mesh_a = mesh[0];
   int mesh_b = mesh[1];
   int mesh_c = mesh[2];
@@ -938,6 +944,69 @@ void update_dxyz_dabc(const double *dxyz_dabc_on_device) {
   cudaMemcpyToSymbol(dxyz_dabc, dxyz_dabc_on_device, 9 * sizeof(double));
 }
 
+#define screen_gaussian_pairs_kernel_macro(li, lj)                             \
+  screen_gaussian_pairs_kernel<li, lj><<<block_grid, block_size>>>(            \
+      shell_pair_indices, image_indices, pairs_to_blocks_begin,                \
+      pairs_to_blocks_end, i_shells, n_i_shells, j_shells, n_j_shells,         \
+      vectors_to_neighboring_images, n_images, mesh_a, mesh_b, mesh_c, atm,    \
+      bas, env, threshold_in_log)
+
+#define screen_gaussian_pairs_kernel_case_macro(li, lj)                        \
+  case (li * 10 + lj):                                                         \
+    screen_gaussian_pairs_kernel_macro(li, lj);                                \
+    break
+
+void screen_gaussian_pairs(int *shell_pair_indices, int *image_indices,
+                           int *pairs_to_blocks_begin, int *pairs_to_blocks_end,
+                           const int i_angular, const int j_angular,
+                           const int *i_shells, const int n_i_shells,
+                           const int *j_shells, const int n_j_shells,
+                           const double *vectors_to_neighboring_images,
+                           const int n_images, const int *mesh, const int *atm,
+                           const int *bas, const double *env,
+                           const double threshold_in_log) {
+  dim3 block_size(16, 16);
+  dim3 block_grid(n_i_shells * n_images / 16 + 1,
+                  n_j_shells * n_images / 16 + 1);
+  const int mesh_a = mesh[0];
+  const int mesh_b = mesh[1];
+  const int mesh_c = mesh[2];
+  switch (i_angular * 10 + j_angular) {
+    screen_gaussian_pairs_kernel_case_macro(0, 0);
+    screen_gaussian_pairs_kernel_case_macro(0, 1);
+    screen_gaussian_pairs_kernel_case_macro(0, 2);
+    screen_gaussian_pairs_kernel_case_macro(0, 3);
+    screen_gaussian_pairs_kernel_case_macro(0, 4);
+    screen_gaussian_pairs_kernel_case_macro(1, 0);
+    screen_gaussian_pairs_kernel_case_macro(1, 1);
+    screen_gaussian_pairs_kernel_case_macro(1, 2);
+    screen_gaussian_pairs_kernel_case_macro(1, 3);
+    screen_gaussian_pairs_kernel_case_macro(1, 4);
+    screen_gaussian_pairs_kernel_case_macro(2, 0);
+    screen_gaussian_pairs_kernel_case_macro(2, 1);
+    screen_gaussian_pairs_kernel_case_macro(2, 2);
+    screen_gaussian_pairs_kernel_case_macro(2, 3);
+    screen_gaussian_pairs_kernel_case_macro(2, 4);
+    screen_gaussian_pairs_kernel_case_macro(3, 0);
+    screen_gaussian_pairs_kernel_case_macro(3, 1);
+    screen_gaussian_pairs_kernel_case_macro(3, 2);
+    screen_gaussian_pairs_kernel_case_macro(3, 3);
+    screen_gaussian_pairs_kernel_case_macro(3, 4);
+    screen_gaussian_pairs_kernel_case_macro(4, 0);
+    screen_gaussian_pairs_kernel_case_macro(4, 1);
+    screen_gaussian_pairs_kernel_case_macro(4, 2);
+    screen_gaussian_pairs_kernel_case_macro(4, 3);
+    screen_gaussian_pairs_kernel_case_macro(4, 4);
+  default:
+    fprintf(stderr,
+            "angular momentum pair %d, %d is not supported in "
+            "screen_gaussian_pairs_kernel\n",
+            i_angular, j_angular);
+  }
+
+  checkCudaErrors(cudaPeekAtLastError());
+}
+
 void assign_pairs_to_blocks(int *sorted_pairs_per_block, int *n_pairs_per_block,
                             int *block_index, const int *pairs_to_blocks_begin,
                             const int *pairs_to_blocks_end,
@@ -972,75 +1041,63 @@ void assign_pairs_to_blocks(int *sorted_pairs_per_block, int *n_pairs_per_block,
 
 void evaluate_density_driver(
     double *density, const double *density_matrices, const int i_angular,
-    const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
-    const int *i_shells, const int *j_shells, const int n_j_shells,
-    const int *shell_to_ao_indices, const int n_i_functions,
-    const int n_j_functions, const int *sorted_pairs_per_local_grid,
+    const int j_angular, const int *non_trivial_pairs, const int *i_shells,
+    const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
+    const int n_i_functions, const int n_j_functions,
+    const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
     const int *sorted_block_index, const int n_blocks, const int *image_indices,
     const double *vectors_to_neighboring_images, const int n_images,
     const int *mesh, const int *atm, const int *bas, const double *env,
-    const int blocking_sizes[3], const int n_channels) {
-  if (blocking_sizes[0] == 4 && blocking_sizes[1] == 4 &&
-      blocking_sizes[2] == 4) {
-    if (n_channels == 1) {
-      evaluate_density_driver<1, 4, 4, 4>(
-          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
-          cutoffs, i_shells, j_shells, n_j_shells, shell_to_ao_indices,
-          n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index, n_blocks,
-          image_indices, vectors_to_neighboring_images, n_images, mesh, atm,
-          bas, env);
-    } else if (n_channels == 2) {
-      evaluate_density_driver<2, 4, 4, 4>(
-          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
-          cutoffs, i_shells, j_shells, n_j_shells, shell_to_ao_indices,
-          n_i_functions, n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index, n_blocks,
-          image_indices, vectors_to_neighboring_images, n_images, mesh, atm,
-          bas, env);
-    } else {
-      fprintf(stderr, "n_channels more than 2 is not supported.\n");
-    }
+    const int n_channels) {
+  if (n_channels == 1) {
+    evaluate_density_driver<1>(
+        density, density_matrices, i_angular, j_angular, non_trivial_pairs,
+        i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+        n_j_functions, sorted_pairs_per_local_grid,
+        accumulated_n_pairs_per_local_grid, sorted_block_index, n_blocks,
+        image_indices, vectors_to_neighboring_images, n_images, mesh, atm, bas,
+        env);
+  } else if (n_channels == 2) {
+    evaluate_density_driver<2>(
+        density, density_matrices, i_angular, j_angular, non_trivial_pairs,
+        i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+        n_j_functions, sorted_pairs_per_local_grid,
+        accumulated_n_pairs_per_local_grid, sorted_block_index, n_blocks,
+        image_indices, vectors_to_neighboring_images, n_images, mesh, atm, bas,
+        env);
   } else {
-    fprintf(stderr, "blocking_sizes other than 4 is not supported.\n");
+    fprintf(stderr, "n_channels more than 2 is not supported.\n");
   }
 }
 
 void evaluate_xc_driver(
     double *fock, const double *xc_weights, const int i_angular,
-    const int j_angular, const int *non_trivial_pairs, const double *cutoffs,
-    const int *i_shells, const int *j_shells, const int n_j_shells,
-    const int *shell_to_ao_indices, const int n_i_functions,
-    const int n_j_functions, const int *sorted_pairs_per_local_grid,
+    const int j_angular, const int *non_trivial_pairs, const int *i_shells,
+    const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
+    const int n_i_functions, const int n_j_functions,
+    const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
     const int *sorted_block_index, const int n_contributing_blocks,
     const int *image_indices, const double *vectors_to_neighboring_images,
     const int n_images, const int *mesh, const int *atm, const int *bas,
-    const double *env, const int blocking_sizes[3], const int n_channels) {
-  if (blocking_sizes[0] == 4 && blocking_sizes[1] == 4 &&
-      blocking_sizes[2] == 4) {
-    if (n_channels == 1) {
-      evaluate_xc_driver<1, 4, 4, 4>(
-          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, cutoffs,
-          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, mesh, atm, bas, env);
-    } else if (n_channels == 2) {
-      evaluate_xc_driver<2, 4, 4, 4>(
-          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, cutoffs,
-          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, mesh, atm, bas, env);
-    } else {
-      fprintf(stderr, "n_channels more than 2 is not supported.\n");
-    }
+    const double *env, const int n_channels) {
+  if (n_channels == 1) {
+    evaluate_xc_driver<1>(
+        fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
+        j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+        sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+        sorted_block_index, n_contributing_blocks, image_indices,
+        vectors_to_neighboring_images, n_images, mesh, atm, bas, env);
+  } else if (n_channels == 2) {
+    evaluate_xc_driver<2>(
+        fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
+        j_shells, n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+        sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+        sorted_block_index, n_contributing_blocks, image_indices,
+        vectors_to_neighboring_images, n_images, mesh, atm, bas, env);
   } else {
-    fprintf(stderr, "blocking_sizes other than 4 is not supported.\n");
+    fprintf(stderr, "n_channels more than 2 is not supported.\n");
   }
 }
 }
