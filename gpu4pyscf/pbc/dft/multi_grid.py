@@ -19,7 +19,6 @@ import gpu4pyscf.lib.cupy_helper as cupy_helper
 
 libgpbc = cupy_helper.load_library("libgpbc")
 
-
 def cast_to_pointer(array):
     if isinstance(array, cp.ndarray):
         return ctypes.cast(array.data.ptr, ctypes.c_void_p)
@@ -75,37 +74,7 @@ def screen_gaussian_pairs(
     pairs_to_blocks_end = pairs_to_blocks_end.T[non_trivial_index]
     return non_trivial_pairs, image_indices, pairs_to_blocks_begin, pairs_to_blocks_end
 
-
 def assign_pairs_to_blocks(
-    pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks_abc, n_pairs, n_indices
-):
-    sorted_pairs_per_block = np.full(n_indices, -1, dtype=np.int32)
-    n_pairs_per_block = np.full(np.prod(n_blocks_abc), -1, dtype=np.int32)
-    block_index = np.full(np.prod(n_blocks_abc), -1, dtype=np.int32)
-    libgpbc.assign_pairs_to_blocks(
-        cast_to_pointer(sorted_pairs_per_block),
-        cast_to_pointer(n_pairs_per_block),
-        cast_to_pointer(block_index),
-        cast_to_pointer(pairs_to_blocks_begin),
-        cast_to_pointer(pairs_to_blocks_end),
-        cast_to_pointer(n_blocks_abc),
-        ctypes.c_int(n_pairs),
-    )
-    non_trivial_blocks = np.where(n_pairs_per_block > 0)[0]
-    n_pairs_per_block = n_pairs_per_block[non_trivial_blocks]
-    prepended_n_pairs_per_block = np.insert(n_pairs_per_block, 0, 0)
-    accumulated_n_pairs_per_block = np.cumsum(
-        prepended_n_pairs_per_block, dtype=np.int32
-    )
-    block_index = block_index[non_trivial_blocks]
-    return (
-        cp.asarray(sorted_pairs_per_block),
-        cp.asarray(accumulated_n_pairs_per_block),
-        cp.asarray(block_index),
-    )
-
-
-def assign_pairs_to_blocks_new(
     pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks_abc, n_pairs, n_indices
 ):
     n_blocks = np.prod(n_blocks_abc)
@@ -242,9 +211,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
 
         for i_angular, i_shells in zip(i_angulars_unique, sorted_i_shells):
             for j_angular, j_shells in zip(j_angulars_unique, sorted_j_shells):
-                t1 = log.init_timer()
-                i_angular = int(i_angular)
-                j_angular = int(j_angular)
                 (
                     shell_pair_indices_from_images,
                     image_indices,
@@ -270,24 +236,11 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 )
                 n_indices = int(cp.sum(n_contributing_blocks_per_pair))
                 n_pairs = len(shell_pair_indices_from_images)
-                """ pairs_to_blocks_begin_cpu = pairs_to_blocks_begin.get()
-                pairs_to_blocks_end_cpu = pairs_to_blocks_end.get()
                 (
                     gaussian_pair_indices,
                     accumulated_counts,
                     sorted_contributing_blocks,
                 ) = assign_pairs_to_blocks(
-                    pairs_to_blocks_begin_cpu,
-                    pairs_to_blocks_end_cpu,
-                    n_blocks_abc,
-                    n_pairs,
-                    n_indices,
-                )"""
-                (
-                    gaussian_pair_indices,
-                    accumulated_counts,
-                    sorted_contributing_blocks,
-                ) = assign_pairs_to_blocks_new(
                     pairs_to_blocks_begin,
                     pairs_to_blocks_end,
                     n_blocks_abc,

@@ -1041,46 +1041,6 @@ void evaluate_xc_driver(
   checkCudaErrors(cudaPeekAtLastError());
 }
 
-template <typename T>
-std::vector<size_t> sort_index(const std::vector<T> &vec) {
-  std::vector<size_t> idx(vec.size());
-  std::iota(idx.begin(), idx.end(), 0);
-  std::stable_sort(idx.begin(), idx.end(),
-                   [&](size_t i, size_t j) { return vec[i] > vec[j]; });
-  return idx;
-}
-
-std::vector<std::vector<int>>
-invert_map(const int *pair_begin_blocks, const int *pair_end_blocks,
-           const int n_pairs, const int n_blocks_a, const int n_blocks_b,
-           const int n_blocks_c) {
-  const int n_blocks = n_blocks_a * n_blocks_b * n_blocks_c;
-  std::vector<std::vector<int>> inverse_map(n_blocks);
-  std::vector<std::mutex> locks(n_blocks);
-
-#pragma omp parallel for
-  for (int i_pair = 0; i_pair < n_pairs; ++i_pair) {
-    const int pair_begin_x = pair_begin_blocks[3 * i_pair];
-    const int pair_end_x = pair_end_blocks[3 * i_pair];
-    const int pair_begin_y = pair_begin_blocks[3 * i_pair + 1];
-    const int pair_end_y = pair_end_blocks[3 * i_pair + 1];
-    const int pair_begin_z = pair_begin_blocks[3 * i_pair + 2];
-    const int pair_end_z = pair_end_blocks[3 * i_pair + 2];
-
-    for (int x = pair_begin_x; x <= pair_end_x; ++x) {
-      for (int y = pair_begin_y; y <= pair_end_y; ++y) {
-        for (int z = pair_begin_z; z <= pair_end_z; ++z) {
-          const int block_index =
-              x * n_blocks_b * n_blocks_c + y * n_blocks_c + z;
-          std::lock_guard<std::mutex> lock(locks[block_index]);
-          inverse_map[block_index].push_back(i_pair);
-        }
-      }
-    }
-  }
-  return inverse_map;
-}
-
 extern "C" {
 void update_lattice_vectors(const double *lattice_vectors_on_device,
                             const double *reciprocal_lattice_vectors_on_device,
@@ -1158,38 +1118,6 @@ void screen_gaussian_pairs(int *shell_pair_indices, int *image_indices,
   }
 
   checkCudaErrors(cudaPeekAtLastError());
-}
-
-void assign_pairs_to_blocks(int *sorted_pairs_per_block, int *n_pairs_per_block,
-                            int *block_index, const int *pairs_to_blocks_begin,
-                            const int *pairs_to_blocks_end,
-                            const int n_blocks[3], const int n_pairs) {
-  const int n_blocks_a = n_blocks[0];
-  const int n_blocks_b = n_blocks[1];
-  const int n_blocks_c = n_blocks[2];
-
-  const std::vector<std::vector<int>> inverse_map =
-      invert_map(pairs_to_blocks_begin, pairs_to_blocks_end, n_pairs,
-                 n_blocks_a, n_blocks_b, n_blocks_c);
-
-  std::vector<int> n_pairs_per_block_unsorted(n_blocks_a * n_blocks_b *
-                                              n_blocks_c);
-  for (int i = 0; i < inverse_map.size(); ++i) {
-    n_pairs_per_block_unsorted[i] = inverse_map[i].size();
-  }
-  std::vector<size_t> sorted_index = sort_index(n_pairs_per_block_unsorted);
-  for (int i = 0; i < n_blocks_a * n_blocks_b * n_blocks_c; ++i) {
-    const int sorted_block_index = sorted_index[i];
-    const int n_pairs_in_block = n_pairs_per_block_unsorted[sorted_block_index];
-    if (n_pairs_in_block > 0) {
-      std::memcpy(sorted_pairs_per_block,
-                  inverse_map[sorted_block_index].data(),
-                  n_pairs_in_block * sizeof(int));
-      n_pairs_per_block[i] = n_pairs_in_block;
-      block_index[i] = sorted_block_index;
-      sorted_pairs_per_block += n_pairs_in_block;
-    }
-  }
 }
 
 void count_pairs_on_blocks(int *n_pairs_per_block,
