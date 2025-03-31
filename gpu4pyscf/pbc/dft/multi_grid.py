@@ -1,15 +1,11 @@
+import ctypes
+
 import numpy as np
 import cupy as cp
 import scipy
 
-import ctypes
-
 import pyscf.pbc.gto as gto
 
-from pyscf.pbc.lib.kpts_helper import gamma_point
-from pyscf import lib as cpu_lib
-from pyscf.pbc.gto import pseudo
-from pyscf.pbc.df import ft_ao
 from pyscf.pbc.dft.multigrid import multigrid
 from pyscf.pbc.df.df_jk import _format_kpts_band
 from pyscf.pbc.gto.pseudo import pp_int
@@ -17,7 +13,6 @@ from pyscf.pbc.gto.pseudo import pp_int
 import gpu4pyscf.pbc.df.fft as fft
 import gpu4pyscf.pbc.df.fft_jk as fft_jk
 from gpu4pyscf.lib import logger
-from gpu4pyscf.pbc.dft import numint
 from gpu4pyscf.pbc import tools
 import gpu4pyscf.pbc.dft.multigrid as multigrid_qiming
 import gpu4pyscf.lib.cupy_helper as cupy_helper
@@ -110,6 +105,44 @@ def assign_pairs_to_blocks(
     )
 
 
+def assign_pairs_to_blocks_new(
+    pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks_abc, n_pairs, n_indices
+):
+    n_blocks = np.prod(n_blocks_abc)
+    n_pairs_on_blocks = cp.full(n_blocks + 1, 0, dtype=cp.int32)
+    libgpbc.count_pairs_on_blocks(
+        cast_to_pointer(n_pairs_on_blocks),
+        cast_to_pointer(pairs_to_blocks_begin),
+        cast_to_pointer(pairs_to_blocks_end),
+        cast_to_pointer(n_blocks_abc),
+        ctypes.c_int(n_pairs),
+    )
+    n_contributing_blocks = int(n_pairs_on_blocks[-1])
+    n_pairs_on_blocks = n_pairs_on_blocks[:-1]
+    sorted_block_index = cp.asarray(cp.argsort(-n_pairs_on_blocks), dtype=cp.int32)
+    n_pairs_on_blocks = n_pairs_on_blocks[sorted_block_index]
+    accumulated_n_pairs_per_block = cp.full(n_blocks + 1, 0, dtype=cp.int32)
+    accumulated_n_pairs_per_block[1:] = cp.cumsum(n_pairs_on_blocks, dtype=cp.int32)
+    sorted_block_index = sorted_block_index[:n_contributing_blocks]
+    pairs_on_blocks = cp.full(n_indices, -1, dtype=cp.int32)
+    libgpbc.put_pairs_on_blocks(
+        cast_to_pointer(pairs_on_blocks),
+        cast_to_pointer(accumulated_n_pairs_per_block),
+        cast_to_pointer(sorted_block_index),
+        cast_to_pointer(pairs_to_blocks_begin),
+        cast_to_pointer(pairs_to_blocks_end),
+        cast_to_pointer(n_blocks_abc),
+        ctypes.c_int(n_contributing_blocks),
+        ctypes.c_int(n_pairs),
+    )
+    assert cp.all(pairs_on_blocks >= 0)
+    return (
+        cp.asarray(pairs_on_blocks),
+        cp.asarray(accumulated_n_pairs_per_block),
+        cp.asarray(sorted_block_index),
+    )
+
+
 def sort_gaussian_pairs(mydf, xc_type="LDA"):
     log = logger.new_logger(mydf, mydf.verbose)
     t0 = log.init_timer()
@@ -126,7 +159,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     reciprocal_lattice_vectors = cp.asarray(cp.linalg.inv(lattice_vectors).T, order="C")
 
     reciprocal_norms = cp.linalg.norm(reciprocal_lattice_vectors, axis=1)
-    numerical_integrator = mydf._numint
     libgpbc.update_lattice_vectors(
         ctypes.cast(lattice_vectors.data.ptr, ctypes.c_void_p),
         ctypes.cast(reciprocal_lattice_vectors.data.ptr, ctypes.c_void_p),
@@ -145,7 +177,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         subcell_in_localized_region = grids_localized.cell
         mesh = grids_localized.mesh
         n_blocks_abc = np.asarray(np.ceil(mesh / block_size), dtype=cp.int32)
-
         equivalent_cell_in_localized, coeff_in_localized = (
             subcell_in_localized_region.decontract_basis(to_cart=True, aggregate=True)
         )
@@ -157,7 +188,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         vectors_to_neighboring_images = cp.asarray(
             gto.eval_gto.get_lattice_Ls(subcell_in_localized_region)
         )
-        n_images = len(vectors_to_neighboring_images)
         phase_diff_among_images = cp.exp(
             1j
             * cp.asarray(mydf.kpts.reshape(-1, 3)).dot(vectors_to_neighboring_images.T)
@@ -245,7 +275,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 )
                 n_indices = int(cp.sum(n_contributing_blocks_per_pair))
                 n_pairs = len(shell_pair_indices_from_images)
-                pairs_to_blocks_begin_cpu = pairs_to_blocks_begin.get()
+                """ pairs_to_blocks_begin_cpu = pairs_to_blocks_begin.get()
                 pairs_to_blocks_end_cpu = pairs_to_blocks_end.get()
                 (
                     gaussian_pair_indices,
@@ -254,6 +284,17 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 ) = assign_pairs_to_blocks(
                     pairs_to_blocks_begin_cpu,
                     pairs_to_blocks_end_cpu,
+                    n_blocks_abc,
+                    n_pairs,
+                    n_indices,
+                )"""
+                (
+                    gaussian_pair_indices,
+                    accumulated_counts,
+                    sorted_contributing_blocks,
+                ) = assign_pairs_to_blocks_new(
+                    pairs_to_blocks_begin,
+                    pairs_to_blocks_end,
                     n_blocks_abc,
                     n_pairs,
                     n_indices,
@@ -676,9 +717,8 @@ def nr_rks(
     density_on_G_mesh = evaluate_density_on_g_mesh(
         mydf, dm_kpts, hermi, kpts, derivative_order
     )
-    coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=mesh)
     coulomb_on_g_mesh = cp.einsum(
-        "ng,g->ng", density_on_G_mesh[:, 0], coulomb_kernel_on_g_mesh
+        "ng,g->ng", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
     )
     coulomb_energy = 0.5 * cp.einsum(
         "ng,ng->n", density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real
@@ -688,7 +728,7 @@ def nr_rks(
     )
     coulomb_energy /= cell.vol
 
-    log.debug("Multigrid Coulomb energy %s", coulomb_energy)
+    log.debug2("Multigrid Coulomb energy %s", coulomb_energy)
     t0 = log.timer("coulomb", *t0)
     weight = cell.vol / ngrids
 
@@ -752,6 +792,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
         self.sorted_gaussian_pairs = None
         fft.FFTDF.__init__(self, cell, kpts)
         sort_gaussian_pairs(self)
+        self.coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=self.mesh)
 
     get_nuc = get_nuc
     get_pp = get_pp

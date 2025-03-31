@@ -24,7 +24,7 @@ __host__ __device__ double distance_squared(const double x, const double y,
   return x * x + y * y + z * z;
 }
 
-template <int ANG> __inline__ __device__ constexpr double common_fac_sp() {
+template <int ANG> __device__ constexpr double common_fac_sp() {
   if constexpr (ANG == 0) {
     return 0.282094791773878143;
   } else if constexpr (ANG == 1) {
@@ -34,7 +34,7 @@ template <int ANG> __inline__ __device__ constexpr double common_fac_sp() {
   }
 }
 
-template <int ANG> __inline__ __device__ double log_common_fac_sp() {
+template <int ANG> __device__ double log_common_fac_sp() {
   if constexpr (ANG == 0) {
     return -1.26551212348464540;
   } else if constexpr (ANG == 1) {
@@ -45,9 +45,9 @@ template <int ANG> __inline__ __device__ double log_common_fac_sp() {
 }
 
 template <int angular>
-__inline__ __device__ double
-gaussian_summation_cutoff(const double exponent, const double prefactor_in_log,
-                          const double threshold_in_log) {
+__device__ double gaussian_summation_cutoff(const double exponent,
+                                            const double prefactor_in_log,
+                                            const double threshold_in_log) {
   constexpr int l = angular + 1;
   constexpr int approximate_factor = (l + 4) / 2;
   constexpr double log_r = 2.302585092994046; // log(10)
@@ -55,7 +55,7 @@ gaussian_summation_cutoff(const double exponent, const double prefactor_in_log,
 
   double approximated_log_of_sum;
   if ((l + 1) * log_r + log_of_doubled_exponents > 1) {
-    approximated_log_of_sum = -((l + 4) / 2) * log_of_doubled_exponents;
+    approximated_log_of_sum = -approximate_factor * log_of_doubled_exponents;
   } else {
     approximated_log_of_sum =
         approximate_factor * log_r - log_of_doubled_exponents;
@@ -70,20 +70,20 @@ gaussian_summation_cutoff(const double exponent, const double prefactor_in_log,
   return sqrt(approximated_log_of_sum / exponent);
 }
 
-__inline__ __device__ void gto_cartesian_s(double values[], double fx,
-                                           double fy, double fz) {
+__device__ void gto_cartesian_s(double values[], double fx, double fy,
+                                double fz) {
   values[0] = 1;
 }
 
-__inline__ __device__ void gto_cartesian_p(double values[], double fx,
-                                           double fy, double fz) {
+__device__ void gto_cartesian_p(double values[], double fx, double fy,
+                                double fz) {
   values[0] = fx;
   values[1] = fy;
   values[2] = fz;
 }
 
-__inline__ __device__ void gto_cartesian_d(double values[], double fx,
-                                           double fy, double fz) {
+__device__ void gto_cartesian_d(double values[], double fx, double fy,
+                                double fz) {
   values[0] = fx * fx;
   values[1] = fx * fy;
   values[2] = fx * fz;
@@ -92,8 +92,8 @@ __inline__ __device__ void gto_cartesian_d(double values[], double fx,
   values[5] = fz * fz;
 }
 
-__inline__ __device__ void gto_cartesian_f(double values[], double fx,
-                                           double fy, double fz) {
+__device__ void gto_cartesian_f(double values[], double fx, double fy,
+                                double fz) {
   values[0] = fx * fx * fx;
   values[1] = fx * fx * fy;
   values[2] = fx * fx * fz;
@@ -106,8 +106,8 @@ __inline__ __device__ void gto_cartesian_f(double values[], double fx,
   values[9] = fz * fz * fz;
 }
 
-__inline__ __device__ void gto_cartesian_g(double values[], double fx,
-                                           double fy, double fz) {
+__device__ void gto_cartesian_g(double values[], double fx, double fy,
+                                double fz) {
   values[0] = fx * fx * fx * fx;
   values[1] = fx * fx * fx * fy;
   values[2] = fx * fx * fx * fz;
@@ -126,8 +126,8 @@ __inline__ __device__ void gto_cartesian_g(double values[], double fx,
 }
 
 template <int ANG>
-__inline__ __device__ void gto_cartesian(double values[], double fx, double fy,
-                                         double fz) {
+__device__ void gto_cartesian(double values[], double fx, double fy,
+                              double fz) {
   if constexpr (ANG == 0) {
     gto_cartesian_s(values, fx, fy, fz);
   } else if constexpr (ANG == 1) {
@@ -254,6 +254,118 @@ __global__ void screen_gaussian_pairs_kernel(
     pairs_to_blocks_end[pair_index] = end_a;
     pairs_to_blocks_end[pair_index + n_pairs] = end_b;
     pairs_to_blocks_end[pair_index + 2 * n_pairs] = end_c;
+  }
+}
+
+__global__ void count_pairs_on_blocks_kernel(int *n_pairs_per_block,
+                                             const int *pairs_to_blocks_begin,
+                                             const int *pairs_to_blocks_end,
+                                             const int n_pairs) {
+  const int block_index =
+      blockIdx.x + blockIdx.y * gridDim.x + blockIdx.z * gridDim.x * gridDim.y;
+  int count = 0;
+  constexpr int n_threads = 256;
+  for (int i_pair = threadIdx.x; i_pair < n_pairs; i_pair += blockDim.x) {
+    const int begin_block_a = pairs_to_blocks_begin[3 * i_pair];
+    const int end_block_a = pairs_to_blocks_end[3 * i_pair];
+    const int begin_block_b = pairs_to_blocks_begin[3 * i_pair + 1];
+    const int end_block_b = pairs_to_blocks_end[3 * i_pair + 1];
+    const int begin_block_c = pairs_to_blocks_begin[3 * i_pair + 2];
+    const int end_block_c = pairs_to_blocks_end[3 * i_pair + 2];
+    if (blockIdx.x >= begin_block_c && blockIdx.x <= end_block_c &&
+        blockIdx.y >= begin_block_b && blockIdx.y <= end_block_b &&
+        blockIdx.z >= begin_block_a && blockIdx.z <= end_block_a) {
+      count++;
+    }
+  }
+  count = cub::BlockReduce<int, n_threads,
+                           cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY>()
+              .Sum(count);
+  if (threadIdx.x == 0) {
+    n_pairs_per_block[block_index] = count;
+    if (count > 0) {
+      atomicAdd(n_pairs_per_block + gridDim.x * gridDim.y * gridDim.z, 1);
+    }
+  }
+}
+
+__global__ void put_pairs_on_blocks_kernel(
+    int *pairs_on_blocks, const int *accumulated_n_pairs_per_block,
+    const int *sorted_block_index, const int *pairs_to_blocks_begin,
+    const int *pairs_to_blocks_end, const int n_blocks_a, const int n_blocks_b,
+    const int n_blocks_c, const int n_pairs) {
+  const int block_index = sorted_block_index[blockIdx.x];
+  const int n_blocks_bc = n_blocks_b * n_blocks_c;
+  const int block_a_index = block_index / n_blocks_bc;
+  const int block_bc_index = block_index % n_blocks_bc;
+  const int block_b_index = block_bc_index / n_blocks_c;
+  const int block_c_index = block_bc_index % n_blocks_c;
+  constexpr int n_threads = 256;
+  int stored_pair_index[4];
+  int valid_pairs[4];
+  int exclusive_sum[4];
+  int n_filtered_pairs_on_shared_memory = 0;
+  int offset_on_global_memory = accumulated_n_pairs_per_block[blockIdx.x];
+  constexpr int batch_size = 4 * n_threads;
+  constexpr int shared_memory_size = 7 * n_threads;
+  __shared__ int filtered_index[shared_memory_size];
+  const int n_batches = (n_pairs + batch_size - 1) / batch_size;
+  for (int i_batch = 0, i_pair = threadIdx.x; i_batch < n_batches; i_batch++) {
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      const bool is_valid_pair = i_pair < n_pairs;
+      const int begin_block_a =
+          is_valid_pair ? pairs_to_blocks_begin[3 * i_pair] : 0;
+      const int end_block_a =
+          is_valid_pair ? pairs_to_blocks_end[3 * i_pair] : -1;
+      const int begin_block_b =
+          is_valid_pair ? pairs_to_blocks_begin[3 * i_pair + 1] : 0;
+      const int end_block_b =
+          is_valid_pair ? pairs_to_blocks_end[3 * i_pair + 1] : -1;
+      const int begin_block_c =
+          is_valid_pair ? pairs_to_blocks_begin[3 * i_pair + 2] : 0;
+      const int end_block_c =
+          is_valid_pair ? pairs_to_blocks_end[3 * i_pair + 2] : -1;
+      if (block_c_index >= begin_block_c && block_c_index <= end_block_c &&
+          block_b_index >= begin_block_b && block_b_index <= end_block_b &&
+          block_a_index >= begin_block_a && block_a_index <= end_block_a) {
+        stored_pair_index[i] = i_pair;
+        valid_pairs[i] = 1;
+      } else {
+        stored_pair_index[i] = -2;
+        valid_pairs[i] = 0;
+      }
+      i_pair += n_threads;
+    }
+    int aggregated_block;
+    cub::BlockScan<int, n_threads>().ExclusiveSum(valid_pairs, exclusive_sum,
+                                                  aggregated_block);
+    if ((aggregated_block + n_filtered_pairs_on_shared_memory) >
+        shared_memory_size) {
+      for (int i = threadIdx.x; i < n_filtered_pairs_on_shared_memory;
+           i += n_threads) {
+        pairs_on_blocks[offset_on_global_memory + i] = filtered_index[i];
+      }
+      offset_on_global_memory += n_filtered_pairs_on_shared_memory;
+      n_filtered_pairs_on_shared_memory = 0;
+      __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      if (valid_pairs[i] == 1) {
+        filtered_index[exclusive_sum[i] + n_filtered_pairs_on_shared_memory] =
+            stored_pair_index[i];
+      }
+    }
+    n_filtered_pairs_on_shared_memory += aggregated_block;
+  }
+  if (n_filtered_pairs_on_shared_memory > 0) {
+    __syncthreads();
+    for (int i = threadIdx.x; i < n_filtered_pairs_on_shared_memory;
+         i += n_threads) {
+      pairs_on_blocks[offset_on_global_memory + i] = filtered_index[i];
+    }
+    offset_on_global_memory += n_filtered_pairs_on_shared_memory;
   }
 }
 
@@ -1078,6 +1190,38 @@ void assign_pairs_to_blocks(int *sorted_pairs_per_block, int *n_pairs_per_block,
       sorted_pairs_per_block += n_pairs_in_block;
     }
   }
+}
+
+void count_pairs_on_blocks(int *n_pairs_per_block,
+                           const int *pairs_to_blocks_begin,
+                           const int *pairs_to_blocks_end,
+                           const int n_blocks[3], const int n_pairs) {
+  const int n_blocks_a = n_blocks[0];
+  const int n_blocks_b = n_blocks[1];
+  const int n_blocks_c = n_blocks[2];
+  const int n_threads = 256;
+  const dim3 block_size(n_threads, 1, 1);
+  const dim3 block_grid(n_blocks_c, n_blocks_b, n_blocks_a);
+  count_pairs_on_blocks_kernel<<<block_grid, block_size>>>(
+      n_pairs_per_block, pairs_to_blocks_begin, pairs_to_blocks_end, n_pairs);
+}
+
+void put_pairs_on_blocks(int *pairs_on_blocks,
+                         const int *accumulated_n_pairs_per_block,
+                         const int *sorted_block_index,
+                         const int *pairs_to_blocks_begin,
+                         const int *pairs_to_blocks_end, const int n_blocks[3],
+                         const int n_contributing_blocks, const int n_pairs) {
+  const int n_blocks_a = n_blocks[0];
+  const int n_blocks_b = n_blocks[1];
+  const int n_blocks_c = n_blocks[2];
+  const int n_threads = 256;
+  const dim3 block_size(n_threads);
+  const dim3 block_grid(n_contributing_blocks);
+  put_pairs_on_blocks_kernel<<<block_grid, block_size>>>(
+      pairs_on_blocks, accumulated_n_pairs_per_block, sorted_block_index,
+      pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks_a, n_blocks_b,
+      n_blocks_c, n_pairs);
 }
 
 void evaluate_density_driver(
