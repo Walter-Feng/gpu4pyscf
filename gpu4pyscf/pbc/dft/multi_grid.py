@@ -173,6 +173,8 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     t0 = log.timer("task generation", *t0)
 
     pairs = []
+    total_screening_time = 0
+    total_inverse_mapping_time = 0
     for grids_localized, grids_diffused in tasks:
         subcell_in_localized_region = grids_localized.cell
         mesh = grids_localized.mesh
@@ -240,8 +242,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         bas = cp.asarray(grouped_cell._bas, dtype=cp.int32)
         env = cp.asarray(grouped_cell._env)
 
-        total_screening_time = 0
-        total_inverse_mapping_time = 0
         for i_angular, i_shells in zip(i_angulars_unique, sorted_i_shells):
             for j_angular, j_shells in zip(j_angulars_unique, sorted_j_shells):
                 t1 = log.init_timer()
@@ -264,7 +264,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     env,
                     threshold_in_log,
                 )
-                t2 = log.timer("screen_gaussian_pairs", *t1)
+                t2 = log.timer_debug2("screen_gaussian_pairs", *t1)
                 total_screening_time += cp.cuda.get_elapsed_time(t1[2], t2[2])
                 t1 = t2
                 contributing_block_ranges = (
@@ -299,7 +299,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     n_pairs,
                     n_indices,
                 )
-                t2 = log.timer("assign_pairs_to_blocks", *t1)
+                t2 = log.timer_debug2("assign_pairs_to_blocks", *t1)
                 total_inverse_mapping_time += cp.cuda.get_elapsed_time(t1[2], t2[2])
                 t1 = t2
                 per_angular_pairs.append(
