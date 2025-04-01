@@ -114,12 +114,12 @@ def screen_gaussian_pairs(
         env,
         threshold_in_log,
     )
-    non_trivial_pairs = cp.full(n_pairs, -1, dtype=cp.int32)
+    screened_shell_pairs = cp.full(n_pairs, -1, dtype=cp.int32)
     image_indices = cp.full(n_pairs, -1, dtype=cp.int32)
     pairs_to_blocks_begin = cp.full((3, n_pairs), -1, dtype=cp.int32)
     pairs_to_blocks_end = cp.full((3, n_pairs), -1, dtype=cp.int32)
     libgpbc.screen_gaussian_pairs(
-        cast_to_pointer(non_trivial_pairs),
+        cast_to_pointer(screened_shell_pairs),
         cast_to_pointer(image_indices),
         cast_to_pointer(pairs_to_blocks_begin),
         cast_to_pointer(pairs_to_blocks_end),
@@ -138,7 +138,7 @@ def screen_gaussian_pairs(
         cast_to_pointer(env),
         ctypes.c_double(threshold_in_log),
     )
-    return non_trivial_pairs, image_indices, pairs_to_blocks_begin, pairs_to_blocks_end
+    return screened_shell_pairs, image_indices, pairs_to_blocks_begin, pairs_to_blocks_end
 
 
 def assign_pairs_to_blocks(
@@ -305,7 +305,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         for i_angular, i_shells in zip(i_angulars_unique, sorted_i_shells):
             for j_angular, j_shells in zip(j_angulars_unique, sorted_j_shells):
                 (
-                    shell_pair_indices_from_images,
+                    screened_shell_pairs,
                     image_indices,
                     pairs_to_blocks_begin,
                     pairs_to_blocks_end,
@@ -328,7 +328,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     contributing_block_ranges, axis=0
                 )
                 n_indices = int(cp.sum(n_contributing_blocks_per_pair))
-                n_pairs = len(shell_pair_indices_from_images)
+                n_pairs = len(screened_shell_pairs)
                 (
                     gaussian_pair_indices,
                     accumulated_counts,
@@ -343,9 +343,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 per_angular_pairs.append(
                     {
                         "angular": (i_angular, j_angular),
-                        "non_trivial_pairs": shell_pair_indices_from_images,
-                        "non_trivial_pairs_at_local_points": gaussian_pair_indices,
-                        "accumulated_n_pairs_per_point": accumulated_counts,
+                        "screened_shell_pairs": screened_shell_pairs,
+                        "pair_indices_per_block": gaussian_pair_indices,
+                        "accumulated_counts_per_block": accumulated_counts,
                         "sorted_block_index": sorted_contributing_blocks,
                         "image_indices": image_indices,
                         "i_shells": i_shells,
@@ -360,7 +360,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 "per_angular_pairs": per_angular_pairs,
                 "neighboring_images": vectors_to_neighboring_images,
                 "grouped_cell": grouped_cell,
-                "mesh": mesh,
+                "mesh": mesh,  # this one is on cpu memory
                 "ao_indices_in_localized": ao_indices_in_localized,
                 "ao_indices_in_diffused": ao_indices_in_diffused,
                 "concatenated_ao_indices": concatenated_ao_indices,
@@ -408,7 +408,7 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
             cast_to_pointer(density_matrix_with_translation_real_part),
             ctypes.c_int(i_angular),
             ctypes.c_int(j_angular),
-            cast_to_pointer(gaussians_per_angular_pair["non_trivial_pairs"]),
+            cast_to_pointer(gaussians_per_angular_pair["screened_shell_pairs"]),
             cast_to_pointer(gaussians_per_angular_pair["i_shells"]),
             cast_to_pointer(gaussians_per_angular_pair["j_shells"]),
             ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
@@ -416,10 +416,10 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
             ctypes.c_int(n_i_functions),
             ctypes.c_int(n_j_functions),
             cast_to_pointer(
-                gaussians_per_angular_pair["non_trivial_pairs_at_local_points"]
+                gaussians_per_angular_pair["pair_indices_per_block"]
             ),
             cast_to_pointer(
-                gaussians_per_angular_pair["accumulated_n_pairs_per_point"]
+                gaussians_per_angular_pair["accumulated_counts_per_block"]
             ),
             cast_to_pointer(gaussians_per_angular_pair["sorted_block_index"]),
             ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
@@ -544,7 +544,7 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
             cast_to_pointer(xc_weights),
             ctypes.c_int(i_angular),
             ctypes.c_int(j_angular),
-            cast_to_pointer(gaussians_per_angular_pair["non_trivial_pairs"]),
+            cast_to_pointer(gaussians_per_angular_pair["screened_shell_pairs"]),
             cast_to_pointer(gaussians_per_angular_pair["i_shells"]),
             cast_to_pointer(gaussians_per_angular_pair["j_shells"]),
             ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
@@ -552,10 +552,10 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
             ctypes.c_int(n_i_functions),
             ctypes.c_int(n_j_functions),
             cast_to_pointer(
-                gaussians_per_angular_pair["non_trivial_pairs_at_local_points"]
+                gaussians_per_angular_pair["pair_indices_per_block"]
             ),
             cast_to_pointer(
-                gaussians_per_angular_pair["accumulated_n_pairs_per_point"]
+                gaussians_per_angular_pair["accumulated_counts_per_block"]
             ),
             cast_to_pointer(gaussians_per_angular_pair["sorted_block_index"]),
             ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
