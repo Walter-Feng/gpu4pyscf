@@ -31,10 +31,12 @@ def cast_to_pointer(array):
 
 
 def image_pair_to_difference(
-    vectors_to_neighboring_images, lattice_vectors, reciprocal_lattice_vectors
+    vectors_to_neighboring_images_cpu,
+    lattice_vectors_cpu,
+    reciprocal_lattice_vectors_cpu,
 ):
     translation_vectors = np.asarray(
-        np.round(vectors_to_neighboring_images @ reciprocal_lattice_vectors.T),
+        np.round(vectors_to_neighboring_images_cpu @ reciprocal_lattice_vectors_cpu.T),
         dtype=np.int32,
     )
     image_difference_full = (
@@ -43,6 +45,8 @@ def image_pair_to_difference(
     difference_images, inverse = np.unique(
         image_difference_full, axis=0, return_inverse=True
     )
+
+    difference_images = translation_vectors @ lattice_vectors_cpu
 
     index = np.arange(len(difference_images))[inverse]
     return cp.asarray(difference_images), cp.asarray(index, dtype=cp.int32)
@@ -149,7 +153,7 @@ def assign_pairs_to_blocks(
         cast_to_pointer(n_blocks_abc),
         ctypes.c_int(n_pairs),
     )
-   
+
     n_contributing_blocks = int(n_pairs_on_blocks[-1])
     n_pairs_on_blocks = n_pairs_on_blocks[:-1]
     sorted_block_index = cp.asarray(cp.argsort(-n_pairs_on_blocks), dtype=cp.int32)
@@ -207,7 +211,10 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     pairs = []
     for grids_localized, grids_diffused in tasks:
         subcell_in_localized_region = grids_localized.cell
-        mesh = grids_localized.mesh
+        # the original grids_localized.mesh has dtype=np.int64, which can cause 
+        # misalignment when the pointer is passed to the C code.
+        mesh = np.asarray(grids_localized.mesh, dtype=np.int32)
+        dxyz_dabc = cp.asarray((lattice_vectors.T / cp.asarray(mesh)).T)
         n_blocks_abc = np.asarray(np.ceil(mesh / block_size), dtype=cp.int32)
         equivalent_cell_in_localized, coeff_in_localized = (
             subcell_in_localized_region.decontract_basis(to_cart=True, aggregate=True)
@@ -217,6 +224,11 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
             subcell_in_localized_region
         )
 
+
+        # theoretically we can use the rcut defined in localized cell to reduce the
+        # number of images, but somehow it can introduce some error when the lattice
+        # is super small, for example primitive diamond cell. Using the rcut defined
+        # in the global cell can fix this.
         vectors_to_neighboring_images = cp.asarray(gto.eval_gto.get_lattice_Ls(cell))
         n_images = len(vectors_to_neighboring_images)
 
@@ -246,6 +258,8 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
             concatenated_coeff = scipy.linalg.block_diag(
                 coeff_in_localized, coeff_in_diffused
             )
+        concatenated_coeff = cp.asarray(concatenated_coeff)
+         
         n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
         weight_penalty = np.prod(grouped_cell.mesh) / vol
         minimum_exponent = np.hstack(grouped_cell.bas_exps()).min()
@@ -257,7 +271,15 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
             precision *= 0.1
         threshold_in_log = np.log(precision * multigrid.EXTRA_PREC)
 
-        shell_to_ao_indices = gto.moleintor.make_loc(grouped_cell._bas, "cart")
+        shell_to_ao_indices = cp.asarray(gto.moleintor.make_loc(grouped_cell._bas, "cart"), dtype=cp.int32)
+        ao_indices_in_localized = cp.asarray(grids_localized.ao_idx, dtype=cp.int32)
+        if grids_diffused is None:
+            ao_indices_in_diffused = cp.array([], dtype=cp.int32)
+        else:
+            ao_indices_in_diffused = cp.asarray(grids_diffused.ao_idx, dtype=cp.int32)
+
+        concatenated_ao_indices = cp.concatenate((ao_indices_in_localized, ao_indices_in_diffused))
+        coeff_in_localized = cp.asarray(coeff_in_localized)
         per_angular_pairs = []
 
         i_angulars = grouped_cell._bas[:n_primitive_gtos_in_localized, multigrid.ANG_OF]
@@ -322,54 +344,38 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     {
                         "angular": (i_angular, j_angular),
                         "non_trivial_pairs": shell_pair_indices_from_images,
-                        "non_trivial_pairs_at_local_points": cp.asarray(
-                            gaussian_pair_indices, dtype=cp.int32
-                        ),
-                        "accumulated_n_pairs_per_point": cp.asarray(
-                            accumulated_counts, dtype=cp.int32
-                        ),
-                        "sorted_block_index": cp.asarray(
-                            sorted_contributing_blocks, dtype=cp.int32
-                        ),
+                        "non_trivial_pairs_at_local_points": gaussian_pair_indices,
+                        "accumulated_n_pairs_per_point": accumulated_counts,
+                        "sorted_block_index": sorted_contributing_blocks,
                         "image_indices": image_indices,
-                        "i_shells": cp.asarray(i_shells, dtype=cp.int32),
-                        "j_shells": cp.asarray(j_shells, dtype=cp.int32),
-                        "shell_to_ao_indices": cp.asarray(
-                            shell_to_ao_indices, dtype=cp.int32
-                        ),
+                        "i_shells": i_shells,
+                        "j_shells": j_shells,
+                        "shell_to_ao_indices": shell_to_ao_indices,
                     }
                 )
+                
 
-        ao_indices_in_localized = cp.asarray(grids_localized.ao_idx)
-        if grids_diffused is None:
-            ao_indices_in_diffused = cp.array([], dtype=cp.int32)
-        else:
-            ao_indices_in_diffused = cp.asarray(grids_diffused.ao_idx)
         pairs.append(
             {
                 "per_angular_pairs": per_angular_pairs,
-                "neighboring_images": cp.asarray(vectors_to_neighboring_images),
+                "neighboring_images": vectors_to_neighboring_images,
                 "grouped_cell": grouped_cell,
-                "mesh": np.asarray(grids_localized.mesh, dtype=np.int32),
+                "mesh": mesh,
                 "ao_indices_in_localized": ao_indices_in_localized,
                 "ao_indices_in_diffused": ao_indices_in_diffused,
-                "concatenated_ao_indices": cp.concatenate(
-                    (ao_indices_in_localized, ao_indices_in_diffused)
-                ),
-                "coeff_in_localized": cp.asarray(coeff_in_localized),
-                "concatenated_coeff": cp.asarray(concatenated_coeff),
-                "atm": cp.asarray(grouped_cell._atm, dtype=cp.int32),
-                "bas": cp.asarray(grouped_cell._bas, dtype=cp.int32),
-                "env": cp.asarray(grouped_cell._env),
+                "concatenated_ao_indices": concatenated_ao_indices,
+                "coeff_in_localized": coeff_in_localized,
+                "concatenated_coeff": concatenated_coeff,
+                "atm": atm,
+                "bas": bas,
+                "env": env,
                 "phase_diff_among_images": phase_diff_among_images,
                 "image_pair_difference_index": image_pair_difference_index,
-                "dxyz_dabc": cp.asarray(
-                    (lattice_vectors.T / cp.asarray(mesh)).T, order="C"
-                ),
+                "dxyz_dabc": dxyz_dabc,
                 "is_non_orthogonal": is_non_orthogonal,
             }
         )
-
+    
     mydf.sorted_gaussian_pairs = pairs
     t0 = log.timer("sort_gaussian_pairs", *t0)
 
@@ -447,6 +453,10 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
     if deriv == 1:
         density_slices += 3
 
+    if deriv > 1:
+        raise NotImplementedError
+
+
     nx, ny, nz = mydf.mesh
     density_on_g_mesh = cp.zeros(
         (n_channels * density_slices, nx, ny, nz), dtype=cp.complex128
@@ -513,7 +523,6 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
             cp.ix_(cp.arange(n_channels * density_slices), *fft_grids)
         ] += density_contribution_on_g_mesh.reshape((-1,) + tuple(mesh))
 
-
     density_on_g_mesh = density_on_g_mesh.reshape([n_channels, density_slices, -1])
     return density_on_g_mesh
 
@@ -568,11 +577,14 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
             "kt, ntij -> nkij", pairs_info["phase_diff_among_images"], fock
         )
     else:
-        return fock.reshape(n_channels, n_k_points, n_i_functions, n_j_functions)
+        return fock.reshape((n_channels, n_k_points, n_i_functions, n_j_functions))
 
 
 def convert_xc_on_g_mesh_to_fock(
-    mydf, xc_on_g_mesh, hermi=1, kpts=np.zeros((1, 3)), verbose=None
+    mydf,
+    xc_on_g_mesh,
+    hermi=1,
+    kpts=np.zeros((1, 3)),
 ):
     cell = mydf.cell
     n_k_points = len(kpts)
@@ -666,7 +678,6 @@ def get_nuc(mydf, kpts=None):
 
 def get_pp(mydf, kpts=None):
     """Get the periodic pseudopotential nuc-el AO matrix, with G=0 removed."""
-    from pyscf import gto
 
     assert kpts is None or all(kpts == 0)
     is_single_kpt = False
@@ -724,6 +735,8 @@ def nr_rks(
 
     if xc_type == "LDA":
         derivative_order = 0
+    elif xc_type == "GGA":
+        derivative_order = 1
     else:
         raise NotImplementedError
 

@@ -226,8 +226,9 @@ __global__ void count_non_trivial_pairs_kernel(
   }
   int count = is_valid_pair ? 1 : 0;
   int sum;
-  sum = cub::BlockReduce<int, 16, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY, 16>().Sum(
-      count);
+  sum =
+      cub::BlockReduce<int, 16, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY, 16>()
+          .Sum(count);
   if (threadIdx.x == 0 && threadIdx.y == 0) {
     atomicAdd(n_counts, sum);
   }
@@ -1290,9 +1291,9 @@ void screen_gaussian_pairs(int *shell_pair_indices, int *image_indices,
             "screen_gaussian_pairs_kernel\n",
             i_angular, j_angular);
   }
-  checkCudaErrors(cudaFree(written_counts));
-
   checkCudaErrors(cudaPeekAtLastError());
+
+  checkCudaErrors(cudaFree(written_counts));
 }
 
 void count_pairs_on_blocks(int *n_pairs_per_block,
