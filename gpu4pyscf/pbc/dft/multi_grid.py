@@ -7,7 +7,7 @@ import scipy
 import pyscf.pbc.gto as gto
 
 from pyscf.pbc.dft.multigrid import multigrid
-from pyscf.pbc.df.df_jk import _format_kpts_band, _format_jks
+from pyscf.pbc.df.df_jk import _format_kpts_band
 from pyscf.pbc.gto.pseudo import pp_int
 from pyscf.pbc.lib.kpts_helper import is_gamma_point
 
@@ -362,7 +362,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     }
                 )
 
-
         pairs.append(
             {
                 "per_angular_pairs": per_angular_pairs,
@@ -383,9 +382,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 "is_non_orthogonal": is_non_orthogonal,
             }
         )
-        
+
     mydf.sorted_gaussian_pairs = pairs
-    
+
     t0 = log.timer("sort_gaussian_pairs", *t0)
 
 
@@ -764,7 +763,7 @@ def nr_rks(
     # computing rhoR with IFFT, the weight factor is not needed.
     density_in_real_space = tools.ifft(
         density_on_G_mesh.reshape(-1, ngrids), mesh
-    ).real * (1.0 / weight)
+    ).real / weight
 
     density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
     n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight
@@ -799,10 +798,16 @@ def nr_rks(
     kpts_band = _format_kpts_band(kpts_band, kpts)
 
     if xc_type == "GGA":
-        weighted_xc_for_fock_on_g_mesh[:, 1:] *= mydf.gradient_vector_on_g_mesh
-        weighted_xc_for_fock_on_g_mesh = weighted_xc_for_fock_on_g_mesh.sum(
-            axis=1
-        ).reshape((nset, -1, ngrids))
+        weighted_xc_for_fock_on_g_mesh = weighted_xc_for_fock_on_g_mesh[
+            :, 0
+        ] - cp.einsum(
+            "ngp, gp -> np",
+            weighted_xc_for_fock_on_g_mesh[:, 1:],
+            mydf.gradient_vector_on_g_mesh,
+        )
+        weighted_xc_for_fock_on_g_mesh = weighted_xc_for_fock_on_g_mesh.reshape(
+            (nset, -1, ngrids)
+        )
 
     if with_j:
         weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
@@ -813,7 +818,6 @@ def nr_rks(
     xc_for_fock = xc_for_fock.reshape(dm_kpts.shape)
     t0 = log.timer("xc", *t0)
 
-    xc_for_fock = _format_jks(xc_for_fock, dm_kpts, kpts_band, kpts)
     xc_for_fock = cupy_helper.tag_array(
         xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None
     )
@@ -830,7 +834,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
         self.coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=self.mesh)
         self.gradient_vector_on_g_mesh = None
         if xc_type == "GGA":
-            self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T
+            self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
 
     get_nuc = get_nuc
     get_pp = get_pp
