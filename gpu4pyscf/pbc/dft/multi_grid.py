@@ -7,7 +7,7 @@ import scipy
 import pyscf.pbc.gto as gto
 
 from pyscf.pbc.dft.multigrid import multigrid
-from pyscf.pbc.df.df_jk import _format_kpts_band
+from pyscf.pbc.df.df_jk import _format_kpts_band, _format_jks
 from pyscf.pbc.gto.pseudo import pp_int
 from pyscf.pbc.lib.kpts_helper import is_gamma_point
 
@@ -138,7 +138,12 @@ def screen_gaussian_pairs(
         cast_to_pointer(env),
         ctypes.c_double(threshold_in_log),
     )
-    return screened_shell_pairs, image_indices, pairs_to_blocks_begin, pairs_to_blocks_end
+    return (
+        screened_shell_pairs,
+        image_indices,
+        pairs_to_blocks_begin,
+        pairs_to_blocks_end,
+    )
 
 
 def assign_pairs_to_blocks(
@@ -211,7 +216,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     pairs = []
     for grids_localized, grids_diffused in tasks:
         subcell_in_localized_region = grids_localized.cell
-        # the original grids_localized.mesh has dtype=np.int64, which can cause 
+        # the original grids_localized.mesh has dtype=np.int64, which can cause
         # misalignment when the pointer is passed to the C code.
         mesh = np.asarray(grids_localized.mesh, dtype=np.int32)
         dxyz_dabc = cp.asarray((lattice_vectors.T / cp.asarray(mesh)).T)
@@ -223,7 +228,6 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         n_primitive_gtos_in_localized = multigrid._pgto_shells(
             subcell_in_localized_region
         )
-
 
         # theoretically we can use the rcut defined in localized cell to reduce the
         # number of images, but somehow it can introduce some error when the lattice
@@ -259,7 +263,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 coeff_in_localized, coeff_in_diffused
             )
         concatenated_coeff = cp.asarray(concatenated_coeff)
-         
+
         n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
         weight_penalty = np.prod(grouped_cell.mesh) / vol
         minimum_exponent = np.hstack(grouped_cell.bas_exps()).min()
@@ -271,14 +275,18 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
             precision *= 0.1
         threshold_in_log = np.log(precision * multigrid.EXTRA_PREC)
 
-        shell_to_ao_indices = cp.asarray(gto.moleintor.make_loc(grouped_cell._bas, "cart"), dtype=cp.int32)
+        shell_to_ao_indices = cp.asarray(
+            gto.moleintor.make_loc(grouped_cell._bas, "cart"), dtype=cp.int32
+        )
         ao_indices_in_localized = cp.asarray(grids_localized.ao_idx, dtype=cp.int32)
         if grids_diffused is None:
             ao_indices_in_diffused = cp.array([], dtype=cp.int32)
         else:
             ao_indices_in_diffused = cp.asarray(grids_diffused.ao_idx, dtype=cp.int32)
 
-        concatenated_ao_indices = cp.concatenate((ao_indices_in_localized, ao_indices_in_diffused))
+        concatenated_ao_indices = cp.concatenate(
+            (ao_indices_in_localized, ao_indices_in_diffused)
+        )
         coeff_in_localized = cp.asarray(coeff_in_localized)
         per_angular_pairs = []
 
@@ -353,7 +361,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                         "shell_to_ao_indices": shell_to_ao_indices,
                     }
                 )
-                
+
 
         pairs.append(
             {
@@ -375,8 +383,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 "is_non_orthogonal": is_non_orthogonal,
             }
         )
-    
+        
     mydf.sorted_gaussian_pairs = pairs
+    
     t0 = log.timer("sort_gaussian_pairs", *t0)
 
 
@@ -415,12 +424,8 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
             cast_to_pointer(gaussians_per_angular_pair["shell_to_ao_indices"]),
             ctypes.c_int(n_i_functions),
             ctypes.c_int(n_j_functions),
-            cast_to_pointer(
-                gaussians_per_angular_pair["pair_indices_per_block"]
-            ),
-            cast_to_pointer(
-                gaussians_per_angular_pair["accumulated_counts_per_block"]
-            ),
+            cast_to_pointer(gaussians_per_angular_pair["pair_indices_per_block"]),
+            cast_to_pointer(gaussians_per_angular_pair["accumulated_counts_per_block"]),
             cast_to_pointer(gaussians_per_angular_pair["sorted_block_index"]),
             ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
             cast_to_pointer(gaussians_per_angular_pair["image_indices"]),
@@ -456,10 +461,9 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
     if deriv > 1:
         raise NotImplementedError
 
-
     nx, ny, nz = mydf.mesh
     density_on_g_mesh = cp.zeros(
-        (n_channels * density_slices, nx, ny, nz), dtype=cp.complex128
+        (n_channels, density_slices, nx, ny, nz), dtype=cp.complex128
     )
     for pairs in mydf.sorted_gaussian_pairs:
 
@@ -488,42 +492,41 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
             pairs["ao_indices_in_localized"],
         ]
 
-        if deriv == 0:
-            n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[3]
-            density_matrix_with_rows_in_localized[
-                :, :, :, n_ao_in_localized:
-            ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2)
+        n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[3]
+        density_matrix_with_rows_in_localized[
+            :, :, :, n_ao_in_localized:
+        ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2)
 
-            coeff_sandwiched_density_matrix = cp.einsum(
-                "nkij,pi->nkpj",
-                density_matrix_with_rows_in_localized,
-                pairs["coeff_in_localized"],
-            )
+        coeff_sandwiched_density_matrix = cp.einsum(
+            "nkij,pi->nkpj",
+            density_matrix_with_rows_in_localized,
+            pairs["coeff_in_localized"],
+        )
 
-            coeff_sandwiched_density_matrix = cp.einsum(
-                "nkpj, qj -> nkpq",
-                coeff_sandwiched_density_matrix,
-                pairs["concatenated_coeff"],
-            )
+        coeff_sandwiched_density_matrix = cp.einsum(
+            "nkpj, qj -> nkpq",
+            coeff_sandwiched_density_matrix,
+            pairs["concatenated_coeff"],
+        )
 
-            libgpbc.update_dxyz_dabc(
-                ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
-            )
+        libgpbc.update_dxyz_dabc(
+            ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
+        )
 
-            density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
-        else:
-            raise NotImplementedError
-
+        density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
         density_contribution_on_g_mesh = (
-            tools.fft(density.reshape(n_channels * density_slices, -1), mesh)
-            * weight_per_grid_point
+            tools.fft(density.reshape(n_channels, -1), mesh) * weight_per_grid_point
         )
 
         density_on_g_mesh[
-            cp.ix_(cp.arange(n_channels * density_slices), *fft_grids)
+            cp.ix_(cp.arange(n_channels), cp.arange(1), *fft_grids)
         ] += density_contribution_on_g_mesh.reshape((-1,) + tuple(mesh))
 
     density_on_g_mesh = density_on_g_mesh.reshape([n_channels, density_slices, -1])
+    if density_slices == 4:
+        density_on_g_mesh[:, 1:] = cp.einsum(
+            "np, xp -> nxp", density_on_g_mesh[:, 0], mydf.gradient_vector_on_g_mesh
+        )
     return density_on_g_mesh
 
 
@@ -551,12 +554,8 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
             cast_to_pointer(gaussians_per_angular_pair["shell_to_ao_indices"]),
             ctypes.c_int(n_i_functions),
             ctypes.c_int(n_j_functions),
-            cast_to_pointer(
-                gaussians_per_angular_pair["pair_indices_per_block"]
-            ),
-            cast_to_pointer(
-                gaussians_per_angular_pair["accumulated_counts_per_block"]
-            ),
+            cast_to_pointer(gaussians_per_angular_pair["pair_indices_per_block"]),
+            cast_to_pointer(gaussians_per_angular_pair["accumulated_counts_per_block"]),
             cast_to_pointer(gaussians_per_angular_pair["sorted_block_index"]),
             ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
             cast_to_pointer(gaussians_per_angular_pair["image_indices"]),
@@ -577,7 +576,7 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
             "kt, ntij -> nkij", pairs_info["phase_diff_among_images"], fock
         )
     else:
-        return fock.reshape((n_channels, n_k_points, n_i_functions, n_j_functions))
+        return fock
 
 
 def convert_xc_on_g_mesh_to_fock(
@@ -589,6 +588,7 @@ def convert_xc_on_g_mesh_to_fock(
     cell = mydf.cell
     n_k_points = len(kpts)
     nao = cell.nao_nr()
+
     xc_on_g_mesh = xc_on_g_mesh.reshape(-1, *mydf.mesh)
     n_channels = xc_on_g_mesh.shape[0]
     at_gamma_point = multigrid.gamma_point(kpts)
@@ -765,10 +765,11 @@ def nr_rks(
     density_in_real_space = tools.ifft(
         density_on_G_mesh.reshape(-1, ngrids), mesh
     ).real * (1.0 / weight)
+
     density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
     n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight
     weighted_xc_for_fock_on_g_mesh = cp.ndarray(
-        (nset, *density_in_real_space.shape), dtype=cp.complex128
+        density_in_real_space.shape, dtype=cp.complex128
     )
     xc_energy_sum = np.zeros(nset)
     for i in range(nset):
@@ -786,7 +787,9 @@ def nr_rks(
         ).sum() * weight
 
         weighted_xc_for_fock_on_g_mesh[i] = tools.fft(xc_for_fock * weight, mesh)
+
     density_in_real_space = density_on_G_mesh = None
+
     if nset == 1:
         coulomb_energy = coulomb_energy[0]
         n_electrons = n_electrons[0]
@@ -794,21 +797,23 @@ def nr_rks(
     log.debug("Multigrid exc %s  nelec %s", xc_energy_sum, n_electrons)
 
     kpts_band = _format_kpts_band(kpts_band, kpts)
-    if xc_type == "LDA":
-        if with_j:
-            weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
-        xc_for_fock = convert_xc_on_g_mesh_to_fock(
-            mydf, weighted_xc_for_fock_on_g_mesh, hermi, kpts_band
-        )
 
-    else:
-        raise NotImplementedError
+    if xc_type == "GGA":
+        weighted_xc_for_fock_on_g_mesh[:, 1:] *= mydf.gradient_vector_on_g_mesh
+        weighted_xc_for_fock_on_g_mesh = weighted_xc_for_fock_on_g_mesh.sum(
+            axis=1
+        ).reshape((nset, -1, ngrids))
+
+    if with_j:
+        weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
+    xc_for_fock = convert_xc_on_g_mesh_to_fock(
+        mydf, weighted_xc_for_fock_on_g_mesh, hermi, kpts_band
+    )
+
+    xc_for_fock = xc_for_fock.reshape(dm_kpts.shape)
     t0 = log.timer("xc", *t0)
 
-    shape = dm_kpts.shape
-    if len(shape) == 3 and shape[0] != kpts_band.shape[0]:
-        shape[0] = kpts_band.shape[0]
-    xc_for_fock = xc_for_fock.reshape(shape)
+    xc_for_fock = _format_jks(xc_for_fock, dm_kpts, kpts_band, kpts)
     xc_for_fock = cupy_helper.tag_array(
         xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None
     )
@@ -832,6 +837,6 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
 
 
 def fftdf(mf):
-    mf.with_df, old_df = FFTDF(mf.cell, kpts=mf.kpts), mf.with_df
+    mf.with_df, old_df = FFTDF(mf.cell, kpts=mf.kpts, xc=mf.xc), mf.with_df
     mf.with_df.__dict__.update(old_df.__dict__)
     return mf
