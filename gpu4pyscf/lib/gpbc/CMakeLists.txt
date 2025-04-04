@@ -15,7 +15,7 @@
 #set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_80 --ptxas-options=-v")
 
 add_library(gpbc SHARED
-        multi_grid.cu
+        multi_grid/drivers.cu
 )
 
 set_target_properties(gpbc PROPERTIES

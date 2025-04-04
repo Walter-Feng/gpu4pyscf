@@ -1,3 +1,4 @@
+#pragma once
 /*
  * Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
  *
@@ -13,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+#include <stdio.h>
 #include <cuda_runtime.h>
 
 // copy from samples/common/inc/helper_cuda.h
