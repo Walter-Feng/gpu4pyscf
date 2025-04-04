@@ -163,11 +163,11 @@ def _kernel(mf, conv_tol=1e-10, conv_tol_grad=None,
             occ_coeff = cupy.asarray(mo_coeff[:,mo_occ>0])
             dm = tag_array(dm, occ_coeff=occ_coeff, mo_occ=mo_occ, mo_coeff=mo_coeff)
 
-    t0 = log.timer_debug1('init guess', *t0)
+    t1 = log.timer_debug1('init guess', *t0)
     h1e = cupy.asarray(mf.get_hcore(mol))
-    t0 = log.timer_debug1('hcore', *t0)
+    t1 = log.timer_debug1('hcore', *t1)
     s1e = cupy.asarray(mf.get_ovlp(mol))
-    t0 = log.timer_debug1('ovlp', *t0)
+    t1 = log.timer_debug1('ovlp', *t1)
 
     vhf = mf.get_veff(mol, dm)
     e_tot = mf.energy_tot(dm, h1e, vhf)
