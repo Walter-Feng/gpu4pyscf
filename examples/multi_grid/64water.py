@@ -9,7 +9,9 @@ from gpu4pyscf.pbc.dft import multi_grid_store_ao as gpu_multi_grid_ao
 from gpu4pyscf.pbc.dft import multigrid as gpu_multi_grid_qiming
 
 cell=gto.Cell()
-
+from cupy.fft.config import get_plan_cache
+cache = get_plan_cache()
+cache.set_size(0)
 import cupy.cuda
 # cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
 boxlen=13
@@ -225,7 +227,7 @@ print("="*100)
 gpu_mf = gpu_pbcdft.RKS(cell)
 gpu_mf.xc = "LDA"
 gpu_mf.init_guess = 'atom' # atom guess is fast
-gpu_mf.max_cycle = 10
+# gpu_mf.max_cycle = 10
 gpu_mf = gpu_multi_grid_mine.fftdf(gpu_mf)
 gpu_mf.with_df.ngrids = 4
 gpu_mf.kernel()
@@ -240,7 +242,7 @@ gpu_mf.max_cycle = 10
 gpu_mf._numint = gpu_multi_grid_qiming.MultiGridNumInt(cell)
 gpu_mf.kernel()
 
-print("="*100)
+""" print("="*100)
 print("cpu_multi_grid")
 print("="*100)  
 mf=dft.RKS(cell)
@@ -262,5 +264,5 @@ gpu_mf.max_cycle = 10
 gpu_mf = gpu_multi_grid_ao.fftdf(gpu_mf)
 gpu_mf.with_df.ngrids = 4
 gpu_mf.kernel()
-
+ """
 

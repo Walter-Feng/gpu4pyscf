@@ -6,7 +6,9 @@ import scipy
 
 import pyscf.pbc.gto as gto
 
+import pyscf.pbc.dft.multigrid as multigrid_parent
 from pyscf.pbc.dft.multigrid import multigrid
+
 from pyscf.pbc.df.df_jk import _format_kpts_band
 from pyscf.pbc.gto.pseudo import pp_int
 from pyscf.pbc.lib.kpts_helper import is_gamma_point
@@ -17,6 +19,7 @@ from gpu4pyscf.lib import logger
 from gpu4pyscf.pbc import tools
 import gpu4pyscf.pbc.dft.multigrid as multigrid_qiming
 import gpu4pyscf.lib.cupy_helper as cupy_helper
+from gpu4pyscf.lib.cupy_helper import return_cupy_array
 
 libgpbc = cupy_helper.load_library("libgpbc")
 
@@ -403,8 +406,8 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
 
     if ignore_imag is False:
         raise NotImplementedError
-    density_matrix_with_translation_real_part = (
-        density_matrix_with_translation.real.flatten()
+    density_matrix_with_translation_real_part = cp.asarray(
+        density_matrix_with_translation.real, order="C"
     )
     density = cp.zeros((n_channels,) + tuple(pairs_info["mesh"]))
 
@@ -484,17 +487,17 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
             pairs["ao_indices_in_localized"][:, None],
             pairs["concatenated_ao_indices"],
         ]
-        density_matrix_with_rows_in_diffused = dms[
+        """ density_matrix_with_rows_in_diffused = dms[
             :,
             :,
             pairs["ao_indices_in_diffused"][:, None],
             pairs["ao_indices_in_localized"],
-        ]
+        ] """
 
-        n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[3]
+        """ n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[3]
         density_matrix_with_rows_in_localized[
             :, :, :, n_ao_in_localized:
-        ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2)
+        ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2) """
 
         coeff_sandwiched_density_matrix = cp.einsum(
             "nkij,pi->nkpj",
@@ -629,6 +632,15 @@ def convert_xc_on_g_mesh_to_fock(
         fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_localized"])
         fock_slice = cp.einsum("nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"])
 
+        # While mathematically it is correct to have concatenated
+        # ao indices in the addition, but it is possible that the ao
+        # indices overlap between localized gaussians and diffused gaussians
+        # (imagine two gaussians within a single shell, say, C2s).
+        # In this case, the addition to the same place requires atomic
+        # operation, while I guess in the cupy code it is assumed that
+        # the indices do not overlap, and hence no atomic guard.
+        # Anyway, the numerical result will be wrong if we use
+        # concatenated ao indices.
         fock[
             :,
             :,
@@ -650,10 +662,155 @@ def convert_xc_on_g_mesh_to_fock(
             ] += (
                 fock_slice[:, :, :, n_ao_in_localized:].transpose(0, 1, 3, 2).conj()
             )
+            fock[
+                :,
+                :,
+                pairs["ao_indices_in_localized"][:, None],
+                pairs["ao_indices_in_localized"],
+            ] += fock_slice[:, :, :, :n_ao_in_localized].transpose(0, 1, 3, 2).conj()
         else:
             raise NotImplementedError
 
     return fock
+
+
+def evaluate_xc_gradient_wrapper(
+    gradient, pairs_info, xc_weights, dm_slice, ignore_imag=True
+):
+    c_driver = libgpbc.evaluate_xc_gradient_driver
+
+    n_images = pairs_info["neighboring_images"].shape[0]
+    n_k_points, n_difference_images = pairs_info["phase_diff_among_images"].shape
+
+    if n_k_points == 1:
+        density_matrix_with_translation = dm_slice
+    else:
+        density_matrix_with_translation = cp.einsum(
+            "kt, ntij -> nkij", pairs_info["phase_diff_among_images"], dm_slice
+        )
+
+    n_channels, _, n_i_functions, n_j_functions = density_matrix_with_translation.shape
+
+    if ignore_imag is False:
+        raise NotImplementedError
+
+    density_matrix_with_translation_real_part = cp.asarray(
+        density_matrix_with_translation.real, order="C"
+    )
+    n_atoms = gradient.shape[1]
+
+    for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
+        (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
+        c_driver(
+            cast_to_pointer(gradient),
+            cast_to_pointer(xc_weights),
+            cast_to_pointer(density_matrix_with_translation_real_part),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+            cast_to_pointer(gaussians_per_angular_pair["screened_shell_pairs"]),
+            cast_to_pointer(gaussians_per_angular_pair["i_shells"]),
+            cast_to_pointer(gaussians_per_angular_pair["j_shells"]),
+            ctypes.c_int(len(gaussians_per_angular_pair["j_shells"])),
+            cast_to_pointer(gaussians_per_angular_pair["shell_to_ao_indices"]),
+            ctypes.c_int(n_i_functions),
+            ctypes.c_int(n_j_functions),
+            cast_to_pointer(gaussians_per_angular_pair["pair_indices_per_block"]),
+            cast_to_pointer(gaussians_per_angular_pair["accumulated_counts_per_block"]),
+            cast_to_pointer(gaussians_per_angular_pair["sorted_block_index"]),
+            ctypes.c_int(len(gaussians_per_angular_pair["sorted_block_index"])),
+            cast_to_pointer(gaussians_per_angular_pair["image_indices"]),
+            cast_to_pointer(pairs_info["neighboring_images"]),
+            ctypes.c_int(n_images),
+            cast_to_pointer(pairs_info["image_pair_difference_index"]),
+            ctypes.c_int(n_difference_images),
+            cast_to_pointer(pairs_info["mesh"]),
+            cast_to_pointer(pairs_info["atm"]),
+            ctypes.c_int(n_atoms),
+            cast_to_pointer(pairs_info["bas"]),
+            cast_to_pointer(pairs_info["env"]),
+            ctypes.c_int(n_channels),
+            ctypes.c_int(pairs_info["is_non_orthogonal"]),
+        )
+
+
+def convert_xc_on_g_mesh_to_fock_gradient(
+    mydf,
+    xc_on_g_mesh,
+    dm_kpts,
+    hermi=1,
+    kpts=np.zeros((1, 3)),
+):
+    cell = mydf.cell
+    n_k_points = len(kpts)
+    dm_kpts = cp.asarray(dm_kpts, order="C")
+    dms = fft_jk._format_dms(dm_kpts, kpts)
+    nao = cell.nao_nr()
+    n_atoms = cell.natm
+
+    xc_on_g_mesh = xc_on_g_mesh.reshape(-1, *mydf.mesh)
+    n_channels = xc_on_g_mesh.shape[0]
+    at_gamma_point = multigrid.gamma_point(kpts)
+
+    if hermi != 1:
+        raise NotImplementedError
+
+    data_type = cp.float64
+    if not at_gamma_point:
+        data_type = cp.complex128
+
+    gradient = cp.zeros((n_atoms, 3))
+
+    for pairs in mydf.sorted_gaussian_pairs:
+        mesh = pairs["mesh"]
+        n_grid_points = np.prod(mesh)
+
+        fft_grids = map(
+            lambda mesh_points: np.fft.fftfreq(mesh_points, 1.0 / mesh_points).astype(
+                np.int32
+            ),
+            mesh,
+        )
+        interpolated_xc_on_g_mesh = xc_on_g_mesh[
+            cp.ix_(cp.arange(xc_on_g_mesh.shape[0]), *fft_grids)
+        ].reshape(n_channels, n_grid_points)
+        reordered_xc_on_real_mesh = tools.ifft(interpolated_xc_on_g_mesh, mesh).reshape(
+            n_channels, n_grid_points
+        )
+        # order='C' forces a copy. otherwise the array is not contiguous
+        reordered_xc_on_real_mesh = cp.asarray(
+            reordered_xc_on_real_mesh.real, order="C"
+        )
+
+        density_matrix_slice = dms[
+            :,
+            :,
+            pairs["ao_indices_in_localized"][:, None],
+            pairs["concatenated_ao_indices"],
+        ]
+
+        coeff_sandwiched_density_matrix = cp.einsum(
+            "nkij,pi->nkpj",
+            density_matrix_slice,
+            pairs["coeff_in_localized"],
+        )
+
+        coeff_sandwiched_density_matrix = cp.einsum(
+            "nkpj, qj -> nkpq",
+            coeff_sandwiched_density_matrix,
+            pairs["concatenated_coeff"],
+        )
+
+        libgpbc.update_dxyz_dabc(cast_to_pointer(pairs["dxyz_dabc"]))
+
+        evaluate_xc_gradient_wrapper(
+            gradient,
+            pairs,
+            reordered_xc_on_real_mesh,
+            coeff_sandwiched_density_matrix,
+            ignore_imag=True,
+        )
+
+    return gradient
 
 
 def get_nuc(mydf, kpts=None):
@@ -690,7 +847,8 @@ def get_pp(mydf, kpts=None):
     mesh = mydf.mesh
     # Compute the vpplocG as
     # -einsum('ij,ij->j', pseudo.get_vlocG(cell, Gv), cell.get_SI(Gv))
-    vpplocG = multigrid_qiming.eval_vpplocG(cell, mesh)
+    vpplocG, vpplocG_part1 = multigrid_qiming.eval_vpplocG(cell, mesh, cache_part1=True)
+    mydf.vpplocG_part1 = vpplocG_part1
     vpp = convert_xc_on_g_mesh_to_fock(mydf, vpplocG, hermi=1, kpts=kpts)[0]
     t1 = log.timer_debug1("vpploc", *t0)
 
@@ -744,6 +902,13 @@ def nr_rks(
     density_on_G_mesh = evaluate_density_on_g_mesh(
         mydf, dm_kpts, kpts, derivative_order
     )
+
+    cpu_df = multigrid.MultiGridFFTDF(cell)
+    density_on_G_mesh_cpu = multigrid._eval_rhoG(
+        cpu_df, dm_kpts.get()
+    )
+    print(cp.max(cp.abs(cp.asarray(density_on_G_mesh_cpu) - density_on_G_mesh)))
+    assert 0
     coulomb_on_g_mesh = cp.einsum(
         "ng,g->ng", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
     )
@@ -761,9 +926,9 @@ def nr_rks(
 
     # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
     # computing rhoR with IFFT, the weight factor is not needed.
-    density_in_real_space = tools.ifft(
-        density_on_G_mesh.reshape(-1, ngrids), mesh
-    ).real / weight
+    density_in_real_space = (
+        tools.ifft(density_on_G_mesh.reshape(-1, ngrids), mesh).real / weight
+    )
 
     density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
     n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight
@@ -821,8 +986,98 @@ def nr_rks(
     xc_for_fock = cupy_helper.tag_array(
         xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None
     )
-    cp.get_default_memory_pool().free_all_blocks()
+
     return n_electrons, xc_energy_sum, xc_for_fock
+
+
+def nr_rks_gradient(
+    mydf,
+    xc_code,
+    dm_kpts,
+    hermi=1,
+    kpts=None,
+    kpts_band=None,
+    with_j=True,
+    return_j=False,
+    verbose=None,
+):
+    if kpts is None:
+        kpts = mydf.kpts
+    log = logger.new_logger(mydf, verbose)
+    t0 = log.init_timer()
+    cell = mydf.cell
+    dm_kpts = cp.asarray(dm_kpts, order="C")
+    dms = fft_jk._format_dms(dm_kpts, kpts)
+    nset = dms.shape[0]
+    kpts_band = _format_kpts_band(kpts_band, kpts)
+
+    numerical_integrator = mydf._numint
+    xc_type = numerical_integrator._xc_type(xc_code)
+
+    if xc_type == "LDA":
+        derivative_order = 0
+    elif xc_type == "GGA":
+        derivative_order = 1
+    else:
+        raise NotImplementedError
+
+    mesh = mydf.mesh
+    ngrids = np.prod(mesh)
+    density_on_G_mesh = evaluate_density_on_g_mesh(
+        mydf, dm_kpts, kpts, derivative_order
+    )
+    weight = cell.vol / ngrids
+
+    # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
+    # computing rhoR with IFFT, the weight factor is not needed.
+    density_in_real_space = (
+        tools.ifft(density_on_G_mesh.reshape(-1, ngrids), mesh).real / weight
+    )
+
+    density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
+    weighted_xc_for_fock_on_g_mesh = cp.ndarray(
+        density_in_real_space.shape, dtype=cp.complex128
+    )
+    for i in range(nset):
+        if xc_type == "LDA":
+            _, xc_for_fock = numerical_integrator.eval_xc_eff(
+                xc_code, density_in_real_space[i, 0], deriv=1, xctype=xc_type
+            )[:2]
+        else:
+            _, xc_for_fock = numerical_integrator.eval_xc_eff(
+                xc_code, density_in_real_space[i], deriv=1, xctype=xc_type
+            )[:2]
+
+        weighted_xc_for_fock_on_g_mesh[i] = tools.fft(xc_for_fock * weight, mesh)
+
+    if xc_type == "GGA":
+        weighted_xc_for_fock_on_g_mesh = weighted_xc_for_fock_on_g_mesh[
+            :, 0
+        ] - cp.einsum(
+            "ngp, gp -> np",
+            weighted_xc_for_fock_on_g_mesh[:, 1:],
+            mydf.gradient_vector_on_g_mesh,
+        )
+        weighted_xc_for_fock_on_g_mesh = weighted_xc_for_fock_on_g_mesh.reshape(
+            (nset, -1, ngrids)
+        )
+
+    weighted_xc_for_fock_on_g_mesh *= 0
+    if with_j:
+        coulomb_on_g_mesh = cp.einsum(
+            "ng,g->ng", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
+        )
+
+        weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
+
+    if mydf.vpplocG_part1 is not None:
+        weighted_xc_for_fock_on_g_mesh[:, 0] += mydf.vpplocG_part1
+
+    veff_gradient = convert_xc_on_g_mesh_to_fock_gradient(
+        mydf, weighted_xc_for_fock_on_g_mesh, dm_kpts, hermi, kpts_band
+    )
+
+    return veff_gradient
 
 
 class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
@@ -833,11 +1088,21 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
         sort_gaussian_pairs(self, xc_type)
         self.coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=self.mesh)
         self.gradient_vector_on_g_mesh = None
+        self.vpplocG_part1 = None
         if xc_type == "GGA":
             self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
 
     get_nuc = get_nuc
     get_pp = get_pp
+
+    def get_veff_ip1(self, dm, xc_code=None, hermi=1, kpts=None, kpts_band=None):
+        return nr_rks_gradient(
+            self, xc_code, dm, hermi, kpts, kpts_band, with_j=True, return_j=False
+        )
+
+    vpploc_part1_nuc_grad = return_cupy_array(
+        multigrid_parent.MultiGridFFTDF2.vpploc_part1_nuc_grad
+    )
 
 
 def fftdf(mf):

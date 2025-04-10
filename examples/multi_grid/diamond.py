@@ -79,7 +79,7 @@ def run(ke_cutoff, precision, super_cell, xc, version):
     mf = make_mf(cell, xc, version)
     mf.kernel()
 
-
+run(200, 1e-10, (4, 4, 4), "LDA", "Rui")
 if __name__ == "__main__":
     import argparse
 

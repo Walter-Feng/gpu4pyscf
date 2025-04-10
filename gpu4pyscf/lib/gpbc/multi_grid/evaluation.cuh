@@ -140,11 +140,14 @@ __global__ void evaluate_density_kernel(
     const double gaussian_exponent_at_reference =
         ij_exponent * distance_squared(x0, y0, z0);
 
+    const bool at_diagonal = (i_shell_index == j_shell_index) &&
+                             (image_index_i == image_index_j);
+
     const double pair_prefactor =
         is_valid_pair
             ? exp(-ij_exponent_in_prefactor - gaussian_exponent_at_reference) *
                   i_coeff * j_coeff * common_fac_sp<double, i_angular>() *
-                  common_fac_sp<double, j_angular>()
+                  common_fac_sp<double, j_angular>() * (at_diagonal ? 1 : 2)
             : 0;
 #pragma unroll
     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -492,11 +495,14 @@ __global__ void evaluate_xc_kernel(
     const double gaussian_exponent_at_reference =
         ij_exponent * distance_squared(x0, y0, z0);
 
+    const bool at_diagonal = (i_shell_index == j_shell_index) &&
+                             (image_index_i == image_index_j);
+
     const double pair_prefactor =
         is_valid_pair
             ? exp(-ij_exponent_in_prefactor - gaussian_exponent_at_reference) *
                   i_coeff * j_coeff * common_fac_sp<double, i_angular>() *
-                  common_fac_sp<double, j_angular>()
+                  common_fac_sp<double, j_angular>() * (at_diagonal ? 0.5 : 1)
             : 0;
     const double exp_cross_term_a =
         exp(-2 * ij_exponent *

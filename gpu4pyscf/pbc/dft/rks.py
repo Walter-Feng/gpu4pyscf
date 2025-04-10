@@ -30,7 +30,7 @@ from gpu4pyscf.pbc.scf import hf as pbchf, khf
 from gpu4pyscf.pbc.dft import gen_grid
 from gpu4pyscf.pbc.dft import numint
 from gpu4pyscf.pbc.dft import multigrid
-from gpu4pyscf.pbc.dft import multi_grid, multi_grid_store_ao
+from gpu4pyscf.pbc.dft import multi_grid
 from gpu4pyscf.lib.cupy_helper import return_cupy_array, tag_array
 from pyscf import __config__
 
@@ -70,14 +70,6 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
         logger.info(ks, 'nelec by numeric integration = %s', n)
         t0 = logger.timer(ks, 'vxc', *t0)
         return vxc
-    elif isinstance(ks.with_df, multi_grid_store_ao.FFTDF):
-        n, exc, vxc = multi_grid_store_ao.nr_rks(ks.with_df, ks.xc, dm, hermi,
-                                       kpt.reshape(1, 3), kpts_band,
-                                       with_j=True, return_j=False)
-        logger.info(ks, 'nelec by numeric integration = %s', n)
-        t0 = logger.timer(ks, 'vxc', *t0)
-        return vxc
-
 
     if isinstance(ni, multigrid.MultiGridNumInt):
         if ks.do_nlc():
