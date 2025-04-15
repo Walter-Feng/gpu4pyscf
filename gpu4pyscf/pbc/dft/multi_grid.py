@@ -876,16 +876,7 @@ def get_k_kpts(
     occupied_occupation_numbers = occupation_numbers[is_occupied]
     n_occupied = len(occupied_occupation_numbers)
     mo_to_ao = cp.einsum("kpq, ikqm -> ikpm", overlap, occupied_mo_coeff)
-    mo_coeff = dm_kpts.__dict__["mo_coeff"].reshape(n_channels, n_k_points, n_ao, -1)
-    cp.set_printoptions(threshold=10000)
-    # print(mo_coeff.shape)
-    # print(mo_coeff[0, 0].T @ overlap[0] @ mo_coeff[0, 0])
-    temp = cp.einsum("mp, mn, nq -> pq", mo_coeff[0, 0], overlap[0], mo_coeff[0, 0])
-    # np.savetxt(df_object.stdout, temp[:10, :10].get(), fmt="% 6.4f", delimiter=" ")
-    # print(mo_to_ao[0, 0, :, :n_occupied] @ occupied_mo_coeff[0, 0].T)
-    # print(mo_to_ao[0, 0] @ dm_kpts.__dict__["mo_coeff"][0, 0].T)
-    # print(mo_to_ao[0, 0].shape, dm_kpts.__dict__["mo_coeff"].T.shape)
-
+    
     weight = 1.0 / n_k_points * (cell.vol / df_object.n_grid_points)
 
     vk = cp.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
