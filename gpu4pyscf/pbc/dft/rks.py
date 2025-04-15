@@ -69,6 +69,25 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
                                        with_j=True, return_j=False)
         logger.info(ks, 'nelec by numeric integration = %s', n)
         t0 = logger.timer(ks, 'vxc', *t0)
+        if hybrid:
+            omega, alpha, hyb = ni.rsh_and_hybrid_coeff(ks.xc, spin=cell.spin)
+            if omega == 0:
+                vk = ks.with_df.get_k(dm, hermi, kpt, kpts_band)
+                vk *= hyb
+            elif alpha == 0: # LR=0, only SR exchange
+                vk = ks.with_df.get_k(dm, hermi, kpt, kpts_band, omega=-omega)
+                vk *= hyb
+            elif hyb == 0: # SR=0, only LR exchange
+                vk = ks.with_df.get_k(dm, hermi, kpt, kpts_band, omega=omega)
+                vk *= alpha
+            else: # SR and LR exchange with different ratios
+                vk = ks.with_df.get_k(dm, hermi, kpt, kpts_band)
+                vk *= hyb
+                vklr = ks.with_df.get_k(dm, hermi, kpt, kpts_band, omega=omega)
+                vklr *= (alpha - hyb)
+                vk += vklr
+            vxc -= vk * .5
+            exc -= cp.einsum('ij,ji->', dm, vk).real * .5 * .5
         return vxc
     elif isinstance(ks.with_df, multi_grid_store_ao.FFTDF):
         n, exc, vxc = multi_grid_store_ao.nr_rks(ks.with_df, ks.xc, dm, hermi,
