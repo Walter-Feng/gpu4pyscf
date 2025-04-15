@@ -901,45 +901,50 @@ def get_k_kpts(
                         ao_at_k1.conj() @ occupied_mo_coeff[i, k1_index]
                     ).T
 
-            block_size = 1
-            for index, ao_range in enumerate(prange(0, n_occupied, block_size)):
+            for index, ao_range in enumerate(prange(0, n_occupied, 4)):
                 p0, p1 = ao_range
                 if index % mpi.comm.size != mpi.comm.rank:
                     continue
-
-                ao_sandwiched_e_ikr_in_real_space = cp.einsum(
-                    "pn, qn, n -> pqn",
-                    occupied_mo_at_k1[i, p0:p1].conj(),
-                    occupied_mo_at_k2[i],
-                    e_ikr,
-                ).reshape(p1 - p0, n_occupied, *mesh)
-
-                ao_sandwiched_e_ikr_in_g_space = cp.fft.fftn(
-                    ao_sandwiched_e_ikr_in_real_space, axes=(2, 3, 4)
-                )
-
-                coulomb_in_real_space = cp.fft.ifftn(
-                    df_object.coulomb_kernel_on_g_mesh.reshape(*mesh)
-                    * ao_sandwiched_e_ikr_in_g_space,
-                    axes=(2, 3, 4),
-                ).reshape(p1 - p0, n_occupied, -1)
-
-                if is_gamma_point(kpts):
-                    coulomb_in_real_space = coulomb_in_real_space.real
-
+                
                 for i in range(n_channels):
-                    coulomb_weighted_density_dot_ao_at_k2 = cp.einsum(
-                        "pqn, qn , q -> pn",
-                        coulomb_in_real_space,
-                        occupied_mo_at_k2[i],
-                        occupied_occupation_numbers,
-                    )
 
-                    coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
+                    coulomb_weighted_density_dot_ao_at_k2 = cp.zeros(
+                        (p1-p0, df_object.n_grid_points), dtype=data_type
+                    )
+                    
+                    for contracted_mo_range in prange(0, n_occupied, 8):
+                        q0, q1 = contracted_mo_range
+                        ao_sandwiched_e_ikr_in_real_space = cp.einsum(
+                            "pn, qn, n -> pqn",
+                            occupied_mo_at_k1[i, p0:p1].conj(),
+                            occupied_mo_at_k2[i, q0:q1],
+                            e_ikr,
+                        ).reshape(p1 - p0, q1 - q0, *mesh)
+
+                        ao_sandwiched_e_ikr_in_g_space = cp.fft.fftn(
+                            ao_sandwiched_e_ikr_in_real_space, axes=(2, 3, 4)
+                        )
+
+                        coulomb_in_real_space = cp.fft.ifftn(
+                            df_object.coulomb_kernel_on_g_mesh.reshape(*mesh)
+                            * ao_sandwiched_e_ikr_in_g_space,
+                            axes=(2, 3, 4),
+                        ).reshape(p1 - p0, q1 - q0, -1)
+
+                        if is_gamma_point(kpts):
+                            coulomb_in_real_space = coulomb_in_real_space.real
+
+                        coulomb_weighted_density_dot_ao_at_k2 += cp.einsum(
+                            "pqn, qn , q -> pn",
+                            coulomb_in_real_space,
+                            occupied_mo_at_k2[i, q0:q1],
+                            occupied_occupation_numbers[q0:q1],
+                        ) * e_ikr.conj()
 
                     fock_slice_in_occupied = (
                         weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
                     )
+
                     fock_slice = (
                         mo_to_ao[i, k1_index, :, p0:p1] @ fock_slice_in_occupied
                     )
