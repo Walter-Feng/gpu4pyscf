@@ -853,6 +853,7 @@ def get_k_kpts(
         vk : (nkpts, nao, nao) ndarray
         or list of vj and vk if the input dm_kpts is a list of DMs
     """
+    log = logger.new_logger(df_object, df_object.verbose)
     cell = df_object.cell
     mesh = df_object.mesh
     assert cell.low_dim_ft_type != "inf_vacuum"
@@ -882,11 +883,13 @@ def get_k_kpts(
     vk = cp.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
 
     for k2_index, k2, ao_at_k2 in zip(range(n_k_points), kpts, df_object.ao_values):
+        t0 = log.init_timer()
         occupied_mo_at_k2 = cp.ndarray(
             (n_channels, n_occupied, df_object.n_grid_points), dtype=data_type
         )
         for i in range(n_channels):
             occupied_mo_at_k2[i] = (ao_at_k2.conj() @ occupied_mo_coeff[i, k2_index]).T
+        t0 = log.timer("occupied_mo_at_k2", *t0)
         for k1_index, k1, ao_at_k1 in zip(range(n_k_points), kpts, df_object.ao_values):
             if is_gamma_point(kpts):
                 e_ikr = cp.ones(len(df_object.grids.coords))
@@ -920,7 +923,8 @@ def get_k_kpts(
                             occupied_mo_at_k2[i, q0:q1],
                             e_ikr,
                         ).reshape(p1 - p0, q1 - q0, *mesh)
-
+                        t0 = log.timer("mo pair", *t0)
+                        
                         ao_sandwiched_e_ikr_in_g_space = cp.fft.fftn(
                             ao_sandwiched_e_ikr_in_real_space, axes=(2, 3, 4)
                         )
@@ -930,6 +934,8 @@ def get_k_kpts(
                             * ao_sandwiched_e_ikr_in_g_space,
                             axes=(2, 3, 4),
                         ).reshape(p1 - p0, q1 - q0, -1)
+                        
+                        t0 = log.timer("fft", *t0)
 
                         if is_gamma_point(kpts):
                             coulomb_in_real_space = coulomb_in_real_space.real
@@ -955,6 +961,7 @@ def get_k_kpts(
                         @ occupied_mo_coeff[i, k1_index]
                         @ mo_to_ao[i, k1_index].conj().T
                     )
+                    t0 = log.timer("fock_slice", *t0)
 
     mpi.comm.reduce(vk, in_place=True)
     if exxdiv == "ewald":
