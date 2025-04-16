@@ -829,7 +829,14 @@ def nr_rks(
 
 
 def get_k_kpts(
-    df_object, dm_kpts, hermi=1, kpts=np.zeros((1, 3)), kpts_band=None, exxdiv=None
+    df_object,
+    dm_kpts,
+    hermi=1,
+    kpts=np.zeros((1, 3)),
+    kpts_band=None,
+    exxdiv=None,
+    p_slice=2,
+    q_slice=32,
 ):
     """Get the Coulomb (J) and exchange (K) AO matrices at sampled k-points.
 
@@ -854,6 +861,7 @@ def get_k_kpts(
         or list of vj and vk if the input dm_kpts is a list of DMs
     """
     log = logger.new_logger(df_object, df_object.verbose)
+    t0 = log.init_timer()
     cell = df_object.cell
     mesh = df_object.mesh
     assert cell.low_dim_ft_type != "inf_vacuum"
@@ -877,19 +885,18 @@ def get_k_kpts(
     occupied_occupation_numbers = occupation_numbers[is_occupied]
     n_occupied = len(occupied_occupation_numbers)
     mo_to_ao = cp.einsum("kpq, ikqm -> ikpm", overlap, occupied_mo_coeff)
-    
+
     weight = 1.0 / n_k_points * (cell.vol / df_object.n_grid_points)
 
     vk = cp.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
 
     for k2_index, k2, ao_at_k2 in zip(range(n_k_points), kpts, df_object.ao_values):
-        t0 = log.init_timer()
         occupied_mo_at_k2 = cp.ndarray(
             (n_channels, n_occupied, df_object.n_grid_points), dtype=data_type
         )
         for i in range(n_channels):
             occupied_mo_at_k2[i] = (ao_at_k2.conj() @ occupied_mo_coeff[i, k2_index]).T
-        t0 = log.timer("occupied_mo_at_k2", *t0)
+        t1 = log.timer_debug1("occupied_mo_at_k2", *t0)
         for k1_index, k1, ao_at_k1 in zip(range(n_k_points), kpts, df_object.ao_values):
             if is_gamma_point(kpts):
                 e_ikr = cp.ones(len(df_object.grids.coords))
@@ -904,48 +911,62 @@ def get_k_kpts(
                         ao_at_k1.conj() @ occupied_mo_coeff[i, k1_index]
                     ).T
 
-            for index, ao_range in enumerate(prange(0, n_occupied, 4)):
+            for index, ao_range in enumerate(prange(0, n_occupied, p_slice)):
                 p0, p1 = ao_range
                 if index % mpi.comm.size != mpi.comm.rank:
                     continue
-                
+
                 for i in range(n_channels):
 
                     coulomb_weighted_density_dot_ao_at_k2 = cp.zeros(
-                        (p1-p0, df_object.n_grid_points), dtype=data_type
+                        (p1 - p0, df_object.n_grid_points), dtype=data_type
                     )
-                    
-                    for contracted_mo_range in prange(0, n_occupied, 8):
+
+                    for contracted_mo_range in prange(0, n_occupied, q_slice):
                         q0, q1 = contracted_mo_range
-                        ao_sandwiched_e_ikr_in_real_space = cp.einsum(
-                            "pn, qn, n -> pqn",
-                            occupied_mo_at_k1[i, p0:p1].conj(),
-                            occupied_mo_at_k2[i, q0:q1],
-                            e_ikr,
-                        ).reshape(p1 - p0, q1 - q0, *mesh)
-                        t0 = log.timer("mo pair", *t0)
-                        
-                        ao_sandwiched_e_ikr_in_g_space = cp.fft.fftn(
-                            ao_sandwiched_e_ikr_in_real_space, axes=(2, 3, 4)
+                        if is_gamma_point(kpts):
+                            coulomb_in_mo_pair = cp.einsum(
+                                "pn, qn -> pqn",
+                                occupied_mo_at_k2[i, p0:p1],
+                                occupied_mo_at_k2[i, q0:q1],
+                            ).reshape(p1 - p0, q1 - q0, *mesh)
+                        else:
+                            coulomb_in_mo_pair = cp.einsum(
+                                "pn, qn, n -> pqn",
+                                occupied_mo_at_k1[i, p0:p1],
+                                occupied_mo_at_k2[i, q0:q1],
+                                e_ikr,
+                            ).reshape(p1 - p0, q1 - q0, *mesh)
+
+                        t1 = log.timer_debug1("mo pair", *t1)
+
+                        coulomb_in_mo_pair = cp.fft.fftn(
+                            coulomb_in_mo_pair, axes=(2, 3, 4)
                         )
 
-                        coulomb_in_real_space = cp.fft.ifftn(
+                        coulomb_in_mo_pair *= (
                             df_object.coulomb_kernel_on_g_mesh.reshape(*mesh)
-                            * ao_sandwiched_e_ikr_in_g_space,
+                        )
+
+                        coulomb_in_mo_pair = cp.fft.ifftn(
+                            coulomb_in_mo_pair,
                             axes=(2, 3, 4),
                         ).reshape(p1 - p0, q1 - q0, -1)
-                        
-                        t0 = log.timer("fft", *t0)
+
+                        t1 = log.timer_debug1("fft", *t1)
 
                         if is_gamma_point(kpts):
-                            coulomb_in_real_space = coulomb_in_real_space.real
+                            coulomb_in_mo_pair = coulomb_in_mo_pair.real
 
                         coulomb_weighted_density_dot_ao_at_k2 += cp.einsum(
                             "pqn, qn , q -> pn",
-                            coulomb_in_real_space,
+                            coulomb_in_mo_pair,
                             occupied_mo_at_k2[i, q0:q1],
                             occupied_occupation_numbers[q0:q1],
-                        ) * e_ikr.conj()
+                        )
+                        if is_gamma_point(kpts):
+                            coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
+                        t1 = log.timer_debug1("contraction at k2", *t1)
 
                     fock_slice_in_occupied = (
                         weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
@@ -961,7 +982,7 @@ def get_k_kpts(
                         @ occupied_mo_coeff[i, k1_index]
                         @ mo_to_ao[i, k1_index].conj().T
                     )
-                    t0 = log.timer("fock_slice", *t0)
+                    t1 = log.timer_debug1("fock_slice", *t1)
 
     mpi.comm.reduce(vk, in_place=True)
     if exxdiv == "ewald":
@@ -972,12 +993,12 @@ def get_k_kpts(
                 formatted_density_matrices[i],
                 df_object.overlap,
             )
-
+    log.timer_debug1("get_k_kpts", *t0)
     return fft_jk._format_jks(vk, dm_kpts, None, kpts)
 
 
 class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
-    def __init__(self, cell, kpts=np.zeros((1, 3)), xc="LDA"):
+    def __init__(self, cell, kpts=np.zeros((1, 3)), xc="LDA", p_slice=2, q_slice=32):
         self.sorted_gaussian_pairs = None
         fft.FFTDF.__init__(self, cell, kpts)
         xc_type = self._numint._xc_type(xc)
@@ -986,6 +1007,8 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
         self.gradient_vector_on_g_mesh = None
         self.ao_values = None
         self._overlap = None
+        self.p_slice = p_slice
+        self.q_slice = q_slice
         if xc_type == "GGA":
             self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
 
@@ -1005,8 +1028,16 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
 
         if self._overlap is None:
             self._overlap = cp.asarray(self.cell.get_ovlp(self.mesh))
-        return get_k_kpts(self, dm_kpts, hermi, kpt.reshape(1, 3), kpts_band, exxdiv)
-
+        return get_k_kpts(
+            self,
+            dm_kpts,
+            hermi,
+            kpt.reshape(1, 3),
+            kpts_band,
+            exxdiv,
+            self.p_slice,
+            self.q_slice,
+        )
     get_nuc = get_nuc
     get_pp = get_pp
 
