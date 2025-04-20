@@ -993,7 +993,7 @@ def get_k_kpts(
                 formatted_density_matrices[i],
                 df_object.overlap,
             )
-    log.timer_debug1("get_k_kpts", *t0)
+    log.timer("get_k_kpts", *t0)
     return fft_jk._format_jks(vk, dm_kpts, None, kpts)
 
 
