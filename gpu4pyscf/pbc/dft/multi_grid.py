@@ -12,6 +12,8 @@ from pyscf.pbc.dft.multigrid import multigrid
 from pyscf.pbc.df.df_jk import _format_kpts_band
 from pyscf.pbc.gto.pseudo import pp_int
 from pyscf.pbc.lib.kpts_helper import is_gamma_point
+from pyscf.pbc.tools import madelung
+from pyscf.lib import prange
 
 import gpu4pyscf.pbc.df.fft as fft
 import gpu4pyscf.pbc.df.fft_jk as fft_jk
@@ -19,6 +21,7 @@ from gpu4pyscf.lib import logger
 from gpu4pyscf.pbc import tools
 import gpu4pyscf.pbc.dft.multigrid as multigrid_qiming
 import gpu4pyscf.lib.cupy_helper as cupy_helper
+import gpu4pyscf.mpi as mpi
 from gpu4pyscf.lib.cupy_helper import return_cupy_array
 
 libgpbc = cupy_helper.load_library("libgpbc")
@@ -987,7 +990,177 @@ def nr_rks(
         xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None
     )
 
+
     return n_electrons, xc_energy_sum, xc_for_fock
+
+
+def get_k_kpts(
+    df_object,
+    dm_kpts,
+    hermi=1,
+    kpts=np.zeros((1, 3)),
+    kpts_band=None,
+    exxdiv=None,
+    p_slice=2,
+    q_slice=32,
+):
+    """Get the Coulomb (J) and exchange (K) AO matrices at sampled k-points.
+
+    Args:
+        dm_kpts : (nkpts, nao, nao) ndarray
+            Density matrix at each k-point
+        kpts : (nkpts, 3) ndarray
+
+    Kwargs:
+        hermi : int
+            Whether K matrix is hermitian
+
+            | 0 : not hermitian and not symmetric
+            | 1 : hermitian
+
+        kpts_band : (3,) ndarray or (*,3) ndarray
+            A list of arbitrary "band" k-points at which to evalute the matrix.
+
+    Returns:
+        vj : (nkpts, nao, nao) ndarray
+        vk : (nkpts, nao, nao) ndarray
+        or list of vj and vk if the input dm_kpts is a list of DMs
+    """
+    log = logger.new_logger(df_object, df_object.verbose)
+    t0 = log.init_timer()
+    cell = df_object.cell
+    mesh = df_object.mesh
+    assert cell.low_dim_ft_type != "inf_vacuum"
+    assert cell.dimension > 1
+    data_type = df_object.ao_values[-1].dtype
+
+    formatted_density_matrices = fft_jk._format_dms(dm_kpts, kpts)
+    n_k_points = len(kpts)
+    if len(dm_kpts.shape) == 3:
+        n_channels, n_ao = dm_kpts.shape[:2]
+    else:
+        n_channels = 1
+        n_ao = dm_kpts.shape[0]
+
+    occupied_mo_coeff = dm_kpts.__dict__["occ_coeff"].reshape(
+        n_channels, n_k_points, n_ao, -1
+    )
+    overlap = df_object._overlap.reshape(n_k_points, n_ao, n_ao)
+    occupation_numbers = dm_kpts.__dict__["mo_occ"]
+    is_occupied = occupation_numbers > 0
+    occupied_occupation_numbers = occupation_numbers[is_occupied]
+    n_occupied = len(occupied_occupation_numbers)
+    mo_to_ao = cp.einsum("kpq, ikqm -> ikpm", overlap, occupied_mo_coeff)
+
+    weight = 1.0 / n_k_points * (cell.vol / df_object.n_grid_points)
+
+    vk = cp.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
+
+    for k2_index, k2, ao_at_k2 in zip(range(n_k_points), kpts, df_object.ao_values):
+        occupied_mo_at_k2 = cp.ndarray(
+            (n_channels, n_occupied, df_object.n_grid_points), dtype=data_type
+        )
+        for i in range(n_channels):
+            occupied_mo_at_k2[i] = (ao_at_k2.conj() @ occupied_mo_coeff[i, k2_index]).T
+        t1 = log.timer_debug1("occupied_mo_at_k2", *t0)
+        for k1_index, k1, ao_at_k1 in zip(range(n_k_points), kpts, df_object.ao_values):
+            if is_gamma_point(kpts):
+                e_ikr = cp.ones(len(df_object.grids.coords))
+                occupied_mo_at_k1 = occupied_mo_at_k2
+            else:
+                e_ikr = cp.exp(df_object.grids.coords @ cp.asarray(1j * (k1 - k2)))
+                occupied_mo_at_k1 = cp.ndarray(
+                    (n_channels, n_occupied, df_object.n_grid_points), dtype=data_type
+                )
+                for i in range(n_channels):
+                    occupied_mo_at_k1[i] = (
+                        ao_at_k1.conj() @ occupied_mo_coeff[i, k1_index]
+                    ).T
+
+            for index, ao_range in enumerate(prange(0, n_occupied, p_slice)):
+                p0, p1 = ao_range
+                if index % mpi.comm.size != mpi.comm.rank:
+                    continue
+
+                for i in range(n_channels):
+
+                    coulomb_weighted_density_dot_ao_at_k2 = cp.zeros(
+                        (p1 - p0, df_object.n_grid_points), dtype=data_type
+                    )
+
+                    for contracted_mo_range in prange(0, n_occupied, q_slice):
+                        q0, q1 = contracted_mo_range
+                        if is_gamma_point(kpts):
+                            coulomb_in_mo_pair = cp.einsum(
+                                "pn, qn -> pqn",
+                                occupied_mo_at_k2[i, p0:p1],
+                                occupied_mo_at_k2[i, q0:q1],
+                            ).reshape(p1 - p0, q1 - q0, *mesh)
+                        else:
+                            coulomb_in_mo_pair = cp.einsum(
+                                "pn, qn, n -> pqn",
+                                occupied_mo_at_k1[i, p0:p1],
+                                occupied_mo_at_k2[i, q0:q1],
+                                e_ikr,
+                            ).reshape(p1 - p0, q1 - q0, *mesh)
+
+                        t1 = log.timer_debug1("mo pair", *t1)
+
+                        coulomb_in_mo_pair = cp.fft.fftn(
+                            coulomb_in_mo_pair, axes=(2, 3, 4)
+                        )
+
+                        coulomb_in_mo_pair *= (
+                            df_object.coulomb_kernel_on_g_mesh.reshape(*mesh)
+                        )
+
+                        coulomb_in_mo_pair = cp.fft.ifftn(
+                            coulomb_in_mo_pair,
+                            axes=(2, 3, 4),
+                        ).reshape(p1 - p0, q1 - q0, -1)
+
+                        t1 = log.timer_debug1("fft", *t1)
+
+                        if is_gamma_point(kpts):
+                            coulomb_in_mo_pair = coulomb_in_mo_pair.real
+
+                        coulomb_weighted_density_dot_ao_at_k2 += cp.einsum(
+                            "pqn, qn , q -> pn",
+                            coulomb_in_mo_pair,
+                            occupied_mo_at_k2[i, q0:q1],
+                            occupied_occupation_numbers[q0:q1],
+                        )
+                        if is_gamma_point(kpts):
+                            coulomb_weighted_density_dot_ao_at_k2 *= e_ikr.conj()
+                        t1 = log.timer_debug1("contraction at k2", *t1)
+
+                    fock_slice_in_occupied = (
+                        weight * coulomb_weighted_density_dot_ao_at_k2 @ ao_at_k1
+                    )
+
+                    fock_slice = (
+                        mo_to_ao[i, k1_index, :, p0:p1] @ fock_slice_in_occupied
+                    )
+                    vk[i, k1_index] += (
+                        fock_slice
+                        + fock_slice.conj().T
+                        - fock_slice
+                        @ occupied_mo_coeff[i, k1_index]
+                        @ mo_to_ao[i, k1_index].conj().T
+                    )
+                    t1 = log.timer_debug1("fock_slice", *t1)
+
+    mpi.comm.reduce(vk, in_place=True)
+    if exxdiv == "ewald":
+        for i in range(n_channels):
+            vk[i] += df_object.madelung * cp.einsum(
+                "kpq, kqr, krs -> kps",
+                df_object.overlap,
+                formatted_density_matrices[i],
+                df_object.overlap,
+            )
+    log.timer("get_k_kpts", *t0)
+    return fft_jk._format_jks(vk, dm_kpts, None, kpts)
 
 
 def nr_rks_gradient(
@@ -1081,17 +1254,47 @@ def nr_rks_gradient(
 
 
 class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
-    def __init__(self, cell, kpts=np.zeros((1, 3)), xc="LDA"):
+    def __init__(self, cell, kpts=np.zeros((1, 3)), xc="LDA", p_slice=2, q_slice=32):
         self.sorted_gaussian_pairs = None
         fft.FFTDF.__init__(self, cell, kpts)
         xc_type = self._numint._xc_type(xc)
         sort_gaussian_pairs(self, xc_type)
         self.coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=self.mesh)
         self.gradient_vector_on_g_mesh = None
+        self.ao_values = None
+        self._overlap = None
+        self.p_slice = p_slice
+        self.q_slice = q_slice
         self.vpplocG_part1 = None
         if xc_type == "GGA":
             self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
 
+    def get_k(self, dm_kpts, hermi=1, kpt=np.zeros(3), kpts_band=None, exxdiv=None):
+        if self.ao_values is None:
+            log = logger.new_logger(self, self.verbose)
+            t0 = log.init_timer()
+            self.ao_values = [
+                cp.asarray(ao_at_k)
+                for ao_at_k in self._numint.eval_ao(
+                    self.cell, self.grids.coords, self.kpts
+                )
+            ]
+            log.timer("ao_values", *t0)
+            self.n_grid_points = np.prod(self.mesh)
+            self.madelung = madelung(self.cell, self.mesh)
+
+        if self._overlap is None:
+            self._overlap = cp.asarray(self.cell.get_ovlp(self.mesh))
+        return get_k_kpts(
+            self,
+            dm_kpts,
+            hermi,
+            kpt.reshape(1, 3),
+            kpts_band,
+            exxdiv,
+            self.p_slice,
+            self.q_slice,
+        )
     get_nuc = get_nuc
     get_pp = get_pp
 

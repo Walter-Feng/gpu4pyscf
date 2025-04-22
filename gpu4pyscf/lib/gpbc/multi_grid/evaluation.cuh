@@ -242,6 +242,8 @@ __global__ void evaluate_density_kernel(
 
             density_value_to_be_shared *= gaussian;
 
+            __syncthreads();
+            
             double reduced =
                 cub::BlockReduce<double, BLOCK_DIM_XYZ,
                                  cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY,
