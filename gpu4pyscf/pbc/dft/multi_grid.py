@@ -490,17 +490,18 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
             pairs["ao_indices_in_localized"][:, None],
             pairs["concatenated_ao_indices"],
         ]
-        """ density_matrix_with_rows_in_diffused = dms[
+
+        density_matrix_with_rows_in_diffused = dms[
             :,
             :,
             pairs["ao_indices_in_diffused"][:, None],
             pairs["ao_indices_in_localized"],
-        ] """
+        ]
 
-        """ n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[3]
+        n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[3]
         density_matrix_with_rows_in_localized[
             :, :, :, n_ao_in_localized:
-        ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2) """
+        ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2).conj()
 
         coeff_sandwiched_density_matrix = cp.einsum(
             "nkij,pi->nkpj",
@@ -665,12 +666,6 @@ def convert_xc_on_g_mesh_to_fock(
             ] += (
                 fock_slice[:, :, :, n_ao_in_localized:].transpose(0, 1, 3, 2).conj()
             )
-            fock[
-                :,
-                :,
-                pairs["ao_indices_in_localized"][:, None],
-                pairs["ao_indices_in_localized"],
-            ] += fock_slice[:, :, :, :n_ao_in_localized].transpose(0, 1, 3, 2).conj()
         else:
             raise NotImplementedError
 
@@ -689,7 +684,7 @@ def evaluate_xc_gradient_wrapper(
         density_matrix_with_translation = dm_slice
     else:
         density_matrix_with_translation = cp.einsum(
-            "kt, ntij -> nkij", pairs_info["phase_diff_among_images"], dm_slice
+            "kt, ikpq -> itpq", pairs_info["phase_diff_among_images"], dm_slice
         )
 
     n_channels, _, n_i_functions, n_j_functions = density_matrix_with_translation.shape
@@ -744,22 +739,15 @@ def convert_xc_on_g_mesh_to_fock_gradient(
     kpts=np.zeros((1, 3)),
 ):
     cell = mydf.cell
-    n_k_points = len(kpts)
     dm_kpts = cp.asarray(dm_kpts, order="C")
     dms = fft_jk._format_dms(dm_kpts, kpts)
-    nao = cell.nao_nr()
     n_atoms = cell.natm
 
     xc_on_g_mesh = xc_on_g_mesh.reshape(-1, *mydf.mesh)
     n_channels = xc_on_g_mesh.shape[0]
-    at_gamma_point = multigrid.gamma_point(kpts)
 
     if hermi != 1:
         raise NotImplementedError
-
-    data_type = cp.float64
-    if not at_gamma_point:
-        data_type = cp.complex128
 
     gradient = cp.zeros((n_atoms, 3))
 
@@ -790,6 +778,10 @@ def convert_xc_on_g_mesh_to_fock_gradient(
             pairs["ao_indices_in_localized"][:, None],
             pairs["concatenated_ao_indices"],
         ]
+
+        n_ao_in_localized = density_matrix_slice.shape[2]
+
+        # density_matrix_slice[:, :, :, :n_ao_in_localized] *= 0.5
 
         coeff_sandwiched_density_matrix = cp.einsum(
             "nkij,pi->nkpj",
@@ -906,12 +898,6 @@ def nr_rks(
         mydf, dm_kpts, kpts, derivative_order
     )
 
-    cpu_df = multigrid.MultiGridFFTDF(cell)
-    density_on_G_mesh_cpu = multigrid._eval_rhoG(
-        cpu_df, dm_kpts.get()
-    )
-    print(cp.max(cp.abs(cp.asarray(density_on_G_mesh_cpu) - density_on_G_mesh)))
-    assert 0
     coulomb_on_g_mesh = cp.einsum(
         "ng,g->ng", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
     )
@@ -989,7 +975,6 @@ def nr_rks(
     xc_for_fock = cupy_helper.tag_array(
         xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None
     )
-
 
     return n_electrons, xc_energy_sum, xc_for_fock
 
@@ -1235,7 +1220,6 @@ def nr_rks_gradient(
             (nset, -1, ngrids)
         )
 
-    weighted_xc_for_fock_on_g_mesh *= 0
     if with_j:
         coulomb_on_g_mesh = cp.einsum(
             "ng,g->ng", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
@@ -1295,6 +1279,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
             self.p_slice,
             self.q_slice,
         )
+
     get_nuc = get_nuc
     get_pp = get_pp
 

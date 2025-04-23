@@ -114,11 +114,6 @@ __global__ void evaluate_xc_kernel(
     const int shell_pair_index = non_trivial_pairs[i_pair];
     const int i_shell_index = shell_pair_index / n_j_shells;
     const int j_shell_index = shell_pair_index % n_j_shells;
-    const double diagonal_factor =
-        i_shell_index > j_shell_index
-            ? 0
-            : (i_shell_index == j_shell_index ? 0.5 : 1);
-
     const int image_index = image_indices[i_pair];
     const int image_index_i = image_index / n_images;
     const int image_index_j = image_index % n_images;
@@ -170,8 +165,7 @@ __global__ void evaluate_xc_kernel(
         is_valid_pair
             ? exp(-ij_exponent_in_prefactor - gaussian_exponent_at_reference) *
                   i_coeff * j_coeff * common_fac_sp<double, i_angular>() *
-                  common_fac_sp<double, j_angular>() * diagonal_factor
-            : 0;
+                  common_fac_sp<double, j_angular>() : 0;
 
 #pragma unroll
     for (int xyz_index = 0; xyz_index < n_dimensions; xyz_index++) {
@@ -311,8 +305,10 @@ __global__ void evaluate_xc_kernel(
       for (int xyz_index = 0; xyz_index < n_dimensions; xyz_index++) {
         atomicAdd(gradient + n_dimensions * i_atom + xyz_index,
                   i_atom_gradient[xyz_index]);
-        atomicAdd(gradient + n_dimensions * j_atom + xyz_index,
-                  j_atom_gradient[xyz_index]);
+        if (j_function >= n_i_functions) {
+          atomicAdd(gradient + n_dimensions * j_atom + xyz_index,
+                   j_atom_gradient[xyz_index]);
+        }
       }
     }
   }

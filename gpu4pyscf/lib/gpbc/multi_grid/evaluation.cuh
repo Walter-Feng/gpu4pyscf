@@ -140,14 +140,11 @@ __global__ void evaluate_density_kernel(
     const double gaussian_exponent_at_reference =
         ij_exponent * distance_squared(x0, y0, z0);
 
-    const bool at_diagonal = (i_shell_index == j_shell_index) &&
-                             (image_index_i == image_index_j);
-
     const double pair_prefactor =
         is_valid_pair
             ? exp(-ij_exponent_in_prefactor - gaussian_exponent_at_reference) *
                   i_coeff * j_coeff * common_fac_sp<double, i_angular>() *
-                  common_fac_sp<double, j_angular>() * (at_diagonal ? 1 : 2)
+                  common_fac_sp<double, j_angular>()
             : 0;
 #pragma unroll
     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -243,7 +240,7 @@ __global__ void evaluate_density_kernel(
             density_value_to_be_shared *= gaussian;
 
             __syncthreads();
-            
+
             double reduced =
                 cub::BlockReduce<double, BLOCK_DIM_XYZ,
                                  cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY,
@@ -373,6 +370,7 @@ __global__ void evaluate_xc_kernel(
   constexpr int n_i_cartesian_functions = (i_angular + 1) * (i_angular + 2) / 2;
   constexpr int n_j_cartesian_functions = (j_angular + 1) * (j_angular + 2) / 2;
   constexpr int n_threads = BLOCK_DIM_XYZ * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
+  constexpr int n_xy_threads = BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
 
   const int xc_weights_stride = mesh_a * mesh_b * mesh_c;
   const int fock_stride = n_i_functions * n_j_functions;
@@ -415,8 +413,7 @@ __global__ void evaluate_xc_kernel(
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
-  __shared__ double
-      xc_values[n_channels * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ];
+  __shared__ double xc_values[n_channels * n_threads];
 
   int a_index = a_start + threadIdx.z;
   int b_index = b_start + threadIdx.y;
@@ -426,8 +423,8 @@ __global__ void evaluate_xc_kernel(
       a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c;
   double xc_value = 0;
 
-  const int thread_id = threadIdx.x + threadIdx.y * BLOCK_DIM_XYZ +
-                        threadIdx.z * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
+  const int thread_id =
+      threadIdx.x + threadIdx.y * BLOCK_DIM_XYZ + threadIdx.z * n_xy_threads;
 
 #pragma unroll
   for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -497,14 +494,11 @@ __global__ void evaluate_xc_kernel(
     const double gaussian_exponent_at_reference =
         ij_exponent * distance_squared(x0, y0, z0);
 
-    const bool at_diagonal = (i_shell_index == j_shell_index) &&
-                             (image_index_i == image_index_j);
-
     const double pair_prefactor =
         is_valid_pair
             ? exp(-ij_exponent_in_prefactor - gaussian_exponent_at_reference) *
                   i_coeff * j_coeff * common_fac_sp<double, i_angular>() *
-                  common_fac_sp<double, j_angular>() * (at_diagonal ? 0.5 : 1)
+                  common_fac_sp<double, j_angular>()
             : 0;
     const double exp_cross_term_a =
         exp(-2 * ij_exponent *
@@ -571,10 +565,9 @@ __global__ void evaluate_xc_kernel(
 #pragma unroll
           for (int i_channel = 0; i_channel < n_channels; i_channel++) {
             xc_value =
-                gaussian * xc_values[i_channel * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ *
-                                         BLOCK_DIM_XYZ +
-                                     a_index * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ +
-                                     b_index * BLOCK_DIM_XYZ + c_index];
+                gaussian *
+                xc_values[i_channel * n_threads + a_index * n_xy_threads +
+                          b_index * BLOCK_DIM_XYZ + c_index];
 #pragma unroll
             for (int i_function_index = 0;
                  i_function_index < n_i_cartesian_functions;

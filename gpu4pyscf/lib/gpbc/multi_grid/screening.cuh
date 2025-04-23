@@ -2,8 +2,8 @@
 
 #include <cub/cub.cuh>
 
-#include <gint/gint.h>
 #include <gint/cuda_alloc.cuh>
+#include <gint/gint.h>
 
 #include "constant_objects.cuh"
 #include "utils.cuh"
@@ -48,8 +48,7 @@ __global__ void count_non_trivial_pairs_kernel(
   const int i_shell_image_index = threadIdx.x + blockDim.x * blockIdx.x;
   const int j_shell_image_index = threadIdx.y + blockDim.y * blockIdx.y;
   bool is_valid_pair = i_shell_image_index < n_i_shells * n_images &&
-                       j_shell_image_index < n_j_shells * n_images && 
-                       i_shell_image_index <= j_shell_image_index;
+                       j_shell_image_index < n_j_shells * n_images;
 
   const int i_shell_index = is_valid_pair ? i_shell_image_index / n_images : 0;
   const int i_image = i_shell_image_index - i_shell_index * n_images;
@@ -57,7 +56,6 @@ __global__ void count_non_trivial_pairs_kernel(
   const int j_image = j_shell_image_index - j_shell_index * n_images;
   const int i_shell = is_valid_pair ? i_shells[i_shell_index] : 0;
   const int j_shell = is_valid_pair ? j_shells[j_shell_index] : 0;
-  
 
   const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
   const double i_x =
@@ -146,8 +144,7 @@ __global__ void screen_gaussian_pairs_kernel(
   const int i_shell_image_index = threadIdx.x + blockDim.x * blockIdx.x;
   const int j_shell_image_index = threadIdx.y + blockDim.y * blockIdx.y;
   bool is_valid_pair = i_shell_image_index < n_i_shells * n_images &&
-                       j_shell_image_index < n_j_shells * n_images &&
-                       i_shell_image_index <= j_shell_image_index;
+                       j_shell_image_index < n_j_shells * n_images;
 
   const int i_shell_index = is_valid_pair ? i_shell_image_index / n_images : 0;
   const int i_image = i_shell_image_index - i_shell_index * n_images;
@@ -369,6 +366,5 @@ __global__ void put_pairs_on_blocks_kernel(
     offset_on_global_memory += n_filtered_pairs_on_shared_memory;
   }
 }
-
 
 } // namespace gpu4pyscf::gpbc::multi_grid
