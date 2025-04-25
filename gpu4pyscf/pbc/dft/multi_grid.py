@@ -518,7 +518,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
         libgpbc.update_dxyz_dabc(
             ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
         )
-
+        
         density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
         density_contribution_on_g_mesh = (
             tools.fft(density.reshape(n_channels, -1), mesh) * weight_per_grid_point
@@ -688,14 +688,12 @@ def evaluate_xc_gradient_wrapper(
         )
 
     n_channels, _, n_i_functions, n_j_functions = density_matrix_with_translation.shape
-
     if ignore_imag is False:
         raise NotImplementedError
 
     density_matrix_with_translation_real_part = cp.asarray(
         density_matrix_with_translation.real, order="C"
     )
-    n_atoms = gradient.shape[1]
 
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
@@ -723,7 +721,6 @@ def evaluate_xc_gradient_wrapper(
             ctypes.c_int(n_difference_images),
             cast_to_pointer(pairs_info["mesh"]),
             cast_to_pointer(pairs_info["atm"]),
-            ctypes.c_int(n_atoms),
             cast_to_pointer(pairs_info["bas"]),
             cast_to_pointer(pairs_info["env"]),
             ctypes.c_int(n_channels),
@@ -742,6 +739,7 @@ def convert_xc_on_g_mesh_to_fock_gradient(
     dm_kpts = cp.asarray(dm_kpts, order="C")
     dms = fft_jk._format_dms(dm_kpts, kpts)
     n_atoms = cell.natm
+    print(n_atoms)
 
     xc_on_g_mesh = xc_on_g_mesh.reshape(-1, *mydf.mesh)
     n_channels = xc_on_g_mesh.shape[0]
@@ -761,6 +759,7 @@ def convert_xc_on_g_mesh_to_fock_gradient(
             ),
             mesh,
         )
+
         interpolated_xc_on_g_mesh = xc_on_g_mesh[
             cp.ix_(cp.arange(xc_on_g_mesh.shape[0]), *fft_grids)
         ].reshape(n_channels, n_grid_points)
@@ -778,10 +777,19 @@ def convert_xc_on_g_mesh_to_fock_gradient(
             pairs["ao_indices_in_localized"][:, None],
             pairs["concatenated_ao_indices"],
         ]
+        density_matrix_with_rows_in_diffused = dms[
+            :,
+            :,
+            pairs["ao_indices_in_diffused"][:, None],
+            pairs["ao_indices_in_localized"],
+        ]
 
         n_ao_in_localized = density_matrix_slice.shape[2]
-
-        # density_matrix_slice[:, :, :, :n_ao_in_localized] *= 0.5
+        density_matrix_slice[
+            :, :, :, n_ao_in_localized:
+        ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2).conj()
+        # density_matrix_slice[:, :, :, n_ao_in_localized:] *= 0
+        # density_matrix_slice *= 2
 
         coeff_sandwiched_density_matrix = cp.einsum(
             "nkij,pi->nkpj",
@@ -868,7 +876,7 @@ def nr_rks(
     hermi=1,
     kpts=None,
     kpts_band=None,
-    with_j=False,
+    with_j=True,
     return_j=False,
     verbose=None,
 ):
@@ -894,10 +902,12 @@ def nr_rks(
 
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
+    
+    print("density matrix has nan: ", cp.isnan(dm_kpts).any())
     density_on_G_mesh = evaluate_density_on_g_mesh(
         mydf, dm_kpts, kpts, derivative_order
     )
-
+    print("density on G mesh has nan: ", cp.isnan(density_on_G_mesh).any())
     coulomb_on_g_mesh = cp.einsum(
         "ng,g->ng", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
     )
@@ -909,7 +919,7 @@ def nr_rks(
     )
     coulomb_energy /= cell.vol
 
-    log.debug2("Multigrid Coulomb energy %s", coulomb_energy)
+    log.debug("Multigrid Coulomb energy %s", coulomb_energy)
     t0 = log.timer("coulomb", *t0)
     weight = cell.vol / ngrids
 
@@ -1227,8 +1237,8 @@ def nr_rks_gradient(
 
         weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
 
-    if mydf.vpplocG_part1 is not None:
-        weighted_xc_for_fock_on_g_mesh[:, 0] += mydf.vpplocG_part1
+    # if mydf.vpplocG_part1 is not None:
+    #     weighted_xc_for_fock_on_g_mesh[:, 0] += mydf.vpplocG_part1
 
     veff_gradient = convert_xc_on_g_mesh_to_fock_gradient(
         mydf, weighted_xc_for_fock_on_g_mesh, dm_kpts, hermi, kpts_band
@@ -1285,7 +1295,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
 
     def get_veff_ip1(self, dm, xc_code=None, hermi=1, kpts=None, kpts_band=None):
         return nr_rks_gradient(
-            self, xc_code, dm, hermi, kpts, kpts_band, with_j=True, return_j=False
+            self, xc_code, dm, hermi, kpts, kpts_band, with_j=False, return_j=False
         )
 
     vpploc_part1_nuc_grad = return_cupy_array(

@@ -25,7 +25,7 @@ __global__ void evaluate_xc_kernel(
     const double *vectors_to_neighboring_images, const int n_images,
     const int *image_pair_difference_index, const int n_difference_images,
     const int mesh_a, const int mesh_b, const int mesh_c, const int *atm,
-    const int n_atoms, const int *bas, const double *env) {
+    const int *bas, const double *env) {
 
   constexpr int n_i_cartesian_functions = (i_angular + 1) * (i_angular + 2) / 2;
   constexpr int n_j_cartesian_functions = (j_angular + 1) * (j_angular + 2) / 2;
@@ -125,6 +125,7 @@ __global__ void evaluate_xc_kernel(
     const int j_function = shell_to_ao_indices[j_shell];
     const int i_atom = bas(ATOM_OF, i_shell);
     const int j_atom = bas(ATOM_OF, j_shell);
+
     const double i_exponent = env[bas(PTR_EXP, i_shell)];
     const int i_coord_offset = atm(PTR_COORD, i_atom);
     const double i_x =
@@ -165,7 +166,8 @@ __global__ void evaluate_xc_kernel(
         is_valid_pair
             ? exp(-ij_exponent_in_prefactor - gaussian_exponent_at_reference) *
                   i_coeff * j_coeff * common_fac_sp<double, i_angular>() *
-                  common_fac_sp<double, j_angular>() : 0;
+                  common_fac_sp<double, j_angular>()
+            : 0;
 
 #pragma unroll
     for (int xyz_index = 0; xyz_index < n_dimensions; xyz_index++) {
@@ -305,10 +307,8 @@ __global__ void evaluate_xc_kernel(
       for (int xyz_index = 0; xyz_index < n_dimensions; xyz_index++) {
         atomicAdd(gradient + n_dimensions * i_atom + xyz_index,
                   i_atom_gradient[xyz_index]);
-        if (j_function >= n_i_functions) {
-          atomicAdd(gradient + n_dimensions * j_atom + xyz_index,
-                   j_atom_gradient[xyz_index]);
-        }
+        atomicAdd(gradient + n_dimensions * j_atom + xyz_index,
+                  j_atom_gradient[xyz_index]);
       }
     }
   }
@@ -323,7 +323,7 @@ __global__ void evaluate_xc_kernel(
           accumulated_n_pairs_per_local_grid, sorted_block_index,              \
           image_indices, vectors_to_neighboring_images, n_images,              \
           image_pair_difference_index, n_difference_images, mesh_a, mesh_b,    \
-          mesh_c, atm, n_atoms, bas, env)
+          mesh_c, atm, bas, env)
 
 #define xc_gradient_kernel_case_macro(li, lj)                                  \
   case (li * 10 + lj):                                                         \
@@ -342,7 +342,7 @@ void evaluate_xc_driver(
     const int *image_indices, const double *vectors_to_neighboring_images,
     const int n_images, const int *image_pair_difference_index,
     const int n_difference_images, const int *mesh, const int *atm,
-    const int n_atoms, const int *bas, const double *env) {
+    const int *bas, const double *env) {
   dim3 block_size(BLOCK_DIM_XYZ, BLOCK_DIM_XYZ, BLOCK_DIM_XYZ);
   int mesh_a = mesh[0];
   int mesh_b = mesh[1];
