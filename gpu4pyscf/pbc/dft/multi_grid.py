@@ -518,7 +518,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
         libgpbc.update_dxyz_dabc(
             ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
         )
-        
+
         density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
         density_contribution_on_g_mesh = (
             tools.fft(density.reshape(n_channels, -1), mesh) * weight_per_grid_point
@@ -739,7 +739,6 @@ def convert_xc_on_g_mesh_to_fock_gradient(
     dm_kpts = cp.asarray(dm_kpts, order="C")
     dms = fft_jk._format_dms(dm_kpts, kpts)
     n_atoms = cell.natm
-    print(n_atoms)
 
     xc_on_g_mesh = xc_on_g_mesh.reshape(-1, *mydf.mesh)
     n_channels = xc_on_g_mesh.shape[0]
@@ -788,6 +787,7 @@ def convert_xc_on_g_mesh_to_fock_gradient(
         density_matrix_slice[
             :, :, :, n_ao_in_localized:
         ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2).conj()
+        print(density_matrix_slice)
         # density_matrix_slice[:, :, :, n_ao_in_localized:] *= 0
         # density_matrix_slice *= 2
 
@@ -902,15 +902,12 @@ def nr_rks(
 
     mesh = mydf.mesh
     ngrids = np.prod(mesh)
-    
-    print("density matrix has nan: ", cp.isnan(dm_kpts).any())
+
     density_on_G_mesh = evaluate_density_on_g_mesh(
         mydf, dm_kpts, kpts, derivative_order
     )
-    print("density on G mesh has nan: ", cp.isnan(density_on_G_mesh).any())
-    coulomb_on_g_mesh = cp.einsum(
-        "ng,g->ng", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
-    )
+
+    coulomb_on_g_mesh = density_on_G_mesh[:, 0] * mydf.coulomb_kernel_on_g_mesh
     coulomb_energy = 0.5 * cp.einsum(
         "ng,ng->n", density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real
     )
@@ -996,7 +993,7 @@ def get_k_kpts(
     kpts=np.zeros((1, 3)),
     kpts_band=None,
     exxdiv=None,
-    p_slice=2,
+    p_slice=4,
     q_slice=32,
 ):
     """Get the Coulomb (J) and exchange (K) AO matrices at sampled k-points.
@@ -1052,9 +1049,11 @@ def get_k_kpts(
     vk = cp.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
 
     for k2_index, k2, ao_at_k2 in zip(range(n_k_points), kpts, df_object.ao_values):
+        cp.cuda.set_allocator(df_object.managed_memory_pool.malloc)
         occupied_mo_at_k2 = cp.ndarray(
             (n_channels, n_occupied, df_object.n_grid_points), dtype=data_type
         )
+        cp.cuda.set_allocator(df_object.default_memory_pool.malloc)
         for i in range(n_channels):
             occupied_mo_at_k2[i] = (ao_at_k2.conj() @ occupied_mo_coeff[i, k2_index]).T
         t1 = log.timer_debug1("occupied_mo_at_k2", *t0)
@@ -1064,6 +1063,7 @@ def get_k_kpts(
                 occupied_mo_at_k1 = occupied_mo_at_k2
             else:
                 e_ikr = cp.exp(df_object.grids.coords @ cp.asarray(1j * (k1 - k2)))
+                cp.cuda.set_allocator(df_object.managed_memory_pool.malloc)
                 occupied_mo_at_k1 = cp.ndarray(
                     (n_channels, n_occupied, df_object.n_grid_points), dtype=data_type
                 )
@@ -1071,6 +1071,7 @@ def get_k_kpts(
                     occupied_mo_at_k1[i] = (
                         ao_at_k1.conj() @ occupied_mo_coeff[i, k1_index]
                     ).T
+                cp.cuda.set_allocator(df_object.default_memory_pool.malloc)
 
             for index, ao_range in enumerate(prange(0, n_occupied, p_slice)):
                 p0, p1 = ao_range
@@ -1231,9 +1232,7 @@ def nr_rks_gradient(
         )
 
     if with_j:
-        coulomb_on_g_mesh = cp.einsum(
-            "ng,g->ng", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
-        )
+        coulomb_on_g_mesh = density_on_G_mesh[:, 0] * mydf.coulomb_kernel_on_g_mesh
 
         weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
 
@@ -1260,6 +1259,8 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
         self.p_slice = p_slice
         self.q_slice = q_slice
         self.vpplocG_part1 = None
+        self.default_memory_pool = None
+        self.managed_memory_pool = None
         if xc_type == "GGA":
             self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
 
@@ -1267,12 +1268,34 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
         if self.ao_values is None:
             log = logger.new_logger(self, self.verbose)
             t0 = log.init_timer()
-            self.ao_values = [
-                cp.asarray(ao_at_k)
-                for ao_at_k in self._numint.eval_ao(
-                    self.cell, self.grids.coords, self.kpts
+            self.default_memory_pool = cp.get_default_memory_pool()
+            self.managed_memory_pool = cp.cuda.MemoryPool(cp.cuda.malloc_managed)
+
+            n_grid_points = len(self.grids.coords)
+            n_grid_points_per_process = int(np.ceil(n_grid_points / mpi.comm.size))
+            grid_slice_start = mpi.comm.rank * n_grid_points_per_process
+            grid_slice_end = min(
+                grid_slice_start + n_grid_points_per_process, n_grid_points
+            )
+
+            ao_values_slice = self._numint.eval_ao(
+                self.cell, self.grids.coords[grid_slice_start:grid_slice_end], self.kpts
+            )
+
+            self.ao_values = []
+
+            for i in range(len(ao_values_slice)):
+                padded_ao_values_slice = cp.zeros(
+                    (n_grid_points_per_process, self.cell.nao_nr()),
+                    dtype=ao_values_slice[0].dtype,
                 )
-            ]
+                padded_ao_values_slice[: ao_values_slice[i].shape[0]] = ao_values_slice[
+                    i
+                ]
+                self.ao_values.append(mpi.comm.gather(padded_ao_values_slice)[:n_grid_points])
+
+            cp.cuda.set_allocator(self.default_memory_pool.malloc)
+
             log.timer("ao_values", *t0)
             self.n_grid_points = np.prod(self.mesh)
             self.madelung = madelung(self.cell, self.mesh)

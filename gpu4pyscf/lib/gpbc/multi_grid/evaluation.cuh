@@ -171,45 +171,57 @@ __global__ void evaluate_density_kernel(
     // From now on we assume that the lattice is orthogonal.
     // Shouldn't be too hard to extend to non-orthogonal lattices.
 
-    const double exp_cross_term_a =
-        exp(-2 * ij_exponent *
-            (dxyz_dabc[0] * x0 + dxyz_dabc[1] * y0 + dxyz_dabc[2] * z0));
-    const double exp_cross_term_b =
-        exp(-2 * ij_exponent *
-            (dxyz_dabc[3] * x0 + dxyz_dabc[4] * y0 + dxyz_dabc[5] * z0));
-    const double exp_cross_term_c =
-        exp(-2 * ij_exponent *
-            (dxyz_dabc[6] * x0 + dxyz_dabc[7] * y0 + dxyz_dabc[8] * z0));
-    const double exp_da_squared =
-        exp(-ij_exponent *
-            distance_squared(dxyz_dabc[0], dxyz_dabc[1], dxyz_dabc[2]));
-    const double exp_db_squared =
-        exp(-ij_exponent *
-            distance_squared(dxyz_dabc[3], dxyz_dabc[4], dxyz_dabc[5]));
-    const double exp_dc_squared =
-        exp(-ij_exponent *
-            distance_squared(dxyz_dabc[6], dxyz_dabc[7], dxyz_dabc[8]));
+    const double da_squared =
+        distance_squared(dxyz_dabc[0], dxyz_dabc[1], dxyz_dabc[2]);
+    const double db_squared =
+        distance_squared(dxyz_dabc[3], dxyz_dabc[4], dxyz_dabc[5]);
+    const double dc_squared =
+        distance_squared(dxyz_dabc[6], dxyz_dabc[7], dxyz_dabc[8]);
 
-    double gaussian_x, gaussian_y, gaussian_z, exp_n_dx_squared,
-        exp_n_dy_squared, exp_n_dz_squared;
-    for (a_index = 0, gaussian_x = 1, exp_n_dx_squared = exp_da_squared,
-        x = start_position_x;
-         a_index < a_upper;
-         a_index++, gaussian_x *= exp_n_dx_squared * exp_cross_term_a,
-        exp_n_dx_squared *= exp_da_squared * exp_da_squared,
-        x += dxyz_dabc[0]) {
-      for (b_index = 0, gaussian_y = 1, exp_n_dy_squared = exp_db_squared,
-          y = start_position_y;
-           b_index < b_upper;
-           b_index++, gaussian_y *= exp_n_dy_squared * exp_cross_term_b,
-          exp_n_dy_squared *= exp_db_squared * exp_db_squared,
-          y += dxyz_dabc[4]) {
-        for (c_index = 0, gaussian_z = 1, exp_n_dz_squared = exp_dc_squared,
-            z = start_position_z;
-             c_index < c_upper;
-             c_index++, gaussian_z *= exp_n_dz_squared * exp_cross_term_c,
-            exp_n_dz_squared *= exp_dc_squared * exp_dc_squared,
-            z += dxyz_dabc[8]) {
+    const double exp_da_squared = exp(-2 * ij_exponent * da_squared);
+    const double exp_db_squared = exp(-2 * ij_exponent * db_squared);
+    const double exp_dc_squared = exp(-2 * ij_exponent * dc_squared);
+
+    const double cross_term_a =
+        dxyz_dabc[0] * x0 + dxyz_dabc[1] * y0 + dxyz_dabc[2] * z0;
+    const double cross_term_b =
+        dxyz_dabc[3] * x0 + dxyz_dabc[4] * y0 + dxyz_dabc[5] * z0;
+    const double cross_term_c =
+        dxyz_dabc[6] * x0 + dxyz_dabc[7] * y0 + dxyz_dabc[8] * z0;
+
+    // BUG: when ij_exponents get too large and x0 is negative and large, the
+    // exponential can overflow and return inf.
+    // ideally recursion should start from the nearest grid point to the pair
+    // center, instead of the fixed recursion path
+    // (min a, min b, min c) -> (max a, max b, max c)
+    // The inf ususally occurs when pseudo-potential is not used,
+    // and core electrons appear with large exponents.
+    // Potentially another fix is to have a better designed multi-grid
+    // structure, where the gaussians with large exponents are evaluated
+    // on a more dense grid. Around the boundary the numbers should be
+    // within the range of double precision.
+    // The same applies to the calculation of xc.
+    const double recursion_factor_a_start =
+        exp(-ij_exponent * (2 * cross_term_a + da_squared));
+    const double recursion_factor_b_start =
+        exp(-ij_exponent * (2 * cross_term_b + db_squared));
+    const double recursion_factor_c_start =
+        exp(-ij_exponent * (2 * cross_term_c + dc_squared));
+
+    double gaussian_x, gaussian_y, gaussian_z, recursion_factor_a,
+        recursion_factor_b, recursion_factor_c;
+    for (a_index = 0, gaussian_x = 1,
+        recursion_factor_a = recursion_factor_a_start, x = start_position_x;
+         a_index < a_upper; a_index++, gaussian_x *= recursion_factor_a,
+        recursion_factor_a *= exp_da_squared, x += dxyz_dabc[0]) {
+      for (b_index = 0, gaussian_y = 1,
+          recursion_factor_b = recursion_factor_b_start, y = start_position_y;
+           b_index < b_upper; b_index++, gaussian_y *= recursion_factor_b,
+          recursion_factor_b *= exp_db_squared, y += dxyz_dabc[4]) {
+        for (c_index = 0, gaussian_z = 1,
+            recursion_factor_c = recursion_factor_c_start, z = start_position_z;
+             c_index < c_upper; c_index++, gaussian_z *= recursion_factor_c,
+            recursion_factor_c *= exp_dc_squared, z += dxyz_dabc[8]) {
           gto_cartesian<double, i_angular>(i_cartesian, x - i_x, y - i_y,
                                            z - i_z);
           gto_cartesian<double, j_angular>(j_cartesian, x - j_x, y - j_y,
@@ -500,25 +512,31 @@ __global__ void evaluate_xc_kernel(
                   i_coeff * j_coeff * common_fac_sp<double, i_angular>() *
                   common_fac_sp<double, j_angular>()
             : 0;
-    const double exp_cross_term_a =
-        exp(-2 * ij_exponent *
-            (dxyz_dabc[0] * x0 + dxyz_dabc[1] * y0 + dxyz_dabc[2] * z0));
-    const double exp_cross_term_b =
-        exp(-2 * ij_exponent *
-            (dxyz_dabc[3] * x0 + dxyz_dabc[4] * y0 + dxyz_dabc[5] * z0));
-    const double exp_cross_term_c =
-        exp(-2 * ij_exponent *
-            (dxyz_dabc[6] * x0 + dxyz_dabc[7] * y0 + dxyz_dabc[8] * z0));
 
-    const double exp_da_squared =
-        exp(-ij_exponent *
-            distance_squared(dxyz_dabc[0], dxyz_dabc[1], dxyz_dabc[2]));
-    const double exp_db_squared =
-        exp(-ij_exponent *
-            distance_squared(dxyz_dabc[3], dxyz_dabc[4], dxyz_dabc[5]));
-    const double exp_dc_squared =
-        exp(-ij_exponent *
-            distance_squared(dxyz_dabc[6], dxyz_dabc[7], dxyz_dabc[8]));
+    const double da_squared =
+        distance_squared(dxyz_dabc[0], dxyz_dabc[1], dxyz_dabc[2]);
+    const double db_squared =
+        distance_squared(dxyz_dabc[3], dxyz_dabc[4], dxyz_dabc[5]);
+    const double dc_squared =
+        distance_squared(dxyz_dabc[6], dxyz_dabc[7], dxyz_dabc[8]);
+
+    const double exp_da_squared = exp(-2 * ij_exponent * da_squared);
+    const double exp_db_squared = exp(-2 * ij_exponent * db_squared);
+    const double exp_dc_squared = exp(-2 * ij_exponent * dc_squared);
+
+    const double cross_term_a =
+        dxyz_dabc[0] * x0 + dxyz_dabc[1] * y0 + dxyz_dabc[2] * z0;
+    const double cross_term_b =
+        dxyz_dabc[3] * x0 + dxyz_dabc[4] * y0 + dxyz_dabc[5] * z0;
+    const double cross_term_c =
+        dxyz_dabc[6] * x0 + dxyz_dabc[7] * y0 + dxyz_dabc[8] * z0;
+
+    const double recursion_factor_a_start =
+        exp(-ij_exponent * (2 * cross_term_a + da_squared));
+    const double recursion_factor_b_start =
+        exp(-ij_exponent * (2 * cross_term_b + db_squared));
+    const double recursion_factor_c_start =
+        exp(-ij_exponent * (2 * cross_term_c + dc_squared));
 
 #pragma unroll
     for (int i_channel = 0; i_channel < n_channels; i_channel++) {
@@ -535,27 +553,21 @@ __global__ void evaluate_xc_kernel(
         }
       }
     }
-    double gaussian_x, gaussian_y, gaussian_z, exp_n_dx_squared,
-        exp_n_dy_squared, exp_n_dz_squared;
 
-    for (a_index = 0, gaussian_x = 1, exp_n_dx_squared = exp_da_squared,
-        x = start_position_x;
-         a_index < a_upper;
-         a_index++, gaussian_x *= exp_n_dx_squared * exp_cross_term_a,
-        exp_n_dx_squared *= exp_da_squared * exp_da_squared,
-        x += dxyz_dabc[0]) {
-      for (b_index = 0, gaussian_y = 1, exp_n_dy_squared = exp_db_squared,
-          y = start_position_y;
-           b_index < b_upper;
-           b_index++, gaussian_y *= exp_n_dy_squared * exp_cross_term_b,
-          exp_n_dy_squared *= exp_db_squared * exp_db_squared,
-          y += dxyz_dabc[4]) {
-        for (c_index = 0, gaussian_z = 1, exp_n_dz_squared = exp_dc_squared,
-            z = start_position_z;
-             c_index < c_upper;
-             c_index++, gaussian_z *= exp_n_dz_squared * exp_cross_term_c,
-            exp_n_dz_squared *= exp_dc_squared * exp_dc_squared,
-            z += dxyz_dabc[8]) {
+    double gaussian_x, gaussian_y, gaussian_z, recursion_factor_a,
+        recursion_factor_b, recursion_factor_c;
+    for (a_index = 0, gaussian_x = 1,
+        recursion_factor_a = recursion_factor_a_start, x = start_position_x;
+         a_index < a_upper; a_index++, gaussian_x *= recursion_factor_a,
+        recursion_factor_a *= exp_da_squared, x += dxyz_dabc[0]) {
+      for (b_index = 0, gaussian_y = 1,
+          recursion_factor_b = recursion_factor_b_start, y = start_position_y;
+           b_index < b_upper; b_index++, gaussian_y *= recursion_factor_b,
+          recursion_factor_b *= exp_db_squared, y += dxyz_dabc[4]) {
+        for (c_index = 0, gaussian_z = 1,
+            recursion_factor_c = recursion_factor_c_start, z = start_position_z;
+             c_index < c_upper; c_index++, gaussian_z *= recursion_factor_c,
+            recursion_factor_c *= exp_dc_squared, z += dxyz_dabc[8]) {
           gto_cartesian<double, i_angular>(i_cartesian, x - i_x, y - i_y,
                                            z - i_z);
           gto_cartesian<double, j_angular>(j_cartesian, x - j_x, y - j_y,
