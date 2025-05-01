@@ -1271,6 +1271,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
             self.default_memory_pool = cp.get_default_memory_pool()
             self.managed_memory_pool = cp.cuda.MemoryPool(cp.cuda.malloc_managed)
 
+            cp.cuda.set_allocator(self.managed_memory_pool.malloc)
             n_grid_points = len(self.grids.coords)
             n_grid_points_per_process = int(np.ceil(n_grid_points / mpi.comm.size))
             grid_slice_start = mpi.comm.rank * n_grid_points_per_process
