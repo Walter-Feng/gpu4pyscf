@@ -118,12 +118,12 @@ O   1.613159999999999927e+00 6.554399000000000086e+00 4.322530000000000427e+00
  H   4.649670000000000414e+00 3.602860000000000174e+00 6.181708999999999676e+00
 """
 
-cell.basis = "gth-tzv2p"
+cell.basis = "gth-szv"
 cell.ke_cutoff = 200  # kinetic energy cutoff in a.u.
 cell.max_memory = 40000  # in MB
 cell.precision = 1e-8  # integral precision
 cell.pseudo = "gth-pade"
-cell.verbose = 0
+cell.verbose = 3 
 # cell.use_loose_rcut = True  # integral screening based on shell radii
 cell.use_particle_mesh_ewald = True  # use particle mesh ewald for nuclear repulsion
 cell.build()

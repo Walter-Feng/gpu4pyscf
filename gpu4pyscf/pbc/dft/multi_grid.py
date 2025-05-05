@@ -264,7 +264,13 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     to_cart=True, aggregate=True
                 )
             )
+
             grouped_cell = equivalent_cell_in_localized + equivalent_cell_in_diffused
+
+            grouped_cell._bas[n_primitive_gtos_in_localized:, 0] -= len(
+                subcell_in_localized_region._atm
+            )
+
             concatenated_coeff = scipy.linalg.block_diag(
                 coeff_in_localized, coeff_in_diffused
             )
@@ -787,7 +793,6 @@ def convert_xc_on_g_mesh_to_fock_gradient(
         density_matrix_slice[
             :, :, :, n_ao_in_localized:
         ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2).conj()
-        print(density_matrix_slice)
         # density_matrix_slice[:, :, :, n_ao_in_localized:] *= 0
         # density_matrix_slice *= 2
 
@@ -1167,7 +1172,6 @@ def nr_rks_gradient(
     kpts=None,
     kpts_band=None,
     with_j=True,
-    return_j=False,
     verbose=None,
 ):
     if kpts is None:
@@ -1195,6 +1199,8 @@ def nr_rks_gradient(
     density_on_G_mesh = evaluate_density_on_g_mesh(
         mydf, dm_kpts, kpts, derivative_order
     )
+    
+    mydf.rhoG = density_on_G_mesh.get()
     weight = cell.vol / ngrids
 
     # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
@@ -1236,8 +1242,8 @@ def nr_rks_gradient(
 
         weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
 
-    # if mydf.vpplocG_part1 is not None:
-    #     weighted_xc_for_fock_on_g_mesh[:, 0] += mydf.vpplocG_part1
+    if mydf.vpplocG_part1 is not None:
+        weighted_xc_for_fock_on_g_mesh[:, 0] += mydf.vpplocG_part1
 
     veff_gradient = convert_xc_on_g_mesh_to_fock_gradient(
         mydf, weighted_xc_for_fock_on_g_mesh, dm_kpts, hermi, kpts_band
@@ -1261,6 +1267,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
         self.vpplocG_part1 = None
         self.default_memory_pool = None
         self.managed_memory_pool = None
+        self.rhoG = None
         if xc_type == "GGA":
             self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
 
@@ -1293,7 +1300,9 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
                 padded_ao_values_slice[: ao_values_slice[i].shape[0]] = ao_values_slice[
                     i
                 ]
-                self.ao_values.append(mpi.comm.gather(padded_ao_values_slice)[:n_grid_points])
+                self.ao_values.append(
+                    mpi.comm.gather(padded_ao_values_slice)[:n_grid_points]
+                )
 
             cp.cuda.set_allocator(self.default_memory_pool.malloc)
 
@@ -1317,9 +1326,9 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
     get_nuc = get_nuc
     get_pp = get_pp
 
-    def get_veff_ip1(self, dm, xc_code=None, hermi=1, kpts=None, kpts_band=None):
+    def get_veff_ip1(self, dm, xc_code=None, hermi=1, kpts=None, kpts_band=None, with_j=True):
         return nr_rks_gradient(
-            self, xc_code, dm, hermi, kpts, kpts_band, with_j=False, return_j=False
+            self, xc_code, dm, hermi, kpts, kpts_band, with_j=with_j
         )
 
     vpploc_part1_nuc_grad = return_cupy_array(
