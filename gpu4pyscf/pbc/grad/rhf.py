@@ -2,7 +2,7 @@ import cupy as cp
 import numpy as np
 
 import pyscf.pbc.grad.rhf as cpu_rhf
-from pyscf.pbc.lib.kpts_helper import gamma_point 
+from pyscf.pbc.lib.kpts_helper import gamma_point
 from pyscf.pbc.gto.pseudo import pp_int
 
 import gpu4pyscf.grad.rhf as mol_rhf
@@ -10,7 +10,7 @@ from gpu4pyscf.lib.cupy_helper import return_cupy_array
 
 
 class GradientsBase(mol_rhf.GradientsBase, cpu_rhf.GradientsBase):
-    get_ovlp = return_cupy_array(cpu_rhf.GradientsBase.get_ovlp)
+    get_ovlp = cpu_rhf.GradientsBase.get_ovlp
     grad_nuc = return_cupy_array(cpu_rhf.GradientsBase.grad_nuc)
 
 
@@ -27,7 +27,7 @@ class Gradients(GradientsBase, mol_rhf.Gradients, cpu_rhf.Gradients):
         mo_coeff=None,
         mo_occ=None,
         atmlst=None,
-        kpt=np.zeros(3),
+        kpts=np.zeros((1, 3)),
     ):
         mf = self.base
         mol = mf.mol
@@ -39,22 +39,29 @@ class Gradients(GradientsBase, mol_rhf.Gradients, cpu_rhf.Gradients):
         if mo_occ is None:
             mo_occ = mf.mo_occ
 
-        s1 = self.get_ovlp(mol, kpt)
-        dm0 = mf.make_rdm1(mo_coeff, mo_occ, kpt)
+        s1 = self.get_ovlp(mol, kpts)
+        dm0 = mf.make_rdm1(mo_coeff, mo_occ)
         dm0_cpu = dm0.get()
 
-        from_vhf = self.get_veff(mol, dm0, kpt)
-        
-        dme0 = self.make_rdm1e(mo_energy, mo_coeff, mo_occ)
-        
+        dme0 = self.make_rdm1e(mo_energy, mo_coeff, mo_occ).get()
+
         if atmlst is None:
             atmlst = range(mol.natm)
-            
-        if not gamma_point(kpt):
+
+        if not gamma_point(kpts):
             raise NotImplementedError
-        
-        de = cp.asarray(mf.with_df.vpploc_part1_nuc_grad(dm0_cpu))
+
+        de = mf.with_df.get_veff_ip1(dm0, xc_code=mf.xc)
+        de += cp.asarray(mf.with_df.vpploc_part1_nuc_grad(dm0_cpu))
         de += cp.asarray(pp_int.vpploc_part2_nuc_grad(mol, dm0_cpu))
         de += cp.asarray(pp_int.vppnl_nuc_grad(mol, dm0_cpu))
-            
-        return vj, vk
+        core_hamiltonian_gradient = -mol.pbc_intor("int1e_ipkin")
+        kinetic_contribution = cpu_rhf._contract_vhf_dm(
+            self, core_hamiltonian_gradient, dm0_cpu
+        )
+        de += cp.asarray(kinetic_contribution) * 2
+        density_matrix_contribution = cpu_rhf._contract_vhf_dm(
+            self, s1, dme0
+        ) 
+        de -= cp.asarray(density_matrix_contribution) * 2
+        return de
