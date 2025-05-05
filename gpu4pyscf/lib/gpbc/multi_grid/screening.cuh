@@ -50,10 +50,24 @@ __global__ void count_non_trivial_pairs_kernel(
   bool is_valid_pair = i_shell_image_index < n_i_shells * n_images &&
                        j_shell_image_index < n_j_shells * n_images;
 
-  const int i_shell_index = is_valid_pair ? i_shell_image_index / n_images : 0;
-  const int i_image = i_shell_image_index - i_shell_index * n_images;
-  const int j_shell_index = is_valid_pair ? j_shell_image_index / n_images : 0;
-  const int j_image = j_shell_image_index - j_shell_index * n_images;
+  int i_shell_index = 0, i_image = 0, j_shell_index = 0, j_image = 0;
+  if (is_valid_pair) {
+    if (n_i_shells > n_images) {
+      i_image = i_shell_image_index / n_i_shells;
+      i_shell_index = i_shell_image_index - i_image * n_i_shells;
+    } else {
+      i_shell_index = i_shell_image_index / n_images;
+      i_image = i_shell_image_index - i_shell_index * n_images;
+    }
+    if (n_j_shells > n_images) {
+      j_image = j_shell_image_index / n_j_shells;
+      j_shell_index = j_shell_image_index - j_image * n_j_shells;
+    } else {
+      j_shell_index = j_shell_image_index / n_images;
+      j_image = j_shell_image_index - j_shell_index * n_images;
+    }
+  }
+ 
   const int i_shell = is_valid_pair ? i_shells[i_shell_index] : 0;
   const int j_shell = is_valid_pair ? j_shells[j_shell_index] : 0;
 
@@ -146,10 +160,24 @@ __global__ void screen_gaussian_pairs_kernel(
   bool is_valid_pair = i_shell_image_index < n_i_shells * n_images &&
                        j_shell_image_index < n_j_shells * n_images;
 
-  const int i_shell_index = is_valid_pair ? i_shell_image_index / n_images : 0;
-  const int i_image = i_shell_image_index - i_shell_index * n_images;
-  const int j_shell_index = is_valid_pair ? j_shell_image_index / n_images : 0;
-  const int j_image = j_shell_image_index - j_shell_index * n_images;
+  int i_shell_index = 0, i_image = 0, j_shell_index = 0, j_image = 0;
+  if (is_valid_pair) {
+    if (n_i_shells > n_images) {
+      i_image = i_shell_image_index / n_i_shells;
+      i_shell_index = i_shell_image_index - i_image * n_i_shells;
+    } else {
+      i_shell_index = i_shell_image_index / n_images;
+      i_image = i_shell_image_index - i_shell_index * n_images;
+    }
+    if (n_j_shells > n_images) {
+      j_image = j_shell_image_index / n_j_shells;
+      j_shell_index = j_shell_image_index - j_image * n_j_shells;
+    } else {
+      j_shell_index = j_shell_image_index / n_images;
+      j_image = j_shell_image_index - j_shell_index * n_images;
+    }
+  }
+
   const int i_shell = is_valid_pair ? i_shells[i_shell_index] : 0;
   const int j_shell = is_valid_pair ? j_shells[j_shell_index] : 0;
   const int shell_pair_index = i_shell_index * n_j_shells + j_shell_index;

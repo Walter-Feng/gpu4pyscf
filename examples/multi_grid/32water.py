@@ -17,10 +17,10 @@ cell = gto.Cell()
 import cupy.cuda
 
 # cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
-boxlen = 6
+boxlen = 12 
 cell.a = numpy.array([[boxlen, 0.0, 0.0], [0.0, boxlen, 0.0], [0.0, 0.0, boxlen]])
 cell.atom = """
-O   1.613159999999999927e+00 6.554399000000000086e+00 4.322530000000000427e+00
+O   1.6131599999999927e+00 6.554399000000000086e+00 4.322530000000000427e+00
  H   1.428539999999999921e+00 5.878300000000000303e+00 5.021608999999999767e+00
  H   2.016700000000000159e+00 5.965879000000000154e+00 3.618549999999999933e+00
  O   3.162049999999999805e+00 8.750220000000000553e+00 4.021650000000000169e+00
@@ -118,13 +118,13 @@ O   1.613159999999999927e+00 6.554399000000000086e+00 4.322530000000000427e+00
  H   4.649670000000000414e+00 3.602860000000000174e+00 6.181708999999999676e+00
 """
 
-cell.basis = "gth-szv"
+cell.basis = "gth-tzv2p"
 cell.ke_cutoff = 200  # kinetic energy cutoff in a.u.
 cell.max_memory = 40000  # in MB
 cell.precision = 1e-8  # integral precision
 cell.pseudo = "gth-pade"
-cell.verbose = 3 
-# cell.use_loose_rcut = True  # integral screening based on shell radii
+cell.verbose = 5 
+cell.use_loose_rcut = True  # integral screening based on shell radii
 cell.use_particle_mesh_ewald = True  # use particle mesh ewald for nuclear repulsion
 cell.build()
 
@@ -146,10 +146,10 @@ mf = dft.RKS(cell)
 mf.xc = "LDA"
 # mf.xc = "PBE,PBE"
 
-# mf.max_cycle = 0
+""" # mf.max_cycle = 0
 # mf.init_guess = 'atom' # atom guess is fast
 mf.with_df = cpu_multi_grid.MultiGridFFTDF2(cell)
 mf.with_df.ngrids = 4  # number of sets of grid points
 mf.kernel()
 gradient = cpu_grad.Gradients(mf)
-de_cpu = gradient.kernel()
+de_cpu = gradient.kernel() """

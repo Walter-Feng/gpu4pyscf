@@ -1249,6 +1249,8 @@ def nr_rks_gradient(
         mydf, weighted_xc_for_fock_on_g_mesh, dm_kpts, hermi, kpts_band
     )
 
+    t0 = log.timer("veff_gradient", *t0)
+
     return veff_gradient
 
 

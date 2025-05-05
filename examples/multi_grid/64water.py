@@ -5,7 +5,6 @@ from pyscf.pbc.dft import multigrid as cpu_multi_grid
 
 from gpu4pyscf.pbc import dft as gpu_pbcdft
 from gpu4pyscf.pbc.dft import multi_grid as gpu_multi_grid_mine
-from gpu4pyscf.pbc.dft import multi_grid_store_ao as gpu_multi_grid_ao
 from gpu4pyscf.pbc.dft import multigrid as gpu_multi_grid_qiming
 
 cell=gto.Cell()
