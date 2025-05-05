@@ -264,7 +264,7 @@ __global__ void evaluate_xc_kernel(
                    j_function_index++) {
 #pragma unroll
                 for (int xyz_index = 0; xyz_index < n_dimensions; xyz_index++) {
-                  i_atom_gradient[xyz_index] +=
+                  i_atom_gradient[xyz_index] -=
                       xc_value *
                       i_cartesian_gradient[xyz_index * n_i_cartesian_functions +
                                            i_function_index] *
@@ -273,7 +273,7 @@ __global__ void evaluate_xc_kernel(
                                 i_function_index * n_j_cartesian_functions +
                                 j_function_index];
 
-                  j_atom_gradient[xyz_index] +=
+                  j_atom_gradient[xyz_index] -=
                       xc_value *
                       j_cartesian_gradient[xyz_index * n_j_cartesian_functions +
                                            j_function_index] *
@@ -301,7 +301,7 @@ __global__ void evaluate_xc_kernel(
       }
     }
 
-    if (is_valid_pair && i_atom != j_atom) {
+    if (is_valid_pair) {
 #pragma unroll
       for (int xyz_index = 0; xyz_index < n_dimensions; xyz_index++) {
         atomicAdd(gradient + n_dimensions * i_atom + xyz_index,
