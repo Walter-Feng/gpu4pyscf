@@ -4,15 +4,20 @@ import cupy.cuda.nccl as nccl
 
 def to_nccl_data_type(cupy_array):
     nccl_type_dict = {
-        "ncclInt8": 0, "ncclChar": 0,
+        "ncclInt8": 0,
+        "ncclChar": 0,
         "ncclUint8": 1,
-        "ncclInt32": 2, "ncclInt": 2,
+        "ncclInt32": 2,
+        "ncclInt": 2,
         "ncclUint32": 3,
         "ncclInt64": 4,
         "ncclUint64": 5,
-        "ncclFloat16": 6, "ncclHalf": 6,
-        "ncclFloat32": 7, "ncclFloat": 7,
-        "ncclFloat64": 8, "ncclDouble": 8,
+        "ncclFloat16": 6,
+        "ncclHalf": 6,
+        "ncclFloat32": 7,
+        "ncclFloat": 7,
+        "ncclFloat64": 8,
+        "ncclDouble": 8,
     }
 
     return nccl_type_dict["nccl" + str(cupy_array.dtype).capitalize()]
@@ -32,7 +37,7 @@ class Communicator:
 
             self.world = MPI.COMM_WORLD
 
-            self.is_main = (self.world.rank == 0)
+            self.is_main = self.world.rank == 0
 
             processor_name = MPI.Get_processor_name()
             rank = self.world.rank
@@ -66,7 +71,9 @@ class Communicator:
             cupy.cuda.Device(gpu_id_list[self.local_rank]).use()
 
             if self.local_size > n_gpu:
-                raise Exception("the size of local processes exceeds allocable GPU devices")
+                raise Exception(
+                    "the size of local processes exceeds allocable GPU devices"
+                )
 
             self.gpu = nccl.NcclCommunicator(self.size, unique_id, self.rank)
 
@@ -86,17 +93,71 @@ class Communicator:
             result = cupy_array
 
         if cupy.iscomplexobj(cupy_array):
-            self.gpu.allReduce(cupy_array.real.data.ptr, result.real.data.ptr,
-                               cupy_array.size, to_nccl_data_type(cupy_array.real),
-                               nccl_sum_type, default_stream)
-            self.gpu.allReduce(cupy_array.imag.data.ptr, result.imag.data.ptr,
-                               cupy_array.size, to_nccl_data_type(cupy_array.imag),
-                               nccl_sum_type, default_stream)
+            self.gpu.allReduce(
+                cupy_array.real.data.ptr,
+                result.real.data.ptr,
+                cupy_array.size,
+                to_nccl_data_type(cupy_array.real),
+                nccl_sum_type,
+                default_stream,
+            )
+            self.gpu.allReduce(
+                cupy_array.imag.data.ptr,
+                result.imag.data.ptr,
+                cupy_array.size,
+                to_nccl_data_type(cupy_array.imag),
+                nccl_sum_type,
+                default_stream,
+            )
 
         else:
-            self.gpu.allReduce(cupy_array.data.ptr, result.data.ptr,
-                               cupy_array.size, to_nccl_data_type(cupy_array),
-                               nccl_sum_type, default_stream)
+            self.gpu.allReduce(
+                cupy_array.data.ptr,
+                result.data.ptr,
+                cupy_array.size,
+                to_nccl_data_type(cupy_array),
+                nccl_sum_type,
+                default_stream,
+            )
+
+        return result
+
+    def gather(self, cupy_array: cupy.ndarray):
+
+        default_stream = 0
+        if self.size == 1:
+            return cupy_array
+        
+        shape = list(cupy_array.shape)
+        shape[0] *= self.size
+
+        result = cupy.ndarray(shape, dtype=cupy_array.dtype)
+
+        if cupy.iscomplexobj(cupy_array):
+            self.gpu.allGather(
+                cupy_array.real.data.ptr,
+                result.real.data.ptr,
+                cupy_array.size,
+                to_nccl_data_type(cupy_array.real),
+                default_stream,
+            )
+            self.gpu.allGather(
+                cupy_array.imag.data.ptr,
+                result.imag.data.ptr,
+                cupy_array.size,
+                to_nccl_data_type(cupy_array.imag),
+                default_stream,
+            )
+        else:
+            
+            
+            self.gpu.allGather(
+                cupy_array.data.ptr,
+                result.data.ptr,
+                cupy_array.size,
+                to_nccl_data_type(cupy_array),
+                default_stream,
+            )
 
         return result
 

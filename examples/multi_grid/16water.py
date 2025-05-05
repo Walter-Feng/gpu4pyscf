@@ -5,7 +5,6 @@ from pyscf.pbc.dft import multigrid as cpu_multi_grid
 
 from gpu4pyscf.pbc import dft as gpu_pbcdft
 from gpu4pyscf.pbc.dft import multi_grid as gpu_multi_grid_mine
-from gpu4pyscf.pbc.dft import multi_grid_store_ao as gpu_multi_grid_ao
 from gpu4pyscf.pbc.dft import multigrid as gpu_multi_grid_qiming
 
 cell=gto.Cell()
@@ -70,7 +69,7 @@ cell.ke_cutoff = 200  # kinetic energy cutoff in a.u.
 cell.max_memory = 40000 # in MB
 cell.precision = 1e-8 # integral precision
 cell.pseudo = 'gth-pade'
-cell.verbose = 5
+cell.verbose = 3
 cell.use_loose_rcut = True # integral screening based on shell radii
 cell.use_particle_mesh_ewald = True # use particle mesh ewald for nuclear repulsion
 cell.build()
@@ -96,7 +95,7 @@ gpu_mf.max_cycle = 10
 gpu_mf._numint = gpu_multi_grid_qiming.MultiGridNumInt(cell)
 gpu_mf.kernel()
 
-print("="*100)
+""" print("="*100)
 print("cpu_multi_grid")
 print("="*100)  
 mf=dft.RKS(cell)
@@ -107,16 +106,5 @@ mf.max_cycle = 10
 mf.with_df = cpu_multi_grid.MultiGridFFTDF(cell)
 mf.with_df.ngrids = 4 # number of sets of grid points
 mf.kernel()
-
-print("="*100)
-print("gpu_multi_grid_ao")
-print("="*100)
-gpu_mf = gpu_pbcdft.RKS(cell)
-gpu_mf.xc = "LDA"
-gpu_mf.init_guess = 'atom' # atom guess is fast
-gpu_mf.max_cycle = 10
-gpu_mf = gpu_multi_grid_ao.fftdf(gpu_mf)
-gpu_mf.with_df.ngrids = 4
-gpu_mf.kernel()
-
+ """
 

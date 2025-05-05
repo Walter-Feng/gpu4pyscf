@@ -1,6 +1,6 @@
 #pragma once
 
-namespace gpu4pyscf::gpbc {
+namespace gpu4pyscf::gpbc::multi_grid {
 
 template <typename T, int ANG>
 __forceinline__ __device__ void gto_cartesian(T values[], const T fx,
