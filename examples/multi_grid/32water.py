@@ -17,6 +17,13 @@ cell = gto.Cell()
 import cupy.cuda
 
 # cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
+
+import gpu4pyscf.mpi as mpi
+
+print_level = 0
+if mpi.comm.rank == 0:
+    print_level = 5
+
 boxlen = 12 
 cell.a = numpy.array([[boxlen, 0.0, 0.0], [0.0, boxlen, 0.0], [0.0, 0.0, boxlen]])
 cell.atom = """
@@ -123,7 +130,7 @@ cell.ke_cutoff = 200  # kinetic energy cutoff in a.u.
 cell.max_memory = 40000  # in MB
 cell.precision = 1e-8  # integral precision
 cell.pseudo = "gth-pade"
-cell.verbose = 5 
+cell.verbose = print_level 
 cell.use_loose_rcut = True  # integral screening based on shell radii
 cell.use_particle_mesh_ewald = True  # use particle mesh ewald for nuclear repulsion
 cell.build()

@@ -168,8 +168,7 @@ def assign_pairs_to_blocks(
     n_contributing_blocks = int(n_pairs_on_blocks[-1])
     n_pairs_on_blocks = n_pairs_on_blocks[:-1]
     sorted_block_index = cp.asarray(cp.argsort(-n_pairs_on_blocks), dtype=cp.int32)
-    n_pairs_on_blocks = n_pairs_on_blocks[sorted_block_index]
-    accumulated_n_pairs_per_block = cp.full(n_blocks + 1, 0, dtype=cp.int32)
+    accumulated_n_pairs_per_block = cp.zeros(n_blocks + 1, dtype=cp.int32)
     accumulated_n_pairs_per_block[1:] = cp.cumsum(n_pairs_on_blocks, dtype=cp.int32)
     sorted_block_index = sorted_block_index[:n_contributing_blocks]
     pairs_on_blocks = cp.full(n_indices, -1, dtype=cp.int32)
@@ -183,10 +182,16 @@ def assign_pairs_to_blocks(
         ctypes.c_int(n_contributing_blocks),
         ctypes.c_int(n_pairs),
     )
+
+    if mpi.comm.size > 1:
+        sorted_block_index = sorted_block_index[
+            cp.arange(mpi.comm.rank, n_contributing_blocks, mpi.comm.size)
+        ]
+
     return (
-        cp.asarray(pairs_on_blocks),
-        cp.asarray(accumulated_n_pairs_per_block),
-        cp.asarray(sorted_block_index),
+        pairs_on_blocks,
+        accumulated_n_pairs_per_block,
+        sorted_block_index,
     )
 
 
@@ -452,6 +457,8 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
             ctypes.c_int(pairs_info["is_non_orthogonal"]),
         )
 
+    mpi.comm.reduce(density, in_place=True)
+    
     return density
 
 
@@ -526,6 +533,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
         )
 
         density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
+
         density_contribution_on_g_mesh = (
             tools.fft(density.reshape(n_channels, -1), mesh) * weight_per_grid_point
         )
@@ -534,11 +542,13 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
             cp.ix_(cp.arange(n_channels), cp.arange(1), *fft_grids)
         ] += density_contribution_on_g_mesh.reshape((-1,) + tuple(mesh))
 
+
     density_on_g_mesh = density_on_g_mesh.reshape([n_channels, density_slices, -1])
     if density_slices == 4:
         density_on_g_mesh[:, 1:] = cp.einsum(
             "np, xp -> nxp", density_on_g_mesh[:, 0], mydf.gradient_vector_on_g_mesh
         )
+
     return density_on_g_mesh
 
 
@@ -553,9 +563,10 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
 
     fock = cp.zeros((n_channels, n_difference_images, n_i_functions, n_j_functions))
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
+        fock_slice = cp.zeros((n_channels, n_difference_images, n_i_functions, n_j_functions))
         (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
         c_driver(
-            cast_to_pointer(fock),
+            cast_to_pointer(fock_slice),
             cast_to_pointer(xc_weights),
             ctypes.c_int(i_angular),
             ctypes.c_int(j_angular),
@@ -582,6 +593,9 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
             ctypes.c_int(n_channels),
             ctypes.c_int(pairs_info["is_non_orthogonal"]),
         )
+        fock += fock_slice
+
+    # mpi.comm.reduce(fock, in_place=True)
 
     if n_k_points > 1:
         return cp.einsum(
@@ -674,6 +688,8 @@ def convert_xc_on_g_mesh_to_fock(
             )
         else:
             raise NotImplementedError
+
+    mpi.comm.reduce(fock, in_place=True)
 
     return fock
 
@@ -817,6 +833,8 @@ def convert_xc_on_g_mesh_to_fock_gradient(
             coeff_sandwiched_density_matrix,
             ignore_imag=True,
         )
+    
+    mpi.comm.reduce(gradient, in_place=True)
 
     return gradient
 
@@ -912,6 +930,7 @@ def nr_rks(
         mydf, dm_kpts, kpts, derivative_order
     )
 
+
     coulomb_on_g_mesh = density_on_G_mesh[:, 0] * mydf.coulomb_kernel_on_g_mesh
     coulomb_energy = 0.5 * cp.einsum(
         "ng,ng->n", density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real
@@ -930,6 +949,7 @@ def nr_rks(
     density_in_real_space = (
         tools.ifft(density_on_G_mesh.reshape(-1, ngrids), mesh).real / weight
     )
+
 
     density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
     n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight

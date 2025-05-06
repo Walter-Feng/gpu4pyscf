@@ -332,7 +332,7 @@ __global__ void put_pairs_on_blocks_kernel(
   int valid_pairs[4];
   int exclusive_sum[4];
   int n_filtered_pairs_on_shared_memory = 0;
-  int offset_on_global_memory = accumulated_n_pairs_per_block[blockIdx.x];
+  int offset_on_global_memory = accumulated_n_pairs_per_block[block_index];
   constexpr int batch_size = 4 * n_threads;
   constexpr int shared_memory_size = 7 * n_threads;
   __shared__ int filtered_index[shared_memory_size];

@@ -77,8 +77,8 @@ __global__ void evaluate_density_kernel(
     reduced_density_values[i_channel * n_threads + thread_id] = 0;
   }
 
-  const int start_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x];
-  const int end_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
+  const int start_pair_index = accumulated_n_pairs_per_local_grid[block_index];
+  const int end_pair_index = accumulated_n_pairs_per_local_grid[block_index + 1];
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
@@ -420,8 +420,8 @@ __global__ void evaluate_xc_kernel(
   double i_cartesian[n_i_cartesian_functions];
   double j_cartesian[n_j_cartesian_functions];
 
-  const int start_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x];
-  const int end_pair_index = accumulated_n_pairs_per_local_grid[blockIdx.x + 1];
+  const int start_pair_index = accumulated_n_pairs_per_local_grid[block_index];
+  const int end_pair_index = accumulated_n_pairs_per_local_grid[block_index + 1];
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
