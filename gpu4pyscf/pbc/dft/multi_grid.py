@@ -1311,7 +1311,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
 
         gathered_mo_values = mpi.comm.gather(padded_mo_values)
 
-        return gathered_mo_values.T
+        return gathered_mo_values[:n_grid_points].T
 
     def contract_mo_values_to_fock(self, mo_values, kpt):
         n_grid_points = len(self.grids.coords)
