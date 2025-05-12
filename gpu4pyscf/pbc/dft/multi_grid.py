@@ -1329,8 +1329,6 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
             kpt.reshape(1, 3),
         )[0]
         
-        print(mo_values.shape)
-
         fock = cp.asarray(
             [
                 mo_values[i, :, grid_slice_start:grid_slice_end] @ ao_values_slice
