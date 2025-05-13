@@ -223,7 +223,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         mydf.tasks = tasks
 
     t0 = log.timer("task generation", *t0)
-
+    t1 = t0
     pairs = []
     for grids_localized, grids_diffused in tasks:
         subcell_in_localized_region = grids_localized.cell
@@ -327,6 +327,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         bas = cp.asarray(grouped_cell._bas, dtype=cp.int32)
         env = cp.asarray(grouped_cell._env)
 
+        t1 = log.timer("routines before screening", *t1)
         for i_angular, i_shells in zip(i_angulars_unique, sorted_i_shells):
             for j_angular, j_shells in zip(j_angulars_unique, sorted_j_shells):
                 (
@@ -346,6 +347,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     env,
                     threshold_in_log,
                 )
+                t1 = log.timer("screening in angular pair" + str((i_angular, j_angular)), *t1)
                 contributing_block_ranges = (
                     pairs_to_blocks_end - pairs_to_blocks_begin + 1
                 )
@@ -365,6 +367,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     n_pairs,
                     n_indices,
                 )
+                t1 = log.timer("assigning pairs to blocks in angular pair" + str((i_angular, j_angular)), *t1)
                 per_angular_pairs.append(
                     {
                         "angular": (i_angular, j_angular),
