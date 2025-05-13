@@ -8,9 +8,6 @@ from gpu4pyscf.pbc.dft import multi_grid as gpu_multi_grid_mine
 from gpu4pyscf.pbc.dft import multigrid as gpu_multi_grid_qiming
 
 cell=gto.Cell()
-from cupy.fft.config import get_plan_cache
-cache = get_plan_cache()
-cache.set_size(0)
 import cupy.cuda
 # cupy.cuda.set_allocator(cupy.cuda.MemoryPool(cupy.cuda.malloc_managed).malloc)
 
@@ -218,7 +215,7 @@ H      11.491592       8.576221       8.647557
 """
 
 cell.basis = 'gth-tzv2p'
-cell.ke_cutoff = 200  # kinetic energy cutoff in a.u.
+cell.ke_cutoff = 140  # kinetic energy cutoff in a.u.
 cell.max_memory = 40000 # in MB
 cell.precision = 1e-8 # integral precision
 cell.pseudo = 'gth-pade'

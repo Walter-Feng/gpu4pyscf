@@ -163,3 +163,11 @@ class Communicator:
 
 
 comm = Communicator()
+
+def get_master_print_level(intended_level):
+    if comm.is_main:
+        return intended_level
+    else:
+        return 0
+
+    
