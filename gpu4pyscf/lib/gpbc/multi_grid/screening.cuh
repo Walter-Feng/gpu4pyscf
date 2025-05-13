@@ -12,6 +12,52 @@
 
 namespace gpu4pyscf::gpbc::multi_grid {
 
+template <int i_angular, int j_angular>
+__device__ double
+gaussian_pair_cutoff(const double i_exponent, const double j_exponent,
+                     const double i_coefficient, const double j_coefficient,
+                     const double pair_distance, const double cell_volume,
+                     const double precision) {
+  constexpr int pair_angular = i_angular + j_angular;
+  constexpr double i_norm_constant_part = (2 * i_angular + 1) / (4 * M_PI);
+  constexpr double j_norm_constant_part = (2 * j_angular + 1) / (4 * M_PI);
+
+  const double pair_exponent = i_exponent + j_exponent;
+  const double fi = i_exponent / pair_exponent;
+  const double fj = j_exponent / pair_exponent;
+  const double theta = i_exponent * fj;
+  const double dri = fj * pair_distance;
+  const double drj = fi * pair_distance;
+  const double fac_dri =
+      pow(i_angular * .5 / pair_exponent + dri * dri, i_angular * 0.5);
+  const double fac_drj =
+      pow(j_angular * .5 / pair_exponent + drj * drj, j_angular * 0.5);
+  const double rad = pow(cell_volume, -1. / 3) * pair_distance + 1;
+  double surface = 4 * M_PI * rad * rad;
+  if (surface < 1) {
+    surface = 1;
+  }
+  const double i_norm =
+      abs(i_coefficient) * sqrt(i_norm_constant_part) * 2 * i_exponent;
+  const double j_norm =
+      abs(j_coefficient) * sqrt(j_norm_constant_part) * 2 * j_exponent;
+  const double prefactor = i_norm * j_norm * pow(M_PI / pair_exponent, 1.5);
+  double overlap = prefactor * exp(-theta * pair_distance * pair_distance) *
+                   fac_dri * fac_drj * surface;
+  if (overlap > 1) {
+    overlap = 1;
+  }
+  const double factor = overlap / precision;
+
+  double radius = 2;
+  radius =
+      sqrt(log(factor * pow(radius, pair_angular + 1) + 1) / pair_exponent);
+
+  // radius =
+  //     sqrt(log(factor * pow(radius, pair_angular + 1) + 1) / pair_exponent);
+  return radius;
+}
+
 template <int angular>
 __device__ double gaussian_summation_cutoff(const double exponent,
                                             const double prefactor_in_log,
