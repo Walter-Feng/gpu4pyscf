@@ -13,13 +13,14 @@
 
 namespace gpu4pyscf::gpbc::multi_grid::gradient {
 
-template <int n_channels, int i_angular, int j_angular, bool is_non_orthogonal>
+template <typename KernelType, int n_channels, int i_angular, int j_angular,
+          bool is_non_orthogonal>
 __global__ void evaluate_xc_kernel(
-    double *gradient, const double *xc_weights, const double *density_matrices,
-    const int *non_trivial_pairs, const int *i_shells, const int *j_shells,
-    const int n_j_shells, const int *shell_to_ao_indices,
-    const int n_i_functions, const int n_j_functions,
-    const int *sorted_pairs_per_local_grid,
+    KernelType *gradient, const KernelType *xc_weights,
+    const KernelType *density_matrices, const int *non_trivial_pairs,
+    const int *i_shells, const int *j_shells, const int n_j_shells,
+    const int *shell_to_ao_indices, const int n_i_functions,
+    const int n_j_functions, const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
     const int *sorted_block_index, const int *image_indices,
     const double *vectors_to_neighboring_images, const int n_images,
@@ -54,34 +55,35 @@ __global__ void evaluate_xc_kernel(
   const int b_start = block_b_index * BLOCK_DIM_XYZ;
   const int c_start = block_c_index * BLOCK_DIM_XYZ;
 
-  const double start_position_x =
+  const KernelType start_position_x =
       dxyz_dabc[0] * a_start + dxyz_dabc[3] * b_start + dxyz_dabc[6] * c_start;
-  const double start_position_y =
+  const KernelType start_position_y =
       dxyz_dabc[1] * a_start + dxyz_dabc[4] * b_start + dxyz_dabc[7] * c_start;
-  const double start_position_z =
+  const KernelType start_position_z =
       dxyz_dabc[2] * a_start + dxyz_dabc[5] * b_start + dxyz_dabc[8] * c_start;
 
   const int a_upper = min(a_start + BLOCK_DIM_XYZ, mesh_a) - a_start;
   const int b_upper = min(b_start + BLOCK_DIM_XYZ, mesh_b) - b_start;
   const int c_upper = min(c_start + BLOCK_DIM_XYZ, mesh_c) - c_start;
 
-  double i_cartesian[n_i_cartesian_functions];
-  double i_cartesian_gradient[n_dimensions * n_i_cartesian_functions];
-  double j_cartesian[n_j_cartesian_functions];
-  double j_cartesian_gradient[n_dimensions * n_j_cartesian_functions];
+  KernelType i_cartesian[n_i_cartesian_functions];
+  KernelType i_cartesian_gradient[n_dimensions * n_i_cartesian_functions];
+  KernelType j_cartesian[n_j_cartesian_functions];
+  KernelType j_cartesian_gradient[n_dimensions * n_j_cartesian_functions];
 
-  double i_atom_gradient[n_dimensions];
-  double j_atom_gradient[n_dimensions];
+  KernelType i_atom_gradient[n_dimensions];
+  KernelType j_atom_gradient[n_dimensions];
 
-  double
+  KernelType
       prefactor[n_channels * n_i_cartesian_functions * n_j_cartesian_functions];
 
   const int start_pair_index = accumulated_n_pairs_per_local_grid[block_index];
-  const int end_pair_index = accumulated_n_pairs_per_local_grid[block_index + 1];
+  const int end_pair_index =
+      accumulated_n_pairs_per_local_grid[block_index + 1];
   const int n_pairs = end_pair_index - start_pair_index;
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
-  __shared__ double xc_values[n_channels * n_threads];
+  __shared__ KernelType xc_values[n_channels * n_threads];
 
   int a_index = a_start + threadIdx.z;
   int b_index = b_start + threadIdx.y;
@@ -89,7 +91,7 @@ __global__ void evaluate_xc_kernel(
 
   const bool out_of_boundary =
       a_index >= mesh_a || b_index >= mesh_b || c_index >= mesh_c;
-  double xc_value = 0;
+  KernelType xc_value = 0;
 
   const int thread_id =
       threadIdx.x + threadIdx.y * BLOCK_DIM_XYZ + threadIdx.z * n_xy_threads;
@@ -105,7 +107,7 @@ __global__ void evaluate_xc_kernel(
     xc_values[i_channel * n_threads + thread_id] = xc_value;
   }
   __syncthreads();
-  double x, y, z;
+  KernelType x, y, z;
   for (int i_batch = 0, i_pair_index = start_pair_index + thread_id;
        i_batch < n_batches; i_batch++, i_pair_index += n_threads) {
     const bool is_valid_pair = i_pair_index < end_pair_index;
@@ -126,47 +128,50 @@ __global__ void evaluate_xc_kernel(
     const int i_atom = bas(ATOM_OF, i_shell);
     const int j_atom = bas(ATOM_OF, j_shell);
 
-    const double i_exponent = env[bas(PTR_EXP, i_shell)];
+    const KernelType i_exponent = env[bas(PTR_EXP, i_shell)];
     const int i_coord_offset = atm(PTR_COORD, i_atom);
-    const double i_x =
+    const KernelType i_x =
         env[i_coord_offset] + vectors_to_neighboring_images[image_index_i * 3];
-    const double i_y = env[i_coord_offset + 1] +
-                       vectors_to_neighboring_images[image_index_i * 3 + 1];
-    const double i_z = env[i_coord_offset + 2] +
-                       vectors_to_neighboring_images[image_index_i * 3 + 2];
-    const double i_coeff = env[bas(PTR_COEFF, i_shell)];
+    const KernelType i_y = env[i_coord_offset + 1] +
+                           vectors_to_neighboring_images[image_index_i * 3 + 1];
+    const KernelType i_z = env[i_coord_offset + 2] +
+                           vectors_to_neighboring_images[image_index_i * 3 + 2];
+    const KernelType i_coeff = env[bas(PTR_COEFF, i_shell)];
 
-    const double j_exponent = env[bas(PTR_EXP, j_shell)];
+    const KernelType j_exponent = env[bas(PTR_EXP, j_shell)];
     const int j_coord_offset = atm(PTR_COORD, j_atom);
-    const double j_x =
+    const KernelType j_x =
         env[j_coord_offset] + vectors_to_neighboring_images[image_index_j * 3];
-    const double j_y = env[j_coord_offset + 1] +
-                       vectors_to_neighboring_images[image_index_j * 3 + 1];
-    const double j_z = env[j_coord_offset + 2] +
-                       vectors_to_neighboring_images[image_index_j * 3 + 2];
-    const double j_coeff = env[bas(PTR_COEFF, j_shell)];
+    const KernelType j_y = env[j_coord_offset + 1] +
+                           vectors_to_neighboring_images[image_index_j * 3 + 1];
+    const KernelType j_z = env[j_coord_offset + 2] +
+                           vectors_to_neighboring_images[image_index_j * 3 + 2];
+    const KernelType j_coeff = env[bas(PTR_COEFF, j_shell)];
 
-    const double ij_exponent = i_exponent + j_exponent;
-    const double ij_exponent_in_prefactor =
+    const KernelType ij_exponent = i_exponent + j_exponent;
+    const KernelType ij_exponent_in_prefactor =
         i_exponent * j_exponent / ij_exponent *
         distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
 
-    const double pair_x = (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
-    const double pair_y = (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
-    const double pair_z = (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
+    const KernelType pair_x =
+        (i_exponent * i_x + j_exponent * j_x) / ij_exponent;
+    const KernelType pair_y =
+        (i_exponent * i_y + j_exponent * j_y) / ij_exponent;
+    const KernelType pair_z =
+        (i_exponent * i_z + j_exponent * j_z) / ij_exponent;
 
-    const double x0 = start_position_x - pair_x;
-    const double y0 = start_position_y - pair_y;
-    const double z0 = start_position_z - pair_z;
+    const KernelType x0 = start_position_x - pair_x;
+    const KernelType y0 = start_position_y - pair_y;
+    const KernelType z0 = start_position_z - pair_z;
 
-    const double gaussian_exponent_at_reference =
+    const KernelType gaussian_exponent_at_reference =
         ij_exponent * distance_squared(x0, y0, z0);
 
-    const double pair_prefactor =
+    const KernelType pair_prefactor =
         is_valid_pair
             ? exp(-ij_exponent_in_prefactor - gaussian_exponent_at_reference) *
-                  i_coeff * j_coeff * common_fac_sp<double, i_angular>() *
-                  common_fac_sp<double, j_angular>()
+                  i_coeff * j_coeff * common_fac_sp<KernelType, i_angular>() *
+                  common_fac_sp<KernelType, j_angular>()
             : 0;
 
 #pragma unroll
@@ -183,7 +188,7 @@ __global__ void evaluate_xc_kernel(
 #pragma unroll
         for (int j_function_index = 0;
              j_function_index < n_j_cartesian_functions; j_function_index++) {
-          const double density_matrix_value =
+          const KernelType density_matrix_value =
               density_matrices[density_matrix_channel_stride * i_channel +
                                image_difference_index * density_matrix_stride +
                                (i_function + i_function_index) * n_j_functions +
@@ -196,32 +201,32 @@ __global__ void evaluate_xc_kernel(
         }
       }
     }
-    const double da_squared =
+    const KernelType da_squared =
         distance_squared(dxyz_dabc[0], dxyz_dabc[1], dxyz_dabc[2]);
-    const double db_squared =
+    const KernelType db_squared =
         distance_squared(dxyz_dabc[3], dxyz_dabc[4], dxyz_dabc[5]);
-    const double dc_squared =
+    const KernelType dc_squared =
         distance_squared(dxyz_dabc[6], dxyz_dabc[7], dxyz_dabc[8]);
 
-    const double exp_da_squared = exp(-2 * ij_exponent * da_squared);
-    const double exp_db_squared = exp(-2 * ij_exponent * db_squared);
-    const double exp_dc_squared = exp(-2 * ij_exponent * dc_squared);
+    const KernelType exp_da_squared = exp(-2 * ij_exponent * da_squared);
+    const KernelType exp_db_squared = exp(-2 * ij_exponent * db_squared);
+    const KernelType exp_dc_squared = exp(-2 * ij_exponent * dc_squared);
 
-    const double cross_term_a =
+    const KernelType cross_term_a =
         dxyz_dabc[0] * x0 + dxyz_dabc[1] * y0 + dxyz_dabc[2] * z0;
-    const double cross_term_b =
+    const KernelType cross_term_b =
         dxyz_dabc[3] * x0 + dxyz_dabc[4] * y0 + dxyz_dabc[5] * z0;
-    const double cross_term_c =
+    const KernelType cross_term_c =
         dxyz_dabc[6] * x0 + dxyz_dabc[7] * y0 + dxyz_dabc[8] * z0;
 
-    const double recursion_factor_a_start =
+    const KernelType recursion_factor_a_start =
         exp(-ij_exponent * (2 * cross_term_a + da_squared));
-    const double recursion_factor_b_start =
+    const KernelType recursion_factor_b_start =
         exp(-ij_exponent * (2 * cross_term_b + db_squared));
-    const double recursion_factor_c_start =
+    const KernelType recursion_factor_c_start =
         exp(-ij_exponent * (2 * cross_term_c + dc_squared));
 
-    double gaussian_x, gaussian_y, gaussian_z, recursion_factor_a,
+    KernelType gaussian_x, gaussian_y, gaussian_z, recursion_factor_a,
         recursion_factor_b, recursion_factor_c;
 
     for (a_index = 0, gaussian_x = 1,
@@ -236,18 +241,18 @@ __global__ void evaluate_xc_kernel(
             recursion_factor_c = recursion_factor_c_start, z = start_position_z;
              c_index < c_upper; c_index++, gaussian_z *= recursion_factor_c,
             recursion_factor_c *= exp_dc_squared, z += dxyz_dabc[8]) {
-          multi_grid::gto_cartesian<double, i_angular>(i_cartesian, x - i_x,
-                                                       y - i_y, z - i_z);
-          gradient::gto_cartesian<double, i_angular>(
+          multi_grid::gto_cartesian<KernelType, i_angular>(i_cartesian, x - i_x,
+                                                           y - i_y, z - i_z);
+          gradient::gto_cartesian<KernelType, i_angular>(
               i_cartesian_gradient, i_cartesian, x - i_x, y - i_y, z - i_z,
               i_exponent);
-          multi_grid::gto_cartesian<double, j_angular>(j_cartesian, x - j_x,
-                                                       y - j_y, z - j_z);
-          gradient::gto_cartesian<double, j_angular>(
+          multi_grid::gto_cartesian<KernelType, j_angular>(j_cartesian, x - j_x,
+                                                           y - j_y, z - j_z);
+          gradient::gto_cartesian<KernelType, j_angular>(
               j_cartesian_gradient, j_cartesian, x - j_x, y - j_y, z - j_z,
               j_exponent);
 
-          const double gaussian = gaussian_x * gaussian_y * gaussian_z;
+          const KernelType gaussian = gaussian_x * gaussian_y * gaussian_z;
 #pragma unroll
           for (int i_channel = 0; i_channel < n_channels; i_channel++) {
             xc_value =
@@ -314,7 +319,7 @@ __global__ void evaluate_xc_kernel(
 }
 
 #define xc_gradient_kernel_macro(li, lj)                                       \
-  evaluate_xc_kernel<n_channels, li, lj, is_non_orthogonal>                    \
+  evaluate_xc_kernel<KernelType, n_channels, li, lj, is_non_orthogonal>        \
       <<<block_grid, block_size>>>(                                            \
           gradient, xc_weights, density_matrices, non_trivial_pairs, i_shells, \
           j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,            \
@@ -329,13 +334,14 @@ __global__ void evaluate_xc_kernel(
     xc_gradient_kernel_macro(li, lj);                                          \
     break
 
-template <int n_channels, bool is_non_orthogonal>
+template <typename KernelType, int n_channels, bool is_non_orthogonal>
 void evaluate_xc_driver(
-    double *gradient, const double *xc_weights, const double *density_matrices,
-    const int i_angular, const int j_angular, const int *non_trivial_pairs,
-    const int *i_shells, const int *j_shells, const int n_j_shells,
-    const int *shell_to_ao_indices, const int n_i_functions,
-    const int n_j_functions, const int *sorted_pairs_per_local_grid,
+    KernelType *gradient, const KernelType *xc_weights,
+    const KernelType *density_matrices, const int i_angular,
+    const int j_angular, const int *non_trivial_pairs, const int *i_shells,
+    const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
+    const int n_i_functions, const int n_j_functions,
+    const int *sorted_pairs_per_local_grid,
     const int *accumulated_n_pairs_per_local_grid,
     const int *sorted_block_index, const int n_contributing_blocks,
     const int *image_indices, const double *vectors_to_neighboring_images,

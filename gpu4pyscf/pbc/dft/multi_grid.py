@@ -14,6 +14,7 @@ from pyscf.pbc.gto.pseudo import pp_int
 from pyscf.pbc.lib.kpts_helper import is_gamma_point
 from pyscf.pbc.tools import madelung
 from pyscf.lib import prange
+from pyscf.pbc.scf import hf as hf_cpu
 
 import gpu4pyscf.pbc.df.fft as fft
 import gpu4pyscf.pbc.df.fft_jk as fft_jk
@@ -25,6 +26,15 @@ import gpu4pyscf.mpi as mpi
 from gpu4pyscf.lib.cupy_helper import return_cupy_array
 
 libgpbc = cupy_helper.load_library("libgpbc")
+
+
+def complex_type(dtype):
+    if dtype == cp.float32:
+        return cp.complex64
+    elif dtype == cp.float64:
+        return cp.complex128
+    else:
+        raise ValueError("Invalid dtype")
 
 
 def cast_to_pointer(array):
@@ -230,6 +240,16 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         # the original grids_localized.mesh has dtype=np.int64, which can cause
         # misalignment when the pointer is passed to the C code.
         mesh = np.asarray(grids_localized.mesh, dtype=np.int32)
+
+        fft_grid = list(
+            map(
+                lambda n_mesh_points: cp.fft.fftfreq(
+                    n_mesh_points, 1.0 / n_mesh_points
+                ).astype(cp.int32),
+                mesh,
+            )
+        )
+
         dxyz_dabc = cp.asarray((lattice_vectors.T / cp.asarray(mesh)).T)
         n_blocks_abc = np.asarray(np.ceil(mesh / block_size), dtype=cp.int32)
         equivalent_cell_in_localized, coeff_in_localized = (
@@ -327,7 +347,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         bas = cp.asarray(grouped_cell._bas, dtype=cp.int32)
         env = cp.asarray(grouped_cell._env)
 
-        t1 = log.timer("routines before screening", *t1)
+        t1 = log.timer_debug2("routines before screening", *t1)
         for i_angular, i_shells in zip(i_angulars_unique, sorted_i_shells):
             for j_angular, j_shells in zip(j_angulars_unique, sorted_j_shells):
                 (
@@ -347,7 +367,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     env,
                     threshold_in_log,
                 )
-                t1 = log.timer("screening in angular pair" + str((i_angular, j_angular)), *t1)
+                t1 = log.timer_debug2(
+                    "screening in angular pair" + str((i_angular, j_angular)), *t1
+                )
                 contributing_block_ranges = (
                     pairs_to_blocks_end - pairs_to_blocks_begin + 1
                 )
@@ -367,7 +389,11 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     n_pairs,
                     n_indices,
                 )
-                t1 = log.timer("assigning pairs to blocks in angular pair" + str((i_angular, j_angular)), *t1)
+                t1 = log.timer_debug2(
+                    "assigning pairs to blocks in angular pair"
+                    + str((i_angular, j_angular)),
+                    *t1
+                )
                 per_angular_pairs.append(
                     {
                         "angular": (i_angular, j_angular),
@@ -388,6 +414,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                 "neighboring_images": vectors_to_neighboring_images,
                 "grouped_cell": grouped_cell,
                 "mesh": mesh,  # this one is on cpu memory
+                "fft_grid": fft_grid,
                 "ao_indices_in_localized": ao_indices_in_localized,
                 "ao_indices_in_diffused": ao_indices_in_diffused,
                 "concatenated_ao_indices": concatenated_ao_indices,
@@ -426,7 +453,13 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
     density_matrix_with_translation_real_part = cp.asarray(
         density_matrix_with_translation.real, order="C"
     )
-    density = cp.zeros((n_channels,) + tuple(pairs_info["mesh"]))
+
+    if dm_slice.dtype == cp.float32:
+        use_float_precision = ctypes.c_int(1)
+    else:
+        use_float_precision = ctypes.c_int(0)
+
+    density = cp.zeros((n_channels,) + tuple(pairs_info["mesh"]), dtype=dm_slice.dtype)
 
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
@@ -458,6 +491,7 @@ def evaluate_density_wrapper(pairs_info, dm_slice, ignore_imag=True):
             cast_to_pointer(pairs_info["env"]),
             ctypes.c_int(n_channels),
             ctypes.c_int(pairs_info["is_non_orthogonal"]),
+            use_float_precision,
         )
 
     mpi.comm.reduce(density, in_place=True)
@@ -489,14 +523,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
     for pairs in mydf.sorted_gaussian_pairs:
 
         mesh = pairs["mesh"]
-        fft_grids = list(
-            map(
-                lambda mesh_points: np.fft.fftfreq(
-                    mesh_points, 1.0 / mesh_points
-                ).astype(np.int32),
-                mesh,
-            )
-        )
+
         n_grid_points = np.prod(mesh)
         weight_per_grid_point = 1.0 / n_k_points * mydf.cell.vol / n_grid_points
 
@@ -535,14 +562,20 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
             ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
         )
 
-        density = evaluate_density_wrapper(pairs, coeff_sandwiched_density_matrix)
+        density = evaluate_density_wrapper(
+            pairs, cp.asarray(coeff_sandwiched_density_matrix, dtype=mydf.dtype)
+        )
 
         density_contribution_on_g_mesh = (
             tools.fft(density.reshape(n_channels, -1), mesh) * weight_per_grid_point
         )
 
         density_on_g_mesh[
-            cp.ix_(cp.arange(n_channels), cp.arange(1), *fft_grids)
+            :,
+            0,
+            pairs["fft_grid"][0][:, None, None],
+            pairs["fft_grid"][1][:, None],
+            pairs["fft_grid"][2],
         ] += density_contribution_on_g_mesh.reshape((-1,) + tuple(mesh))
 
     density_on_g_mesh = density_on_g_mesh.reshape([n_channels, density_slices, -1])
@@ -551,7 +584,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=np.zeros((1, 3)), deriv=0):
             "np, xp -> nxp", density_on_g_mesh[:, 0], mydf.gradient_vector_on_g_mesh
         )
 
-    return density_on_g_mesh
+    return cp.asarray(density_on_g_mesh)
 
 
 def evaluate_xc_wrapper(pairs_info, xc_weights):
@@ -563,10 +596,19 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
     n_k_points, n_difference_images = pairs_info["phase_diff_among_images"].shape
     n_images = pairs_info["neighboring_images"].shape[0]
 
-    fock = cp.zeros((n_channels, n_difference_images, n_i_functions, n_j_functions))
+    fock = cp.zeros(
+        (n_channels, n_difference_images, n_i_functions, n_j_functions),
+        dtype=xc_weights.dtype,
+    )
+    if xc_weights.dtype == cp.float32:
+        use_float_precision = ctypes.c_int(1)
+    else:
+        use_float_precision = ctypes.c_int(0)
+
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         fock_slice = cp.zeros(
-            (n_channels, n_difference_images, n_i_functions, n_j_functions)
+            (n_channels, n_difference_images, n_i_functions, n_j_functions),
+            dtype=xc_weights.dtype,
         )
         (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
         c_driver(
@@ -596,10 +638,9 @@ def evaluate_xc_wrapper(pairs_info, xc_weights):
             cast_to_pointer(pairs_info["env"]),
             ctypes.c_int(n_channels),
             ctypes.c_int(pairs_info["is_non_orthogonal"]),
+            use_float_precision,
         )
         fock += fock_slice
-
-    # mpi.comm.reduce(fock, in_place=True)
 
     if n_k_points > 1:
         return cp.einsum(
@@ -628,7 +669,7 @@ def convert_xc_on_g_mesh_to_fock(
 
     data_type = cp.float64
     if not at_gamma_point:
-        data_type = cp.complex128
+        data_type = complex_type(cp.float64)
 
     fock = cp.zeros((n_channels, n_k_points, nao, nao), dtype=data_type)
 
@@ -636,21 +677,18 @@ def convert_xc_on_g_mesh_to_fock(
         mesh = pairs["mesh"]
         n_grid_points = np.prod(mesh)
 
-        fft_grids = map(
-            lambda mesh_points: np.fft.fftfreq(mesh_points, 1.0 / mesh_points).astype(
-                np.int32
-            ),
-            mesh,
-        )
         interpolated_xc_on_g_mesh = xc_on_g_mesh[
-            cp.ix_(cp.arange(xc_on_g_mesh.shape[0]), *fft_grids)
+            :,
+            pairs["fft_grid"][0][:, None, None],
+            pairs["fft_grid"][1][:, None],
+            pairs["fft_grid"][2],
         ].reshape(n_channels, n_grid_points)
         reordered_xc_on_real_mesh = tools.ifft(interpolated_xc_on_g_mesh, mesh).reshape(
             n_channels, n_grid_points
         )
         # order='C' forces a copy. otherwise the array is not contiguous
         reordered_xc_on_real_mesh = cp.asarray(
-            reordered_xc_on_real_mesh.real, order="C"
+            reordered_xc_on_real_mesh.real, order="C", dtype=mydf.dtype
         )
         n_ao_in_localized = len(pairs["ao_indices_in_localized"])
         libgpbc.update_dxyz_dabc(
@@ -698,10 +736,84 @@ def convert_xc_on_g_mesh_to_fock(
     return fock
 
 
+def get_ovlp(
+    mydf,
+    kpts=np.zeros((1, 3)),
+):
+    cell = mydf.cell
+    n_k_points = len(kpts)
+    nao = cell.nao_nr()
+
+    if is_gamma_point(kpts):
+        dtype = cp.float64
+    else:
+        dtype = complex_type(cp.float64)
+
+    overlap = cp.zeros((n_k_points, nao, nao), dtype=dtype)
+
+    for pairs in mydf.sorted_gaussian_pairs:
+        mesh = pairs["mesh"]
+        n_grid_points = np.prod(mesh)
+        weight = cell.vol / n_grid_points
+
+        overlap_weight = cp.ones((1, n_grid_points), dtype=mydf.dtype)
+        n_ao_in_localized = len(pairs["ao_indices_in_localized"])
+        libgpbc.update_dxyz_dabc(
+            ctypes.cast(pairs["dxyz_dabc"].data.ptr, ctypes.c_void_p)
+        )
+        overlap_slice = evaluate_xc_wrapper(pairs, overlap_weight)
+        overlap_slice = overlap_slice.reshape(overlap_slice.shape[-3:]) * weight
+        overlap_slice = cp.einsum(
+            "kpq,pi->kiq", overlap_slice, pairs["coeff_in_localized"]
+        )
+        overlap_slice = cp.einsum(
+            "kiq,qj->kij", overlap_slice, pairs["concatenated_coeff"]
+        )
+
+        # While mathematically it is correct to have concatenated
+        # ao indices in the addition, but it is possible that the ao
+        # indices overlap between localized gaussians and diffused gaussians
+        # (imagine two gaussians within a single shell, say, C2s).
+        # In this case, the addition to the same place requires atomic
+        # operation, while I guess in the cupy code it is assumed that
+        # the indices do not overlap, and hence no atomic guard.
+        # Anyway, the numerical result will be wrong if we use
+        # concatenated ao indices.
+        overlap[
+            :,
+            pairs["ao_indices_in_localized"][:, None],
+            pairs["ao_indices_in_localized"],
+        ] += overlap_slice[:, :, :n_ao_in_localized]
+        overlap[
+            :,
+            pairs["ao_indices_in_localized"][:, None],
+            pairs["ao_indices_in_diffused"],
+        ] += overlap_slice[:, :, n_ao_in_localized:]
+        overlap[
+            :,
+            pairs["ao_indices_in_diffused"][:, None],
+            pairs["ao_indices_in_localized"],
+        ] += (
+            overlap_slice[:, :, n_ao_in_localized:].transpose(0, 2, 1).conj()
+        )
+
+    mpi.comm.reduce(overlap, in_place=True)
+
+    return overlap
+
+
 def evaluate_xc_gradient_wrapper(
     gradient, pairs_info, xc_weights, dm_slice, ignore_imag=True
 ):
     c_driver = libgpbc.evaluate_xc_gradient_driver
+
+    assert gradient.dtype == xc_weights.dtype
+    assert gradient.dtype == dm_slice.dtype
+
+    if gradient.dtype == cp.float32:
+        use_float_precision = ctypes.c_int(1)
+    else:
+        use_float_precision = ctypes.c_int(0)
 
     n_images = pairs_info["neighboring_images"].shape[0]
     n_k_points, n_difference_images = pairs_info["phase_diff_among_images"].shape
@@ -751,6 +863,7 @@ def evaluate_xc_gradient_wrapper(
             cast_to_pointer(pairs_info["env"]),
             ctypes.c_int(n_channels),
             ctypes.c_int(pairs_info["is_non_orthogonal"]),
+            use_float_precision,
         )
 
 
@@ -772,28 +885,24 @@ def convert_xc_on_g_mesh_to_fock_gradient(
     if hermi != 1:
         raise NotImplementedError
 
-    gradient = cp.zeros((n_atoms, 3))
+    gradient = cp.zeros((n_atoms, 3), dtype=mydf.dtype)
 
     for pairs in mydf.sorted_gaussian_pairs:
         mesh = pairs["mesh"]
         n_grid_points = np.prod(mesh)
 
-        fft_grids = map(
-            lambda mesh_points: np.fft.fftfreq(mesh_points, 1.0 / mesh_points).astype(
-                np.int32
-            ),
-            mesh,
-        )
-
         interpolated_xc_on_g_mesh = xc_on_g_mesh[
-            cp.ix_(cp.arange(xc_on_g_mesh.shape[0]), *fft_grids)
+            :,
+            pairs["fft_grid"][0][:, None, None],
+            pairs["fft_grid"][1][:, None],
+            pairs["fft_grid"][2],
         ].reshape(n_channels, n_grid_points)
         reordered_xc_on_real_mesh = tools.ifft(interpolated_xc_on_g_mesh, mesh).reshape(
             n_channels, n_grid_points
         )
         # order='C' forces a copy. otherwise the array is not contiguous
         reordered_xc_on_real_mesh = cp.asarray(
-            reordered_xc_on_real_mesh.real, order="C"
+            reordered_xc_on_real_mesh.real, order="C", dtype=mydf.dtype
         )
 
         density_matrix_slice = dms[
@@ -813,8 +922,6 @@ def convert_xc_on_g_mesh_to_fock_gradient(
         density_matrix_slice[
             :, :, :, n_ao_in_localized:
         ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2).conj()
-        # density_matrix_slice[:, :, :, n_ao_in_localized:] *= 0
-        # density_matrix_slice *= 2
 
         coeff_sandwiched_density_matrix = cp.einsum(
             "nkij,pi->nkpj",
@@ -834,7 +941,7 @@ def convert_xc_on_g_mesh_to_fock_gradient(
             gradient,
             pairs,
             reordered_xc_on_real_mesh,
-            coeff_sandwiched_density_matrix,
+            cp.asarray(coeff_sandwiched_density_matrix, dtype=mydf.dtype),
             ignore_imag=True,
         )
 
@@ -1272,10 +1379,28 @@ def nr_rks_gradient(
 
 
 class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
-    def __init__(self, cell, kpts=np.zeros((1, 3)), xc="LDA", p_slice=2, q_slice=32):
-        self.sorted_gaussian_pairs = None
+    def __init__(
+        self,
+        cell,
+        kpts=np.zeros((1, 3)),
+        xc="LDA",
+        p_slice=2,
+        q_slice=32,
+        use_float_precision=False,
+    ):
+
         fft.FFTDF.__init__(self, cell, kpts)
+
         xc_type = self._numint._xc_type(xc)
+
+        if use_float_precision:
+            self.dtype = cp.float32
+        else:
+            self.dtype = cp.float64
+        if xc_type == "GGA":
+            self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
+
+        self.sorted_gaussian_pairs = None
         sort_gaussian_pairs(self, xc_type)
         self.coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=self.mesh)
         self.gradient_vector_on_g_mesh = None
@@ -1284,8 +1409,13 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
         self.q_slice = q_slice
         self.vpplocG_part1 = None
         self.rhoG = None
-        if xc_type == "GGA":
-            self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
+        self._overlap = get_ovlp(self, kpts)
+
+        if is_gamma_point(kpts):
+            self._overlap = self._overlap.reshape(self._overlap.shape[-2:])
+
+    def get_ovlp(self, cell=None, kpt=None):
+        return self._overlap
 
     def get_mo_values(self, mo_coeff, kpt):
         n_grid_points = len(self.grids.coords)
@@ -1331,7 +1461,7 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
             self.grids.coords[grid_slice_start:grid_slice_end],
             kpt.reshape(1, 3),
         )[0]
-        
+
         fock = cp.asarray(
             [
                 mo_values[i, :, grid_slice_start:grid_slice_end] @ ao_values_slice
@@ -1346,9 +1476,6 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
     def get_k(self, dm_kpts, hermi=1, kpt=np.zeros(3), kpts_band=None, exxdiv=None):
         self.n_grid_points = np.prod(self.mesh)
         self.madelung = madelung(self.cell, self.mesh)
-
-        if self._overlap is None:
-            self._overlap = cp.asarray(self.cell.get_ovlp(self.mesh))
 
         return get_k_kpts(
             self,
@@ -1374,7 +1501,12 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
     )
 
 
-def fftdf(mf):
-    mf.with_df, old_df = FFTDF(mf.cell, kpts=mf.kpts, xc=mf.xc), mf.with_df
+def fftdf(mf, use_float_precision=False):
+    mf.with_df, old_df = (
+        FFTDF(mf.cell, kpts=mf.kpts, xc=mf.xc, use_float_precision=use_float_precision),
+        mf.with_df,
+    )
     mf.with_df.__dict__.update(old_df.__dict__)
+    mf.get_ovlp = mf.with_df.get_ovlp
+
     return mf

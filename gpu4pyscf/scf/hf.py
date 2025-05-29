@@ -167,8 +167,6 @@ def _kernel(mf, conv_tol=1e-10, conv_tol_grad=None,
     h1e = cupy.asarray(mf.get_hcore(mol))
     t1 = log.timer_debug1('hcore', *t1)
     s1e = cupy.asarray(mf.get_ovlp(mol))
-    if getattr(mf, "with_df", None) is not None:
-        mf.with_df._overlap = s1e
     t1 = log.timer_debug1('ovlp', *t1)
 
     vhf = mf.get_veff(mol, dm)

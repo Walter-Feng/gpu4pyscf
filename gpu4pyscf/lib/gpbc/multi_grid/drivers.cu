@@ -153,7 +153,7 @@ void count_pairs_on_blocks(int *n_pairs_per_block,
       count_pairs_on_blocks_kernel<<<block_grid, block_size>>>(
           n_pairs_per_block, pairs_to_blocks_begin, pairs_to_blocks_end,
           n_pairs);
-  
+
   checkCudaErrors(cudaPeekAtLastError());
 }
 
@@ -174,7 +174,7 @@ void put_pairs_on_blocks(int *pairs_on_blocks,
           pairs_on_blocks, accumulated_n_pairs_per_block, sorted_block_index,
           pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks_a, n_blocks_b,
           n_blocks_c, n_pairs);
-  
+
   checkCudaErrors(cudaPeekAtLastError());
 }
 
@@ -195,7 +195,7 @@ void update_dxyz_dabc(const double *dxyz_dabc_on_device) {
 }
 
 void evaluate_density_driver(
-    double *density, const double *density_matrices, const int i_angular,
+    void *density, const void *density_matrices, const int i_angular,
     const int j_angular, const int *non_trivial_pairs, const int *i_shells,
     const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
     const int n_i_functions, const int n_j_functions,
@@ -206,56 +206,148 @@ void evaluate_density_driver(
     const int n_images, const int *image_pair_difference_index,
     const int n_difference_images, const int *mesh, const int *atm,
     const int *bas, const double *env, const int n_channels,
-    const int is_non_orthogonal) {
-  if (is_non_orthogonal) {
-    if (n_channels == 1) {
-      gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<1, true>(
-          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
-          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, image_pair_difference_index, n_difference_images, mesh, atm,
-          bas, env);
-    } else if (n_channels == 2) {
-      gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<2, true>(
-          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
-          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, image_pair_difference_index, n_difference_images, mesh, atm,
-          bas, env);
+    const int is_non_orthogonal, const int use_float_precision) {
+  if (use_float_precision) {
+    if (is_non_orthogonal) {
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<float, 1, true>(
+            (float *)density, (float *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<float, 2, true>(
+            (float *)density, (float *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        gpu4pyscf::gpbc::multi_grid::runtime_channel::evaluate_density_driver<
+            float, true>((float *)density, (float *)density_matrices, i_angular,
+                         j_angular, non_trivial_pairs, i_shells, j_shells,
+                         n_j_shells, shell_to_ao_indices, n_i_functions,
+                         n_j_functions, sorted_pairs_per_local_grid,
+                         accumulated_n_pairs_per_local_grid, sorted_block_index,
+                         n_contributing_blocks, image_indices,
+                         vectors_to_neighboring_images, n_images,
+                         image_pair_difference_index, n_difference_images, mesh,
+                         atm, bas, env, n_channels);
+      }
     } else {
-      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<float, 1, false>(
+            (float *)density, (float *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<float, 2, false>(
+            (float *)density, (float *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        gpu4pyscf::gpbc::multi_grid::runtime_channel::evaluate_density_driver<
+            float, false>(
+            (float *)density, (float *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env, n_channels);
+      }
     }
   } else {
-    if (n_channels == 1) {
-      gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<1, false>(
-          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
-          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, image_pair_difference_index, n_difference_images, mesh, atm,
-          bas, env);
-    } else if (n_channels == 2) {
-      gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<2, false>(
-          density, density_matrices, i_angular, j_angular, non_trivial_pairs,
-          i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, image_pair_difference_index, n_difference_images, mesh, atm,
-          bas, env);
+    if (is_non_orthogonal) {
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<double, 1, true>(
+            (double *)density, (double *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<double, 2, true>(
+            (double *)density, (double *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        gpu4pyscf::gpbc::multi_grid::runtime_channel::evaluate_density_driver<
+            double, true>(
+            (double *)density, (double *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env, n_channels);
+      }
     } else {
-      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<double, 1, false>(
+            (double *)density, (double *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_density_driver<double, 2, false>(
+            (double *)density, (double *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        gpu4pyscf::gpbc::multi_grid::runtime_channel::evaluate_density_driver<
+            double, false>(
+            (double *)density, (double *)density_matrices, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env, n_channels);
+      }
     }
   }
 }
 
 void evaluate_xc_driver(
-    double *fock, const double *xc_weights, const int i_angular,
+    void *fock, const void *xc_weights, const int i_angular,
     const int j_angular, const int *non_trivial_pairs, const int *i_shells,
     const int *j_shells, const int n_j_shells, const int *shell_to_ao_indices,
     const int n_i_functions, const int n_j_functions,
@@ -266,56 +358,148 @@ void evaluate_xc_driver(
     const int n_images, const int *image_pair_difference_index,
     const int n_difference_images, const int *mesh, const int *atm,
     const int *bas, const double *env, const int n_channels,
-    const int is_non_orthogonal) {
-  if (is_non_orthogonal) {
-    if (n_channels == 1) {
-      gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<1, true>(
-          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
-          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, image_pair_difference_index, n_difference_images, mesh, atm,
-          bas, env);
-    } else if (n_channels == 2) {
-      gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<2, true>(
-          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
-          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, image_pair_difference_index, n_difference_images, mesh, atm,
-          bas, env);
+    const int is_non_orthogonal, const int use_float_precision) {
+  if (use_float_precision) {
+    if (is_non_orthogonal) {
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<float, 1, true>(
+            (float *)fock, (float *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<float, 2, true>(
+            (float *)fock, (float *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        gpu4pyscf::gpbc::multi_grid::runtime_channel::evaluate_xc_driver<float,
+                                                                         true>(
+            (float *)fock, (float *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env, n_channels);
+      }
     } else {
-      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<float, 1, false>(
+            (float *)fock, (float *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<float, 2, false>(
+            (float *)fock, (float *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        gpu4pyscf::gpbc::multi_grid::runtime_channel::evaluate_xc_driver<float,
+                                                                         false>(
+            (float *)fock, (float *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env, n_channels);
+      }
     }
   } else {
-    if (n_channels == 1) {
-      gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<1, false>(
-          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
-          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, image_pair_difference_index, n_difference_images, mesh, atm,
-          bas, env);
-    } else if (n_channels == 2) {
-      gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<2, false>(
-          fock, xc_weights, i_angular, j_angular, non_trivial_pairs, i_shells,
-          j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
-          n_j_functions, sorted_pairs_per_local_grid,
-          accumulated_n_pairs_per_local_grid, sorted_block_index,
-          n_contributing_blocks, image_indices, vectors_to_neighboring_images,
-          n_images, image_pair_difference_index, n_difference_images, mesh, atm,
-          bas, env);
+    if (is_non_orthogonal) {
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<double, 1, true>(
+            (double *)fock, (double *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<double, 2, true>(
+            (double *)fock, (double *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        gpu4pyscf::gpbc::multi_grid::runtime_channel::evaluate_xc_driver<double,
+                                                                         true>(
+            (double *)fock, (double *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env, n_channels);
+      }
     } else {
-      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<double, 1, false>(
+            (double *)fock, (double *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::evaluate_xc_driver<double, 2, false>(
+            (double *)fock, (double *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        gpu4pyscf::gpbc::multi_grid::runtime_channel::evaluate_xc_driver<double,
+                                                                         false>(
+            (double *)fock, (double *)xc_weights, i_angular, j_angular,
+            non_trivial_pairs, i_shells, j_shells, n_j_shells,
+            shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env, n_channels);
+      }
     }
   }
 }
 
 void evaluate_xc_gradient_driver(
-    double *gradient, const double *xc_weights, const double *density_matrices,
+    void *gradient, const void *xc_weights, const void *density_matrices,
     const int i_angular, const int j_angular, const int *non_trivial_pairs,
     const int *i_shells, const int *j_shells, const int n_j_shells,
     const int *shell_to_ao_indices, const int n_i_functions,
@@ -326,50 +510,115 @@ void evaluate_xc_gradient_driver(
     const int n_images, const int *image_pair_difference_index,
     const int n_difference_images, const int *mesh, const int *atm,
     const int *bas, const double *env, const int n_channels,
-    const int is_non_orthogonal) {
-  if (is_non_orthogonal) {
-    if (n_channels == 1) {
-      gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<1, true>(
-          gradient, xc_weights, density_matrices, i_angular, j_angular,
-          non_trivial_pairs, i_shells, j_shells, n_j_shells,
-          shell_to_ao_indices, n_i_functions, n_j_functions,
-          sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
-          sorted_block_index, n_contributing_blocks, image_indices,
-          vectors_to_neighboring_images, n_images, image_pair_difference_index,
-          n_difference_images, mesh, atm, bas, env);
-    } else if (n_channels == 2) {
-      gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<2, true>(
-          gradient, xc_weights, density_matrices, i_angular, j_angular,
-          non_trivial_pairs, i_shells, j_shells, n_j_shells,
-          shell_to_ao_indices, n_i_functions, n_j_functions,
-          sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
-          sorted_block_index, n_contributing_blocks, image_indices,
-          vectors_to_neighboring_images, n_images, image_pair_difference_index,
-          n_difference_images, mesh, atm, bas, env);
+    const int is_non_orthogonal, const int use_float_precision) {
+  if (use_float_precision) {
+    if (is_non_orthogonal) {
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<float, 1,
+                                                                  true>(
+            (float *)gradient, (float *)xc_weights, (float *)density_matrices,
+            i_angular, j_angular, non_trivial_pairs, i_shells, j_shells,
+            n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<float, 2,
+                                                                  true>(
+            (float *)gradient, (float *)xc_weights, (float *)density_matrices,
+            i_angular, j_angular, non_trivial_pairs, i_shells, j_shells,
+            n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else {
+        fprintf(stderr,
+                "evaluate_xc_gradient_driver: n_channels > 2 not supported");
+      }
     } else {
-      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<float, 1,
+                                                                  false>(
+            (float *)gradient, (float *)xc_weights, (float *)density_matrices,
+            i_angular, j_angular, non_trivial_pairs, i_shells, j_shells,
+            n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<float, 2,
+                                                                  false>(
+            (float *)gradient, (float *)xc_weights, (float *)density_matrices,
+            i_angular, j_angular, non_trivial_pairs, i_shells, j_shells,
+            n_j_shells, shell_to_ao_indices, n_i_functions, n_j_functions,
+            sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
+            sorted_block_index, n_contributing_blocks, image_indices,
+            vectors_to_neighboring_images, n_images,
+            image_pair_difference_index, n_difference_images, mesh, atm, bas,
+            env);
+      }
     }
   } else {
-    if (n_channels == 1) {
-      gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<1, false>(
-          gradient, xc_weights, density_matrices, i_angular, j_angular,
-          non_trivial_pairs, i_shells, j_shells, n_j_shells,
-          shell_to_ao_indices, n_i_functions, n_j_functions,
-          sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
-          sorted_block_index, n_contributing_blocks, image_indices,
-          vectors_to_neighboring_images, n_images, image_pair_difference_index,
-          n_difference_images, mesh, atm, bas, env);
-    } else if (n_channels == 2) {
-      gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<2, false>(
-          gradient, xc_weights, density_matrices, i_angular, j_angular,
-          non_trivial_pairs, i_shells, j_shells, n_j_shells,
-          shell_to_ao_indices, n_i_functions, n_j_functions,
-          sorted_pairs_per_local_grid, accumulated_n_pairs_per_local_grid,
-          sorted_block_index, n_contributing_blocks, image_indices,
-          vectors_to_neighboring_images, n_images, image_pair_difference_index,
-          n_difference_images, mesh, atm, bas, env);
+    if (is_non_orthogonal) {
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<double, 1,
+                                                                  true>(
+            (double *)gradient, (double *)xc_weights,
+            (double *)density_matrices, i_angular, j_angular, non_trivial_pairs,
+            i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+            n_j_functions, sorted_pairs_per_local_grid,
+            accumulated_n_pairs_per_local_grid, sorted_block_index,
+            n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+            n_images, image_pair_difference_index, n_difference_images, mesh,
+            atm, bas, env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<double, 2,
+                                                                  true>(
+            (double *)gradient, (double *)xc_weights,
+            (double *)density_matrices, i_angular, j_angular, non_trivial_pairs,
+            i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+            n_j_functions, sorted_pairs_per_local_grid,
+            accumulated_n_pairs_per_local_grid, sorted_block_index,
+            n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+            n_images, image_pair_difference_index, n_difference_images, mesh,
+            atm, bas, env);
+      } else {
+        fprintf(stderr,
+                "evaluate_xc_gradient_driver: n_channels > 2 not supported");
+      }
     } else {
-      fprintf(stderr, "n_channels more than 2 is not supported.\n");
+      if (n_channels == 1) {
+        gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<double, 1,
+                                                                  false>(
+            (double *)gradient, (double *)xc_weights,
+            (double *)density_matrices, i_angular, j_angular, non_trivial_pairs,
+            i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+            n_j_functions, sorted_pairs_per_local_grid,
+            accumulated_n_pairs_per_local_grid, sorted_block_index,
+            n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+            n_images, image_pair_difference_index, n_difference_images, mesh,
+            atm, bas, env);
+      } else if (n_channels == 2) {
+        gpu4pyscf::gpbc::multi_grid::gradient::evaluate_xc_driver<double, 2,
+                                                                  false>(
+            (double *)gradient, (double *)xc_weights,
+            (double *)density_matrices, i_angular, j_angular, non_trivial_pairs,
+            i_shells, j_shells, n_j_shells, shell_to_ao_indices, n_i_functions,
+            n_j_functions, sorted_pairs_per_local_grid,
+            accumulated_n_pairs_per_local_grid, sorted_block_index,
+            n_contributing_blocks, image_indices, vectors_to_neighboring_images,
+            n_images, image_pair_difference_index, n_difference_images, mesh,
+            atm, bas, env);
+      } else {
+        fprintf(stderr,
+                "evaluate_xc_gradient_driver: n_channels > 2 not supported");
+      }
     }
   }
 }
