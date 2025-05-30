@@ -642,9 +642,10 @@ def eval_vpplocG(cell, mesh, cache_part1=False):
     assert abs(b - np.diag(b.diagonal())).max() < 1e-8
     coords = cell.atom_coords()
     rb = cp.asarray(coords.dot(b.T))
-    SIx = cp.exp(-1j*rb[:,0,None] * basex)
-    SIy = cp.exp(-1j*rb[:,1,None] * basey)
-    SIz = cp.exp(-1j*rb[:,2,None] * basez)
+
+    # SIx = cp.exp(-1j*rb[:,0,None] * basex)
+    # SIy = cp.exp(-1j*rb[:,1,None] * basey)
+    # SIz = cp.exp(-1j*rb[:,2,None] * basez)
     Gx2 = (basex * b[0,0])**2
     Gy2 = (basey * b[1,1])**2
     Gz2 = (basez * b[2,2])**2
@@ -657,6 +658,7 @@ def eval_vpplocG(cell, mesh, cache_part1=False):
 
     charges = cell.atom_charges()
     vlocG = cp.zeros(len(G2), dtype=np.complex128)
+    vlocG_part1 = cp.zeros(len(G2), dtype=cp.complex128)
     vlocG0 = 0
     for ia in range(cell.natm):
         symb = cell.atom_symbol(ia)
@@ -665,9 +667,9 @@ def eval_vpplocG(cell, mesh, cache_part1=False):
 
         pp = cell._pseudo[symb]
         rloc, nexp, cexp = pp[1:3+1]
-        SIx[ia] *= cp.exp(-.5*rloc**2 * Gx2)
-        SIy[ia] *= cp.exp(-.5*rloc**2 * Gy2)
-        SIz[ia] *= cp.exp(-.5*rloc**2 * Gz2)
+        SIx = cp.exp(-1j * rb[ia, 0, None] * basex) * cp.exp(-.5*rloc**2 * Gx2)
+        SIy = cp.exp(-1j * rb[ia, 1, None] * basey) * cp.exp(-.5*rloc**2 * Gy2)
+        SIz = cp.exp(-1j * rb[ia, 2, None] * basez) * cp.exp(-.5*rloc**2 * Gz2)
 
         # alpha parameters from the non-divergent Hartree+Vloc G=0 term.
         vlocG0 += -2*np.pi*charges[ia]*rloc**2
@@ -686,14 +688,14 @@ def eval_vpplocG(cell, mesh, cache_part1=False):
         if nexp >= 4:
             cfacs += cexp[3] * (105 - 105*G2_red + 21*G2_red**2 - G2_red**3)
 
-        xyz_exp = ((2*np.pi)**(3/2.)*rloc**3 * SIx[ia,:,None,None] *
-                   SIy[ia,:,None] * SIz[ia]).ravel()
+        xyz_exp = ((2*np.pi)**(3/2.)*rloc**3 * SIx[:,None,None] *
+                   SIy[:, None] * SIz).ravel()
         xyz_exp *= cfacs
         vlocG += xyz_exp
+        SIx *= -charges[ia]
+        rho_xy = SIx[:, None] * SIy[None, :]
+        vlocG_part1 += (rho_xy[:, :, None] * SIz).ravel()
 
-    SIx *= cp.asarray(-charges)[:,None]
-    rho_xy = SIx[:,:,None] * SIy[:,None,:]
-    vlocG_part1 = contract('qxy,qz->xyz', rho_xy, SIz).ravel()
     Gv = cell.get_Gv(mesh)
     vlocG_part1 *= tools.get_coulG(cell, Gv=Gv)
     vlocG_part1[0] -= vlocG0

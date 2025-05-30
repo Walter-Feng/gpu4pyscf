@@ -1003,7 +1003,7 @@ def get_pp(mydf, kpts=None):
     return vpp
 
 
-def nr_rks(
+def get_veff(
     mydf,
     xc_code,
     dm_kpts,
@@ -1022,6 +1022,7 @@ def nr_rks(
     dm_kpts = cp.asarray(dm_kpts, order="C")
     dms = fft_jk._format_dms(dm_kpts, kpts)
     nset = dms.shape[0]
+
     kpts_band = _format_kpts_band(kpts_band, kpts)
 
     numerical_integrator = mydf._numint
@@ -1041,12 +1042,15 @@ def nr_rks(
         mydf, dm_kpts, kpts, derivative_order
     )
 
-    coulomb_on_g_mesh = density_on_G_mesh[:, 0] * mydf.coulomb_kernel_on_g_mesh
+    coulomb_on_g_mesh = cp.einsum(
+        "ng, g -> g", density_on_G_mesh[:, 0], mydf.coulomb_kernel_on_g_mesh
+    )
+
     coulomb_energy = 0.5 * cp.einsum(
-        "ng,ng->n", density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real
+        "ng,g->", density_on_G_mesh[:, 0].real, coulomb_on_g_mesh.real
     )
     coulomb_energy += 0.5 * cp.einsum(
-        "ng,ng->n", density_on_G_mesh[:, 0].imag, coulomb_on_g_mesh.imag
+        "ng,g->", density_on_G_mesh[:, 0].imag, coulomb_on_g_mesh.imag
     )
     coulomb_energy /= cell.vol
 
@@ -1061,33 +1065,29 @@ def nr_rks(
     )
 
     density_in_real_space = density_in_real_space.reshape(nset, -1, ngrids)
-    n_electrons = density_in_real_space[:, 0].sum(axis=1) * weight
-    weighted_xc_for_fock_on_g_mesh = cp.ndarray(
-        density_in_real_space.shape, dtype=cp.complex128
+    n_electrons = density_in_real_space[:, 0].sum() * weight
+
+    if nset == 1:
+        xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(
+            xc_code, density_in_real_space[0], deriv=1, xctype=xc_type
+        )[:2]
+    else:
+        xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(
+            xc_code, density_in_real_space, deriv=1, xctype=xc_type
+        )[:2]
+
+    xc_energy_sum = (
+        density_in_real_space[:, 0] * xc_for_energy.flatten()
+    ).sum() * weight
+
+    xc_for_fock = xc_for_fock.reshape(-1, ngrids)
+
+    weighted_xc_for_fock_on_g_mesh = tools.fft(xc_for_fock * weight, mesh).reshape(
+        nset, -1, ngrids
     )
-    xc_energy_sum = np.zeros(nset)
-    for i in range(nset):
-        if xc_type == "LDA":
-            xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(
-                xc_code, density_in_real_space[i, 0], deriv=1, xctype=xc_type
-            )[:2]
-        else:
-            xc_for_energy, xc_for_fock = numerical_integrator.eval_xc_eff(
-                xc_code, density_in_real_space[i], deriv=1, xctype=xc_type
-            )[:2]
-
-        xc_energy_sum[i] += (
-            density_in_real_space[i, 0] * xc_for_energy.flatten()
-        ).sum() * weight
-
-        weighted_xc_for_fock_on_g_mesh[i] = tools.fft(xc_for_fock * weight, mesh)
 
     density_in_real_space = density_on_G_mesh = None
 
-    if nset == 1:
-        coulomb_energy = coulomb_energy[0]
-        n_electrons = n_electrons[0]
-        xc_energy_sum = xc_energy_sum[0]
     log.debug("Multigrid exc %s  nelec %s", xc_energy_sum, n_electrons)
 
     kpts_band = _format_kpts_band(kpts_band, kpts)
@@ -1106,6 +1106,7 @@ def nr_rks(
 
     if with_j:
         weighted_xc_for_fock_on_g_mesh[:, 0] += coulomb_on_g_mesh
+
     xc_for_fock = convert_xc_on_g_mesh_to_fock(
         mydf, weighted_xc_for_fock_on_g_mesh, hermi, kpts_band
     )
@@ -1114,7 +1115,11 @@ def nr_rks(
     t0 = log.timer("xc", *t0)
 
     xc_for_fock = cupy_helper.tag_array(
-        xc_for_fock, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None
+        xc_for_fock,
+        ecoul=coulomb_energy,
+        exc=xc_energy_sum,
+        vj=None,
+        vk=None,
     )
 
     return n_electrons, xc_energy_sum, xc_for_fock
@@ -1397,13 +1402,13 @@ class FFTDF(fft.FFTDF, multigrid.MultiGridFFTDF):
             self.dtype = cp.float32
         else:
             self.dtype = cp.float64
+        self.sorted_gaussian_pairs = None
+        sort_gaussian_pairs(self, xc_type)
+        self.gradient_vector_on_g_mesh = None
         if xc_type == "GGA":
             self.gradient_vector_on_g_mesh = cp.asarray(cell.get_Gv(self.mesh)).T * 1j
 
-        self.sorted_gaussian_pairs = None
-        sort_gaussian_pairs(self, xc_type)
         self.coulomb_kernel_on_g_mesh = tools.get_coulG(cell, mesh=self.mesh)
-        self.gradient_vector_on_g_mesh = None
         self._overlap = None
         self.p_slice = p_slice
         self.q_slice = q_slice
