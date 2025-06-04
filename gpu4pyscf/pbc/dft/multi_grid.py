@@ -1384,7 +1384,7 @@ def get_ovlp_ip1(
     cell = mydf.cell
     dme0_kpts = fft_jk._format_dms(dme0, kpts)
     n_atoms = cell.natm
-    n_set = dme0.shape[0]
+    n_set = dme0_kpts.shape[0]
 
     gradient = cp.zeros((n_atoms, 3), dtype=mydf.dtype)
 
