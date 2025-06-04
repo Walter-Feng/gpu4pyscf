@@ -167,7 +167,6 @@ def _kernel(mf, conv_tol=1e-10, conv_tol_grad=None,
     h1e = cupy.asarray(mf.get_hcore(mol))
     t1 = log.timer_debug1('hcore', *t1)
     s1e = cupy.asarray(mf.get_ovlp(mol))
-    t1 = log.timer_debug1('ovlp', *t1)
 
     vhf = mf.get_veff(mol, dm)
     e_tot = mf.energy_tot(dm, h1e, vhf)
