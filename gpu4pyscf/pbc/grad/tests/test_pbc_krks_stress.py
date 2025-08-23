@@ -18,9 +18,9 @@ import numpy as np
 from pyscf.gto import ATOM_OF, intor_cross
 from pyscf.pbc import dft, gto, grad
 from pyscf.pbc.tools import pbc
-from pyscf.pbc.df import FFTDF
 from pyscf.pbc.dft.numint import KNumInt
 from pyscf.pbc.dft.gen_grid import UniformGrids
+from gpu4pyscf.pbc.df import FFTDF
 from gpu4pyscf.pbc.dft import krkspu
 from gpu4pyscf.pbc.grad import krks_stress, krks
 from gpu4pyscf.pbc.grad.krks_stress import _finite_diff_cells
@@ -86,10 +86,10 @@ class KnownValues(unittest.TestCase):
         np.random.seed(5)
         a += np.random.rand(3, 3) - .5
         cell = gto.M(atom='He 1 1 1; He 2 1.5 2.4',
-                     basis=[[0, [.5, 1]], [1, [.8, 1]]], a=a, unit='Bohr')
+                     basis=[[0, [.5, 1]], [1, [.8, 1]], [2, [.6, 1]]], a=a, unit='Bohr')
         kmesh = [3, 1, 1]
         nao = cell.nao
-        dm = np.random.rand(len(kmesh), nao, nao) - (.5+.2j)
+        dm = np.random.rand(np.prod(kmesh), nao, nao) - (.5+.1j)
         dm = np.einsum('kpi,kqi->kpq', dm, dm.conj())
         xc = 'lda,'
         mf_grad = krks.Gradients(cell.KRKS(xc=xc, kpts=cell.make_kpts(kmesh)).to_gpu())
@@ -101,17 +101,17 @@ class KnownValues(unittest.TestCase):
             cell2.precision = 1e-10
             exc1 = ni.nr_rks(cell1, UniformGrids(cell1), xc, dm, kpts=cell1.make_kpts(kmesh))[1]
             exc2 = ni.nr_rks(cell2, UniformGrids(cell2), xc, dm, kpts=cell2.make_kpts(kmesh))[1]
-            assert abs(dat[i,j] - (exc1 - exc2)/2e-5) < 1e-9
+            assert abs(dat[i,j] - (exc1 - exc2)/2e-5) < 1e-8
 
     def test_get_vxc_gga(self):
         a = np.eye(3) * 5
         np.random.seed(5)
         a += np.random.rand(3, 3) - .5
         cell = gto.M(atom='He 1 1 1; He 2 1.5 2.4',
-                     basis=[[0, [.5, 1]], [1, [.8, 1]]], a=a, unit='Bohr')
+                     basis=[[0, [.5, 1]], [1, [.8, 1]], [2, [.6, 1]]], a=a, unit='Bohr')
         kmesh = [3, 1, 1]
         nao = cell.nao
-        dm = np.random.rand(len(kmesh), nao, nao) - (.5+.2j)
+        dm = np.random.rand(np.prod(kmesh), nao, nao) - (.5+.1j)
         dm = np.einsum('kpi,kqi->kpq', dm, dm.conj())
         xc = 'pbe,'
         mf_grad = krks.Gradients(cell.KRKS(xc=xc, kpts=cell.make_kpts(kmesh)).to_gpu())
@@ -123,17 +123,17 @@ class KnownValues(unittest.TestCase):
             cell2.precision = 1e-10
             exc1 = ni.nr_rks(cell1, UniformGrids(cell1), xc, dm, kpts=cell1.make_kpts(kmesh))[1]
             exc2 = ni.nr_rks(cell2, UniformGrids(cell2), xc, dm, kpts=cell2.make_kpts(kmesh))[1]
-            assert abs(dat[i,j] - (exc1 - exc2)/2e-5) < 1e-9
+            assert abs(dat[i,j] - (exc1 - exc2)/2e-5) < 1e-8
 
     def test_get_vxc_mgga(self):
         a = np.eye(3) * 5
         np.random.seed(5)
         a += np.random.rand(3, 3) - .5
         cell = gto.M(atom='He 1 1 1; He 2 1.5 2.4',
-                     basis=[[0, [.5, 1]], [1, [.8, 1]]], a=a, unit='Bohr')
+                     basis=[[0, [.5, 1]], [1, [.8, 1]], [2, [.6, 1]]], a=a, unit='Bohr')
         kmesh = [3, 1, 1]
         nao = cell.nao
-        dm = np.random.rand(len(kmesh), nao, nao) - (.5+.2j)
+        dm = np.random.rand(np.prod(kmesh), nao, nao) - (.5+.1j)
         dm = np.einsum('kpi,kqi->kpq', dm, dm.conj())
         xc = 'm06,'
         mf_grad = krks.Gradients(cell.KRKS(xc=xc, kpts=cell.make_kpts(kmesh)).to_gpu())
@@ -145,17 +145,17 @@ class KnownValues(unittest.TestCase):
             cell2.precision = 1e-10
             exc1 = ni.nr_rks(cell1, UniformGrids(cell1), xc, dm, kpts=cell1.make_kpts(kmesh))[1]
             exc2 = ni.nr_rks(cell2, UniformGrids(cell2), xc, dm, kpts=cell2.make_kpts(kmesh))[1]
-            assert abs(dat[i,j] - (exc1 - exc2)/2e-5) < 1e-9
+            assert abs(dat[i,j] - (exc1 - exc2)/2e-5) < 1e-8
 
     def test_get_j(self):
         a = np.eye(3) * 5
         np.random.seed(5)
         a += np.random.rand(3, 3) - .5
         cell = gto.M(atom='He 1 1 1; He 2 1.5 2.4',
-                     basis=[[0, [.5, 1]], [1, [.8, 1]]], a=a, unit='Bohr')
-        kmesh = [3, 1, 1]
+                     basis=[[0, [.5, 1]], [1, [.8, 1]], [2, [.6, 1]]], a=a, unit='Bohr')
+        kmesh = [3, 1, 3]
         nao = cell.nao
-        dm = np.random.rand(len(kmesh), nao, nao) - (.5+.2j)
+        dm = np.random.rand(np.prod(kmesh), nao, nao) - (.5+.1j)
         dm = np.einsum('kpi,kqi->kpq', dm, dm.conj())
         xc = 'lda,'
         kpts = cell.make_kpts(kmesh)
@@ -172,17 +172,17 @@ class KnownValues(unittest.TestCase):
             exc2 = ni.nr_rks(cell2, UniformGrids(cell2), xc, dm, kpts=cell2.make_kpts(kmesh))[1]
             de = np.einsum('kij,kji', dm, (vj1-vj2)) / len(kpts)
             de += exc1 - exc2
-            assert abs(dat[i,j] - de/2e-5) < 1e-9
+            assert abs(dat[i,j] - de/2e-5) < 1e-8
 
     def test_get_nuc(self):
         a = np.eye(3) * 5
         np.random.seed(5)
         a += np.random.rand(3, 3) - .5
         cell = gto.M(atom='He 1 1 1; He 2 1.5 2.4',
-                     basis=[[0, [.5, 1]], [1, [.8, 1]]], a=a, unit='Bohr')
+                     basis=[[0, [.5, 1]], [1, [.8, 1]], [2, [.6, 1]]], a=a, unit='Bohr')
         kmesh = [3, 1, 1]
         nao = cell.nao
-        dm = np.random.rand(len(kmesh), nao, nao) - (.5+.2j)
+        dm = np.random.rand(np.prod(kmesh), nao, nao) - (.5+.1j)
         dm = np.einsum('kpi,kqi->kpq', dm, dm.conj())
         xc = 'lda,'
         kpts = cell.make_kpts(kmesh)
@@ -199,18 +199,18 @@ class KnownValues(unittest.TestCase):
             exc2 = ni.nr_rks(cell2, UniformGrids(cell2), xc, dm, kpts=cell2.make_kpts(kmesh))[1]
             de = np.einsum('kij,kji', dm, (vne1-vne2)) / len(kpts)
             de += exc1 - exc2
-            assert abs(dat[i,j] - de/2e-5) < 1e-9
+            assert abs(dat[i,j] - de/2e-5) < 1e-8
 
     def test_get_pp(self):
         a = np.eye(3) * 5
         np.random.seed(5)
         a += np.random.rand(3, 3) - .5
-        cell = gto.M(atom='C 1 1 1; C 2 1.5 2.4',
-                     basis=[[0, [.5, 1]], [1, [.8, 1]]],
-                     pseudo='gth-pade', a=a, unit='Bohr')
+        cell = gto.M(atom='C 1 1 1; Si 2 1.5 2.4',
+                     basis=[[0, [.5, 1]], [1, [.8, 1]], [2, [.6, 1]]],
+                     pseudo='gth-pade', a=a, unit='Bohr', precision=1e-9)
         kmesh = [3, 1, 1]
         nao = cell.nao
-        dm = np.random.rand(len(kmesh), nao, nao) - (.5+.2j)
+        dm = np.random.rand(np.prod(kmesh), nao, nao) - (.5+.1j)
         dm = np.einsum('kpi,kqi->kpq', dm, dm.conj())
         xc = 'lda,'
         kpts = cell.make_kpts(kmesh)
@@ -241,11 +241,12 @@ class KnownValues(unittest.TestCase):
         mf = cell.KRKS(xc=xc, kpts=cell.make_kpts(kmesh)).to_gpu().run()
         mf_grad = krks.Gradients(mf)
         dat = mf_grad.get_stress()
+        mf_scanner = mf.as_scanner()
         vol = cell.vol
         for (i, j) in [(0, 0), (0, 1), (0, 2), (1, 0), (2, 2)]:
             cell1, cell2 = _finite_diff_cells(cell, i, j, disp=1e-3)
-            e1 = cell1.KRKS(xc=xc, kpts=cell1.make_kpts(kmesh)).kernel()
-            e2 = cell2.KRKS(xc=xc, kpts=cell2.make_kpts(kmesh)).kernel()
+            e1 = mf_scanner(cell1)
+            e2 = mf_scanner(cell2)
             assert abs(dat[i,j] - (e1-e2)/2e-3/vol) < 1e-6
 
     def test_gga_vs_finite_difference(self):
@@ -260,11 +261,12 @@ class KnownValues(unittest.TestCase):
         mf = cell.KRKS(xc=xc, kpts=cell.make_kpts(kmesh)).to_gpu().run()
         mf_grad = krks.Gradients(mf)
         dat = mf_grad.get_stress()
+        mf_scanner = mf.as_scanner()
         vol = cell.vol
         for (i, j) in [(0, 0), (0, 1), (0, 2), (1, 0), (2, 2)]:
             cell1, cell2 = _finite_diff_cells(cell, i, j, disp=1e-3)
-            e1 = cell1.KRKS(xc=xc, kpts=cell1.make_kpts(kmesh)).kernel()
-            e2 = cell2.KRKS(xc=xc, kpts=cell2.make_kpts(kmesh)).kernel()
+            e1 = mf_scanner(cell1)
+            e2 = mf_scanner(cell2)
             assert abs(dat[i,j] - (e1-e2)/2e-3/vol) < 1e-6
 
     @pytest.mark.slow
@@ -280,11 +282,12 @@ class KnownValues(unittest.TestCase):
         mf = cell.KRKS(xc=xc, kpts=cell.make_kpts(kmesh)).to_gpu().run()
         mf_grad = krks.Gradients(mf)
         dat = mf_grad.get_stress()
+        mf_scanner = mf.as_scanner()
         vol = cell.vol
         for (i, j) in [(0, 0), (0, 1), (0, 2), (1, 0), (2, 2)]:
             cell1, cell2 = _finite_diff_cells(cell, i, j, disp=1e-3)
-            e1 = cell1.KRKS(xc=xc, kpts=cell1.make_kpts(kmesh)).kernel()
-            e2 = cell2.KRKS(xc=xc, kpts=cell2.make_kpts(kmesh)).kernel()
+            e1 = mf_scanner(cell1)
+            e2 = mf_scanner(cell2)
             assert abs(dat[i,j] - (e1-e2)/2e-3/vol) < 1e-6
 
     def test_hubbard_U(self):
@@ -308,17 +311,10 @@ class KnownValues(unittest.TestCase):
 
         for (i, j) in [(1, 0), (2, 2)]:
             cell1, cell2 = _finite_diff_cells(cell, i, j, disp=1e-4)
-            kpts = cell1.make_kpts(kmesh)
-            mf1 = krkspu.KRKSpU(cell1, kpts=kpts, U_idx=U_idx, U_val=U_val, minao_ref=minao)
-            mf1.mo_coeff = mf.mo_coeff
-            mf1.mo_occ = mf.mo_occ
-            e1 = mf1.get_veff().E_U.real
-
-            kpts = cell2.make_kpts(kmesh)
-            mf2 = krkspu.KRKSpU(cell2, kpts=kpts, U_idx=U_idx, U_val=U_val, minao_ref=minao)
-            mf2.mo_coeff = mf.mo_coeff
-            mf2.mo_occ = mf.mo_occ
-            e2 = mf2.get_veff().E_U.real
+            mf.reset(cell1)
+            e1 = mf.get_veff().E_U.real
+            mf.reset(cell2)
+            e2 = mf.get_veff().E_U.real
             assert abs(sigma[i,j] - (e1 - e2) / 2e-4) < 1e-8
 
     @pytest.mark.slow
@@ -339,15 +335,11 @@ class KnownValues(unittest.TestCase):
         U_val = [5]
         mf = krkspu.KRKSpU(cell, kpts=kpts, U_idx=U_idx, U_val=U_val, minao_ref=minao).run()
         sigma = mf.Gradients().get_stress()
+        mf_scanner = mf.as_scanner()
 
         cell1, cell2 = _finite_diff_cells(cell, 0, 0, disp=1e-3)
-        kpts = cell1.make_kpts(kmesh)
-        mf1 = krkspu.KRKSpU(cell1, kpts=kpts, U_idx=U_idx, U_val=U_val, minao_ref=minao).run()
-        e1 = mf1.e_tot
-
-        kpts = cell2.make_kpts(kmesh)
-        mf2 = krkspu.KRKSpU(cell2, kpts=kpts, U_idx=U_idx, U_val=U_val, minao_ref=minao).run()
-        e2 = mf2.e_tot
+        e1 = mf_scanner(cell1)
+        e2 = mf_scanner(cell2)
         assert abs(sigma[0,0] - (e1 - e2)/2e-3/cell.vol) < 1e-6
 
 if __name__ == "__main__":

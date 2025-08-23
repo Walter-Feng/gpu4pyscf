@@ -47,7 +47,6 @@ See K. Doll, Mol Phys (2010), 108, 223
 import ctypes
 import numpy as np
 import cupy as cp
-import pyscf
 from pyscf import lib
 from pyscf import gto
 from pyscf.pbc.lib.kpts_helper import is_zero
@@ -64,34 +63,6 @@ from gpu4pyscf.lib.cupy_helper import contract, asarray, sandwich_dot
 
 ALIGNED = 256
 
-if int(pyscf.__version__.split('.')[1]) <= 10: # pyscf-2.9
-    # patch PySCF Cell class, updating lattice parameters is not avail in pyscf 2.9
-    from pyscf.gto import mole
-    from pyscf.pbc.gto.cell import Cell
-    def set_geom_(cell, atoms_or_coords=None, unit=None, symmetry=None,
-                  a=None, inplace=True):
-        '''Update geometry and lattice parameters'''
-        if not inplace:
-            cell = cell.copy(deep=False)
-            cell._env = cell._env.copy()
-        if a is not None:
-            logger.info(cell, 'Set new lattice vectors')
-            logger.info(cell, '%s', a)
-            cell.a = a
-            if cell._mesh_from_build:
-                cell.mesh = None
-            if cell._rcut_from_build:
-                cell.rcut = None
-            cell._built = False
-        cell.enuc = None
-
-        if atoms_or_coords is not None:
-            cell = mole.MoleBase.set_geom_(cell, atoms_or_coords, unit, symmetry)
-        if not cell._built:
-            cell.build(False, False)
-        return cell
-    Cell.set_geom_ = set_geom_
-
 def strain_tensor_dispalcement(x, y, disp):
     E_strain = np.eye(3)
     E_strain[x,y] += disp
@@ -103,11 +74,20 @@ def _finite_diff_cells(cell, x, y, disp=1e-4, precision=None):
         cell.precision = precision
     a = cell.lattice_vectors()
     r = cell.atom_coords()
+    if not gto.mole.is_au(cell.unit):
+        a *= lib.param.BOHR
+        r *= lib.param.BOHR
     e_strain = strain_tensor_dispalcement(x, y, disp)
-    cell1 = cell.set_geom_(r.dot(e_strain.T), a=a.dot(e_strain.T), unit='AU', inplace=False)
+    cell1 = cell.set_geom_(r.dot(e_strain.T), inplace=False)
+    cell1.a = a.dot(e_strain.T)
 
     e_strain = strain_tensor_dispalcement(x, y, -disp)
-    cell2 = cell.set_geom_(r.dot(e_strain.T), a=a.dot(e_strain.T), unit='AU', inplace=False)
+    cell2 = cell.set_geom_(r.dot(e_strain.T), inplace=False)
+    cell2.a = a.dot(e_strain.T)
+
+    if cell.space_group_symmetry:
+        cell1.build(False, False)
+        cell2.build(False, False)
     return cell1, cell2
 
 def _get_coulG_strain_derivatives(cell, Gv):
@@ -205,6 +185,8 @@ def get_vxc(ks_grad, cell, dm, with_j=False, with_nuc=False):
     if not cell.cart:
         c2s = asarray(cell.cart2sph_coeff())
         dm = sandwich_dot(dm, c2s.T)
+        cell = cell.copy()
+        cell.cart = True
     nao = dm.shape[-1]
 
     grids_idx = grids.argsort(tile=8)
@@ -405,9 +387,11 @@ def _get_pp_nonloc_strain_derivatives(cell, mesh, dm_kpts, kpts=None):
                     for l, proj in enumerate(pp[5:]):
                         rl, nl, hl = proj
                         if nl > 0:
-                            p0, p1 = p1, p1+nl*(l*2+1)
+                            nf = l * 2 + 1
+                            p0, p1 = p1, p1+nl*nf
                             hl = np.asarray(hl)
-                            vppnl += np.einsum('ij,ji->', hl, rho[p0:p1,p0:p1])
+                            rho_sub = rho[p0:p1,p0:p1].reshape(nl, nf, nl, nf)
+                            vppnl += np.einsum('ij,jmim->', hl, rho_sub)
         return vppnl / (nkpts*vol)
 
     disp = max(1e-5, (cell.precision*.1)**.5)
