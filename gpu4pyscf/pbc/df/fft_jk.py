@@ -21,14 +21,18 @@ __all__ = [
     'get_j_e1_kpts', 'get_k_e1_kpts'
 ]
 
-import numpy as np
 import cupy as cp
-from pyscf import lib
-from pyscf.pbc.lib.kpts_helper import is_zero, member
+import numpy as np
 from pyscf.pbc.df.df_jk import _format_kpts_band
+from pyscf.pbc.lib.kpts_helper import is_zero, member
+
 from gpu4pyscf.lib import logger
 from gpu4pyscf.lib.cupy_helper import contract
 from gpu4pyscf.pbc import tools
+from gpu4pyscf.pbc.dft.multigrid_v2 import fft_in_place, ifft_in_place
+from pyscf import lib
+from pyscf.lib import prange
+
 
 def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None):
     '''Get the Coulomb (J) AO matrix at sampled k-points.
@@ -217,6 +221,167 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
 
     return _format_jks(vk_kpts, dm_kpts, input_band, kpts)
 
+def get_k_kpts_occri(
+    df_object,
+    dm_kpts,
+    hermi=1,
+    kpts=np.zeros((1, 3)),
+    kpts_band=None,
+    exxdiv=None,
+    p_slice=1,
+    q_slice=1,
+):
+    """Get the Coulomb (J) and exchange (K) AO matrices at sampled k-points.
+
+    Args:
+        dm_kpts : (nkpts, nao, nao) ndarray
+            Density matrix at each k-point
+        kpts : (nkpts, 3) ndarray
+
+    Kwargs:
+        hermi : int
+            Whether K matrix is hermitian
+
+            | 0 : not hermitian and not symmetric
+            | 1 : hermitian
+
+        kpts_band : (3,) ndarray or (*,3) ndarray
+            A list of arbitrary "band" k-points at which to evalute the matrix.
+
+    Returns:
+        vj : (nkpts, nao, nao) ndarray
+        vk : (nkpts, nao, nao) ndarray
+        or list of vj and vk if the input dm_kpts is a list of DMs
+    """
+    log = logger.new_logger(df_object, df_object.verbose)
+    t0 = log.init_timer()
+    cell = df_object.cell
+    mesh = df_object.mesh
+    assert cell.low_dim_ft_type != "inf_vacuum"
+    assert cell.dimension > 1
+
+    formatted_density_matrices = _format_dms(dm_kpts, kpts)
+    n_k_points = len(kpts)
+    if len(dm_kpts.shape) == 3:
+        n_channels, n_ao = dm_kpts.shape[:2]
+    else:
+        n_channels = 1
+        n_ao = dm_kpts.shape[0]
+
+    occupied_mo_coeff = dm_kpts.__dict__["occ_coeff"].reshape(
+        n_channels, n_k_points, n_ao, -1
+    )
+    overlap = df_object._overlap.reshape(n_k_points, n_ao, n_ao)
+
+    data_type = overlap.dtype
+    occupation_numbers = dm_kpts.__dict__["mo_occ"]
+    is_occupied = occupation_numbers > 0
+    occupied_occupation_numbers = occupation_numbers[is_occupied]
+    n_occupied = len(occupied_occupation_numbers)
+    mo_to_ao = cp.einsum("kpq, ikqm -> ikpm", overlap, occupied_mo_coeff)
+
+    weight = 1.0 / n_k_points * (cell.vol / df_object.n_grid_points)
+
+    vk = cp.zeros((n_channels, n_k_points, n_ao, n_ao), dtype=data_type)
+
+    for k2_index, k2 in enumerate(kpts):
+        occupied_mo_at_k2 = df_object.get_mo_values(occupied_mo_coeff[:, k2_index], k2)
+
+        t1 = log.timer_debug1("occupied_mo_at_k2", *t0)
+
+        coulomb_weighted_density_dot_ao_at_k2 = cp.zeros(
+            (n_channels, n_occupied, df_object.n_grid_points), dtype=data_type
+        )
+
+        for k1_index, k1 in enumerate(kpts):
+            if is_zero(kpts):
+                occupied_mo_at_k1 = occupied_mo_at_k2
+            else:
+                e_ikr = cp.exp(df_object.grids.coords @ cp.asarray(1j * (k1 - k2)))
+
+                occupied_mo_at_k1 = df_object.get_mo_values(
+                    occupied_mo_coeff[:, k1_index], k1
+                )
+
+            for index, ao_range in enumerate(prange(0, n_occupied, p_slice)):
+                p0, p1 = ao_range
+
+                for i in range(n_channels):
+
+                    for contracted_mo_range in prange(0, n_occupied, q_slice):
+                        q0, q1 = contracted_mo_range
+                        if is_zero(kpts):
+                            coulomb_in_mo_pair = cp.einsum(
+                                "pn, qn -> pqn",
+                                occupied_mo_at_k2[i, p0:p1],
+                                occupied_mo_at_k2[i, q0:q1],
+                            ).reshape(p1 - p0, q1 - q0, *mesh)
+                        else:
+                            coulomb_in_mo_pair = cp.einsum(
+                                "pn, qn, n -> pqn",
+                                occupied_mo_at_k1[i, p0:p1],
+                                occupied_mo_at_k2[i, q0:q1],
+                                e_ikr,
+                            ).reshape(p1 - p0, q1 - q0, *mesh)
+
+                        t1 = log.timer_debug1("mo pair", *t1)
+
+                        coulomb_in_mo_pair = fft_in_place(coulomb_in_mo_pair)
+
+                        coulomb_in_mo_pair *= (
+                            df_object.coulomb_kernel_on_g_mesh.reshape(*mesh)
+                        )
+
+                        coulomb_in_mo_pair = ifft_in_place(coulomb_in_mo_pair).reshape(
+                            p1 - p0, q1 - q0, -1
+                        )
+
+                        if is_zero(kpts):
+                            coulomb_in_mo_pair = coulomb_in_mo_pair.real
+
+                        coulomb_weighted_density_dot_ao_at_k2[i, p0:p1] += cp.einsum(
+                            "pqn, qn , q -> pn",
+                            coulomb_in_mo_pair,
+                            occupied_mo_at_k2[i, q0:q1],
+                            occupied_occupation_numbers[q0:q1],
+                        )
+                        if not is_zero(kpts):
+                            coulomb_weighted_density_dot_ao_at_k2[
+                                i, p0:p1
+                            ] *= e_ikr.conj()
+
+
+            fock_slice_in_occupied = df_object.contract_mo_values_to_fock(
+                coulomb_weighted_density_dot_ao_at_k2, k1
+            )
+
+            fock_slice_in_occupied *= weight
+
+            fock_slice = mo_to_ao[:, k1_index] @ fock_slice_in_occupied
+            for i in range(n_channels):
+                vk[i, k1_index] += (
+                    fock_slice[i]
+                    + fock_slice[i].conj().T
+                    - fock_slice[i]
+                    @ occupied_mo_coeff[i, k1_index]
+                    @ mo_to_ao[i, k1_index].conj().T
+                )
+            t1 = log.timer_debug1("fock_slice", *t1)
+
+    if exxdiv == "ewald":
+        for i in range(n_channels):
+            vk[i] += df_object.madelung * cp.einsum(
+                "kpq, kqr, krs -> kps",
+                df_object.overlap,
+                formatted_density_matrices[i],
+                df_object.overlap,
+            )
+
+    log.timer("get_k_kpts", *t0)
+    return _format_jks(vk, dm_kpts, None, kpts)
+
+
+
 def get_jk(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None,
            with_j=True, with_k=True, exxdiv=None):
     '''Get the Coulomb (J) and exchange (K) AO matrices for the given density matrix.
@@ -370,6 +535,7 @@ def get_k_e1_kpts(mydf, dm_kpts, kpts=np.zeros((1,3)), exxdiv=None):
 
 def _ewald_exxdiv_for_G0(cell, kpts, dms, vk, kpts_band=None):
     from pyscf.pbc.tools.pbc import madelung
+
     from gpu4pyscf.pbc.gto.int1e import int1e_ovlp
     s = int1e_ovlp(cell, kpts=kpts)
     m = madelung(cell, kpts)
