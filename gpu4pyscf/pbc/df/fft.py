@@ -303,6 +303,50 @@ class FFTDF(lib.StreamObject):
     to_gpu = utils.to_gpu
     device = utils.device
 
+    def get_mo_values(self, mo_coeff, kpt):
+        n_grid_points = len(self.grids.coords)
+
+        # Not entirely sure if the cell and coords
+        # are the members of this object
+
+        ao_values_slice = self._numint.eval_ao(
+            self.cell,
+            self.grids.coords,
+            kpt.reshape(1, 3),
+        )[0]
+
+        n_set, _, n_occupied = mo_coeff.shape
+
+
+        #(TODO) Originally the code used mpi module, so there was
+        # some gathering operations that are removed.
+        # While those are removed, the index order here 
+        # may be prone to some bugs and need to be checked.
+        return cp.einsum(
+            "ipm, gp -> gmi", mo_coeff, ao_values_slice
+        ).T
+
+
+    def contract_mo_values_to_fock(self, mo_values, kpt):
+        n_grid_points = len(self.grids.coords)
+
+        n_set = mo_values.shape[0]
+
+        ao_values_slice = self._numint.eval_ao(
+            self.cell,
+            self.grids.coords,
+            kpt.reshape(1, 3),
+        )[0]
+
+        fock = cp.asarray(
+            [
+                mo_values[i] @ ao_values_slice
+                for i in range(n_set)
+            ]
+        )
+
+        return fock
+
     # customize to_cpu because attributes grids and kpts are not compatible with pyscf-2.10
     def to_cpu(self):
         from pyscf.pbc.df.fft import FFTDF
