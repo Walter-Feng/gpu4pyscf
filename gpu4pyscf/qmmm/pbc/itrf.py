@@ -1,5 +1,3 @@
-# Copyright 2021-2024 The PySCF Developers. All Rights Reserved.
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,25 +12,24 @@
 #
 # Author: Chenghan Li <lch004218@gmail.com>
 
-import numpy as np
-import pyscf
-from pyscf import lib
-from pyscf import gto
-from pyscf import df
-from pyscf import grad
-from pyscf.lib import logger
-
 import cupy as cp
+import numpy as np
+
+import pyscf
 from gpu4pyscf import scf
-from gpu4pyscf.qmmm.pbc import mm_mole
-from gpu4pyscf.lib import cupy_helper
-from gpu4pyscf.qmmm.pbc.tools import get_multipole_tensors_pp, get_multipole_tensors_pg
 from gpu4pyscf.gto.int3c1e import int1e_grids
 from gpu4pyscf.gto.int3c1e_ip import int1e_grids_ip1, int1e_grids_ip2
+from gpu4pyscf.lib import cupy_helper
+from gpu4pyscf.qmmm.pbc import mm_mole
+from gpu4pyscf.qmmm.pbc.tools import (get_multipole_tensors_pg,
+                                      get_multipole_tensors_pp)
+from pyscf import df, grad, gto, lib
+from pyscf.lib import logger
 
 contract = cupy_helper.contract
 
-from cupyx.scipy.special import erfc, erf
+from cupyx.scipy.special import erf, erfc
+
 
 def add_mm_charges(scf_method, atoms_or_coords, a, charges, radii=None,
         rcut_ewald=None, rcut_hcore=None, unit=None):
@@ -398,6 +395,7 @@ class QMMMSCF(QMMM):
         else:
             cput0 = (logger.process_clock(), logger.perf_counter())
             from scipy.special import erf
+
             # gas phase nuc energy
             nuc = self.mol.energy_nuc()    # qm_nuc - qm_nuc
 
@@ -434,7 +432,8 @@ class QMMMSCF(QMMM):
         return e_tot
 
     def nuc_grad_method(self):
-        scf_grad = super().nuc_grad_method()
+        # scf_grad = super().nuc_grad_method()
+        scf_grad = super().Gradients()
         return qmmm_grad_for_scf(scf_grad)
 
     Gradients = nuc_grad_method
@@ -538,7 +537,8 @@ def qmmm_grad_for_scf(scf_grad):
 
     scf_grad.de_ewald_mm = None
     scf_grad.de_nuc_mm = None
-    return scf_grad.view(lib.make_class((QMMMGrad, scf_grad.__class__)))
+    return QMMMGrad(scf_grad)
+    # return scf_grad.view(lib.make_class((QMMMGrad, scf_grad.__class__)))
 
 class QMMMGrad:
     __name_mixin__ = 'QMMM'
@@ -548,7 +548,9 @@ class QMMMGrad:
 
     def __init__(self, scf_grad):
         self.__dict__.update(scf_grad.__dict__)
-
+        self.scf_grad = scf_grad
+        print(self.base)
+   
     def dump_flags(self, verbose=None):
         super().dump_flags(verbose)
         logger.info(self, '** Add background charges for %s **', self.__class__.__name__)
