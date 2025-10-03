@@ -537,8 +537,8 @@ def qmmm_grad_for_scf(scf_grad):
 
     scf_grad.de_ewald_mm = None
     scf_grad.de_nuc_mm = None
-    return QMMMGrad(scf_grad)
-    # return scf_grad.view(lib.make_class((QMMMGrad, scf_grad.__class__)))
+    
+    return scf_grad.view(lib.make_class((QMMMGrad, scf_grad.__class__)))
 
 class QMMMGrad:
     __name_mixin__ = 'QMMM'
@@ -601,7 +601,8 @@ class QMMMGrad:
         dEds = cp.zeros((mol.nao, mol.nao))
         dEdsr = cp.zeros((3, mol.nao, mol.nao))
         dEdsrr = cp.zeros((3, 3, mol.nao, mol.nao))
-        s1 = cp.asarray(self.get_ovlp(mol)) # = -mol.intor('int1e_ipovlp')
+        # s1 = cp.asarray(self.get_ovlp(mol)) # = -mol.intor('int1e_ipovlp')
+        s1 = cp.asarray(-mol.intor('int1e_ipovlp'))
         s1r = list()
         s1rr = list()
         bas_atom = mol._bas[:,gto.ATOM_OF]
