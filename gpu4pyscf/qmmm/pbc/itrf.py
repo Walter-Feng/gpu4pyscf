@@ -150,7 +150,16 @@ class QMMMSCF(QMMM):
         # hess = d^2 E / dQ_i dQ_j, d^2 E / dQ_i dD_ja, d^2 E / dDia dDjb, d^2 E/ dQ_i dO_jab
         if qm_ewald_hess is None:
             qm_ewald_hess = self.mm_mol.get_ewald_pot(mol.atom_coords())
+
+            if hasattr(mol, "lattice_vectors"):
+                fake_images = mol.get_lattice_Ls()
+                qm_ewald_hess_from_fake_images = self.mm_mol.get_ewald_potential(mol.atom_coords(), images = fake_images)
+                n_terms = len(qm_ewald_hess)
+                assert len(qm_ewald_hess_from_fake_images) == n_terms
+                qm_ewald_hess = tuple(map(lambda x,y: x-y, qm_ewald_hess, qm_ewald_hess_from_fake_images))
+
             self.qm_ewald_hess = qm_ewald_hess
+
         dm = cp.asarray(dm)
         charges = self.get_qm_charges(dm)
         dips = self.get_qm_dipoles(dm)
