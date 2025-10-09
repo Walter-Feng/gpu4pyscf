@@ -133,7 +133,7 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         ew_eta = 1 / ew_cut * numpy.sqrt(lambertw(1/e*numpy.sqrt(Q/2/self.vol)).real)
         return ew_eta, ew_cut
 
-    def get_ewald_potential_with_charges(self, coords1, coords2, charges2, zetas2):
+    def get_ewald_potential_with_charges(self, coords1, coords2, charges2, zetas2, remove_neighboring_charges = True):
         coords1 = cp.asarray(coords1)
         coords2 = cp.asarray(coords2)
 
@@ -170,18 +170,19 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
             rmax_qm = max(cp.linalg.norm(coords1 - cp.mean(coords1, axis=0), axis=-1))
 
             # substract the real-space Coulomb within rcut_hcore
-            mask = dist2 <= self.rcut_hcore**2
-            Tij, Tija, Tijab = get_multipole_tensors_pp(R[:,mask], [0,1,2], r[:,mask])
-            charges = all_charges2[mask]
-            # ew0 = -d^2 E / dQi dqj qj
-            # ew1 = -d^2 E / dDia dqj qj
-            # ew2 = -d^2 E / dOiab dqj qj
-            # qm pc - mm pc
-            ewovrl0[i0:i1] += -contract('ij,j->i', Tij, charges)
-            # qm dip - mm pc
-            ewovrl1[i0:i1] += -contract('j,ija->ia', charges, Tija)
-            # qm quad - mm pc
-            ewovrl2[i0:i1] += -contract('j,ijab->iab', charges, Tijab) / 3
+            if remove_neighboring_charges:
+                mask = dist2 <= self.rcut_hcore**2
+                Tij, Tija, Tijab = get_multipole_tensors_pp(R[:,mask], [0,1,2], r[:,mask])
+                charges = all_charges2[mask]
+                # ew0 = -d^2 E / dQi dqj qj
+                # ew1 = -d^2 E / dDia dqj qj
+                # ew2 = -d^2 E / dOiab dqj qj
+                # qm pc - mm pc
+                ewovrl0[i0:i1] += -contract('ij,j->i', Tij, charges)
+                # qm dip - mm pc
+                ewovrl1[i0:i1] += -contract('j,ija->ia', charges, Tija)
+                # qm quad - mm pc
+                ewovrl2[i0:i1] += -contract('j,ijab->iab', charges, Tijab) / 3
             zetas = cp.asarray(zetas2)
             mask = dist2 > self.rcut_hcore**2
             min_expnt = cp.min(zetas)

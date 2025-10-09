@@ -172,6 +172,12 @@ class QMMMSCF(QMMM):
         ewpot2  = contract('ijxy,j->ixy', qm_ewald_hess[3], charges)
         return ewpot0, ewpot1, ewpot2
 
+    def get_mm_potential_over_grid(self, grid):
+        return self.mm_mol.get_ewald_potential_with_charges(
+            grid.coords, self.mm_mol.atom_coords(), 
+            self.mm_mol.atom_charges(), self.mm_mol.get_zetas(),
+            remove_neighboring_charges = False)
+
     def get_hcore(self, mol=None):
         cput0 = (logger.process_clock(), logger.perf_counter())
         mm_mol = self.mm_mol
