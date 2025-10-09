@@ -142,14 +142,14 @@ class QMMMSCF(QMMM):
         return self
 
     def get_mm_ewald_pot(self, mol, mm_mol):
-        return self.mm_mol.get_ewald_pot(
+        return self.mm_mol.get_ewald_potential_with_charges(
             mol.atom_coords(),
             mm_mol.atom_coords(), mm_mol.atom_charges(), mm_mol.get_zetas())
 
     def get_qm_ewald_pot(self, mol, dm, qm_ewald_hess=None):
         # hess = d^2 E / dQ_i dQ_j, d^2 E / dQ_i dD_ja, d^2 E / dDia dDjb, d^2 E/ dQ_i dO_jab
         if qm_ewald_hess is None:
-            qm_ewald_hess = self.mm_mol.get_ewald_pot(mol.atom_coords())
+            qm_ewald_hess = self.mm_mol.get_ewald_potential(mol.atom_coords())
 
             if hasattr(mol, "lattice_vectors"):
                 fake_images = mol.get_lattice_Ls()
