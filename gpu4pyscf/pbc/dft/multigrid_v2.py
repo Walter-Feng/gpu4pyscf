@@ -36,7 +36,7 @@ from gpu4pyscf.pbc.tools import pbc as pbc_tools
 import gpu4pyscf.pbc.dft.multigrid as multigrid_v1
 from gpu4pyscf.lib.cupy_helper import contract, tag_array, load_library
 
-__all__ = ['MultiGridNumInt']
+__all__ = ["MultiGridNumInt"]
 
 libgpbc = load_library("libmgrid_v2")
 libgpbc.evaluate_density_driver.restype = ctypes.c_int
@@ -76,19 +76,23 @@ def ifft_in_place(x):
 def unique_with_sort(x):
     # This function does the same thing as cp.unique(x, return_inverse=True).
     # It's not super optimized, but for whatever reason, cp.unique is very slow, so this one is better.
-    assert type(x) is cp.ndarray and (x.dtype == cp.int32 or x.dtype == cp.int64) and x.ndim == 1
+    assert (
+        type(x) is cp.ndarray
+        and (x.dtype == cp.int32 or x.dtype == cp.int64)
+        and x.ndim == 1
+    )
     n = x.shape[0]
     if n <= 1:
         return x, cp.zeros(n)
 
     sort_index = cp.argsort(x)
-    inverse_sort = cp.empty(n, dtype = cp.int64)
-    inverse_sort[sort_index] = cp.arange(0, n, dtype = cp.int64)
+    inverse_sort = cp.empty(n, dtype=cp.int64)
+    inverse_sort[sort_index] = cp.arange(0, n, dtype=cp.int64)
     x = x[sort_index]
 
     mask = cp.empty(n, dtype=cp.bool_)
     mask[0] = True
-    mask[1:] = (x[1:] != x[:-1])
+    mask[1:] = x[1:] != x[:-1]
 
     x = x[mask]
     inverse_unique = cp.cumsum(mask, dtype=cp.int64) - 1
@@ -106,24 +110,29 @@ def image_pair_to_difference(
     translation_vectors = cp.asarray(
         cp.linalg.solve(lattice_vectors.T, vectors_to_neighboring_images.T).T,
     )
-    translation_vectors = cp.asarray(cp.round(translation_vectors), dtype = cp.int32)
+    translation_vectors = cp.asarray(cp.round(translation_vectors), dtype=cp.int32)
     image_difference_full = (
         # k_j - k_i corresponding to <i|j>
-        translation_vectors[None,:,:] - translation_vectors[:,None,:]
+        translation_vectors[None, :, :]
+        - translation_vectors[:, None, :]
     ).reshape(-1, 3)
 
     max_offset = cp.max(cp.abs(image_difference_full)) + 1
-    assert (max_offset * 2)**3 < np.iinfo(np.int32).max
+    assert (max_offset * 2) ** 3 < np.iinfo(np.int32).max
     image_difference_3in1 = image_difference_full + max_offset
-    image_difference_3in1 = image_difference_3in1[:, 0] * (max_offset * 2)**2 \
-                          + image_difference_3in1[:, 1] * (max_offset * 2) \
-                          + image_difference_3in1[:, 2]
+    image_difference_3in1 = (
+        image_difference_3in1[:, 0] * (max_offset * 2) ** 2
+        + image_difference_3in1[:, 1] * (max_offset * 2)
+        + image_difference_3in1[:, 2]
+    )
 
     image_difference_3in1, inverse = unique_with_sort(image_difference_3in1)
 
-    translation_vectors = cp.empty([image_difference_3in1.shape[0], 3], dtype = cp.int32)
-    translation_vectors[:, 0] = image_difference_3in1 // (max_offset * 2)**2
-    translation_vectors[:, 1] = (image_difference_3in1 % (max_offset * 2)**2) // (max_offset * 2)
+    translation_vectors = cp.empty([image_difference_3in1.shape[0], 3], dtype=cp.int32)
+    translation_vectors[:, 0] = image_difference_3in1 // (max_offset * 2) ** 2
+    translation_vectors[:, 1] = (image_difference_3in1 % (max_offset * 2) ** 2) // (
+        max_offset * 2
+    )
     translation_vectors[:, 2] = image_difference_3in1 % (max_offset * 2)
     translation_vectors -= max_offset
 
@@ -137,6 +146,7 @@ def image_pair_to_difference(
     # Given our pair data structure, the difference_images here should be interpretted as R2 - R1,
     # where R1 is associated with the first orbital in a pair, and R2 associated to the second.
     return cp.asarray(difference_images), cp.asarray(inverse, dtype=cp.int32)
+
 
 def image_phase_for_kpts(cell, neighboring_images, kpts=None):
     n_images = len(neighboring_images)
@@ -153,6 +163,7 @@ def image_phase_for_kpts(cell, neighboring_images, kpts=None):
             1j * cp.asarray(kpts.reshape(-1, 3)).dot(difference_images.T)
         )
     return phase_diff_among_images, image_pair_difference_index
+
 
 def count_non_trivial_pairs(
     i_angular,
@@ -187,7 +198,9 @@ def count_non_trivial_pairs(
         ctypes.c_double(threshold_in_log),
     )
     if err != 0:
-        raise RuntimeError(f'count_non_trivial_pairs for li={i_angular} lj={j_angular} failed')
+        raise RuntimeError(
+            f"count_non_trivial_pairs for li={i_angular} lj={j_angular} failed"
+        )
     return int(n_pairs[0])
 
 
@@ -243,7 +256,9 @@ def screen_gaussian_pairs(
         ctypes.c_double(threshold_in_log),
     )
     if err != 0:
-        raise RuntimeError(f'screen_gaussian_pairs for li={i_angular} lj={j_angular} failed')
+        raise RuntimeError(
+            f"screen_gaussian_pairs for li={i_angular} lj={j_angular} failed"
+        )
     return (
         screened_shell_pairs,
         image_indices,
@@ -257,20 +272,26 @@ def assign_pairs_to_blocks(
     pairs_to_blocks_end,
     n_blocks_abc,
     n_indices,
+    i_angular,
+    j_angular,
     non_trivial_pairs,
     i_shells,
     j_shells,
+    shell_to_ao_indices,
     image_indices,
     vectors_to_neighboring_images,
     mesh,
     atm,
     bas,
     env,
-    has_warned_instability
+    has_warned_instability,
+    is_non_orthogonal,
+    threshold,
+    derivative_order,
 ):
     n_blocks = np.prod(n_blocks_abc)
     n_pairs_on_blocks = cp.zeros(n_blocks + 1, dtype=cp.int32)
-    n_unstable_pairs_on_blocks = cp.zeros(n_blocks + 1, dtype = cp.int32)
+    n_unstable_pairs_on_blocks = cp.zeros(n_blocks + 1, dtype=cp.int32)
     err = libgpbc.count_pairs_on_blocks(
         cast_to_pointer(n_pairs_on_blocks),
         cast_to_pointer(n_unstable_pairs_on_blocks),
@@ -288,16 +309,17 @@ def assign_pairs_to_blocks(
         cast_to_pointer(mesh),
         cast_to_pointer(atm),
         cast_to_pointer(bas),
-        cast_to_pointer(env)
+        cast_to_pointer(env),
     )
-    has_unstable_pairs = (n_unstable_pairs_on_blocks[-1] > 0)
+    has_unstable_pairs = n_unstable_pairs_on_blocks[-1] > 0
     if not has_warned_instability and has_unstable_pairs:
-        warnings.warn("Numerical instability may occur due to presence of core electrons or insufficient ke_cutoff.")
+        warnings.warn(
+            "Numerical instability may occur due to presence of core electrons or insufficient ke_cutoff."
+        )
         has_warned_instability = True
 
-
     if err != 0:
-        raise RuntimeError('count_pairs_on_blocks failed')
+        raise RuntimeError("count_pairs_on_blocks failed")
 
     n_contributing_blocks = int(n_pairs_on_blocks[-1])
     n_pairs_on_blocks = n_pairs_on_blocks[:-1]
@@ -325,14 +347,45 @@ def assign_pairs_to_blocks(
         cast_to_pointer(mesh),
         cast_to_pointer(atm),
         cast_to_pointer(bas),
-        cast_to_pointer(env)
+        cast_to_pointer(env),
     )
+
+    libgpbc.tailor_gaussian_pairs(
+        cast_to_pointer(pairs_on_blocks),
+        cast_to_pointer(n_pairs_on_blocks),
+        ctypes.c_int(i_angular),
+        ctypes.c_int(j_angular),
+        cast_to_pointer(non_trivial_pairs),
+        cast_to_pointer(i_shells),
+        cast_to_pointer(j_shells),
+        ctypes.c_int(len(j_shells)),
+        cast_to_pointer(shell_to_ao_indices),
+        cast_to_pointer(accumulated_n_pairs_per_block),
+        cast_to_pointer(sorted_block_index),
+        ctypes.c_int(n_contributing_blocks),
+        cast_to_pointer(image_indices),
+        cast_to_pointer(vectors_to_neighboring_images),
+        ctypes.c_int(len(vectors_to_neighboring_images)),
+        cast_to_pointer(mesh),
+        cast_to_pointer(atm),
+        cast_to_pointer(bas),
+        cast_to_pointer(env),
+        ctypes.c_int(is_non_orthogonal),
+        ctypes.c_double(threshold),
+        ctypes.c_int(derivative_order),
+    )
+
+    pairs_on_blocks = pairs_on_blocks[pairs_on_blocks >= 0]
+    sorted_block_index = cp.asarray(cp.argsort(-n_pairs_on_blocks), dtype=cp.int32)
+    n_contributing_blocks = cp.count_nonzero(n_pairs_on_blocks) 
+    accumulated_n_pairs_per_block[1:] = cp.cumsum(n_pairs_on_blocks, dtype=cp.int32)
+    sorted_block_index = sorted_block_index[:n_contributing_blocks]
 
     return (
         pairs_on_blocks,
         accumulated_n_pairs_per_block,
         sorted_block_index,
-        has_warned_instability
+        has_warned_instability,
     )
 
 
@@ -355,7 +408,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     libgpbc.update_lattice_vectors(
         lattice_vectors.ctypes,
         reciprocal_lattice_vectors.ctypes,
-        reciprocal_norms.ctypes
+        reciprocal_norms.ctypes,
     )
 
     tasks = getattr(mydf, "tasks", None)
@@ -366,6 +419,13 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     t0 = log.timer("task generation", *t0)
     t1 = t0
     pairs = []
+
+    derivative_order = 0
+    if xc_type == "GGA":
+        derivative_order = 1
+    if xc_type == "mGGA":
+        raise NotImplementedError("mGGA is not supported yet in multigrid_v2.")
+
     for grids_localized, grids_diffused in tasks:
         subcell_in_localized_region = grids_localized.cell
         # the original grids_localized.mesh has dtype=np.int64, which can cause
@@ -374,14 +434,14 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
 
         fft_grid = list(
             map(
-                lambda n_mesh_points: cp.round(cp.fft.fftfreq(
-                    n_mesh_points, 1.0 / n_mesh_points
-                )).astype(cp.int32),
+                lambda n_mesh_points: cp.round(
+                    cp.fft.fftfreq(n_mesh_points, 1.0 / n_mesh_points)
+                ).astype(cp.int32),
                 mesh,
             )
         )
 
-        dxyz_dabc = lattice_vectors / mesh[:,None]
+        dxyz_dabc = lattice_vectors / mesh[:, None]
         libgpbc.update_dxyz_dabc(dxyz_dabc.ctypes)
         n_blocks_abc = np.asarray(np.ceil(mesh / block_size), dtype=cp.int32)
         equivalent_cell_in_localized, coeff_in_localized = (
@@ -421,8 +481,8 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
         concatenated_coeff = cp.asarray(concatenated_coeff)
 
         n_primitive_gtos_in_two_regions = multigrid._pgto_shells(grouped_cell)
-        rad = vol**(-1./3) * cell.rcut + 1
-        surface = 4*np.pi * rad**2
+        rad = vol ** (-1.0 / 3) * cell.rcut + 1
+        surface = 4 * np.pi * rad**2
         lattice_sum_factor = surface
         precision = cell.precision / lattice_sum_factor
         threshold_in_log = np.log(precision)
@@ -497,27 +557,33 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
                     gaussian_pair_indices,
                     accumulated_counts,
                     sorted_contributing_blocks,
-                    has_warned_instability
+                    has_warned_instability,
                 ) = assign_pairs_to_blocks(
                     pairs_to_blocks_begin,
                     pairs_to_blocks_end,
                     n_blocks_abc,
                     n_indices,
+                    i_angular,
+                    j_angular,
                     screened_shell_pairs,
                     i_shells,
                     j_shells,
+                    shell_to_ao_indices,
                     image_indices,
                     vectors_to_neighboring_images,
                     mesh,
                     atm,
                     bas,
                     env,
-                    has_warned_instability
+                    has_warned_instability,
+                    is_non_orthogonal,
+                    cell.precision,
+                    derivative_order,
                 )
                 t1 = log.timer_debug2(
                     "assigning pairs to blocks in angular pair"
                     + str((i_angular, j_angular)),
-                    *t1
+                    *t1,
                 )
                 per_angular_pairs.append(
                     {
@@ -559,7 +625,9 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
     return mydf
 
 
-def evaluate_density_wrapper(pairs_info, dm_slice, img_phase, ignore_imag=True, with_tau=False):
+def evaluate_density_wrapper(
+    pairs_info, dm_slice, img_phase, ignore_imag=True, with_tau=False
+):
     if with_tau:
         c_driver = libgpbc.evaluate_density_tau_driver
     else:
@@ -600,9 +668,19 @@ def evaluate_density_wrapper(pairs_info, dm_slice, img_phase, ignore_imag=True, 
     assert density_matrix_with_translation_real_part.size < np.iinfo(np.int32).max
 
     if with_tau:
-        density = cp.zeros((n_channels, 2, ) + tuple(pairs_info["mesh"]), dtype=density_matrix_with_translation_real_part.dtype)
+        density = cp.zeros(
+            (
+                n_channels,
+                2,
+            )
+            + tuple(pairs_info["mesh"]),
+            dtype=density_matrix_with_translation_real_part.dtype,
+        )
     else:
-        density = cp.zeros((n_channels,) + tuple(pairs_info["mesh"]), dtype=density_matrix_with_translation_real_part.dtype)
+        density = cp.zeros(
+            (n_channels,) + tuple(pairs_info["mesh"]),
+            dtype=density_matrix_with_translation_real_part.dtype,
+        )
 
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
@@ -637,11 +715,14 @@ def evaluate_density_wrapper(pairs_info, dm_slice, img_phase, ignore_imag=True, 
             use_float_precision,
         )
         if err != 0:
-            raise RuntimeError(f'evaluate_density_driver for li={i_angular} lj={j_angular} failed')
+            raise RuntimeError(
+                f"evaluate_density_driver for li={i_angular} lj={j_angular} failed"
+            )
 
     return density
 
-def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type='LDA'):
+
+def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
     dm_kpts = cp.asarray(dm_kpts, order="C")
     dms = _format_dms(dm_kpts, kpts)
     n_channels, n_k_points = dms.shape[:2]
@@ -708,7 +789,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type='LDA'):
         img_phase = image_phase_for_kpts(cell, pairs["neighboring_images"], kpts)
         density = (
             evaluate_density_wrapper(
-                pairs, coeff_sandwiched_density_matrix, img_phase, with_tau = with_tau
+                pairs, coeff_sandwiched_density_matrix, img_phase, with_tau=with_tau
             )
             * weight_per_grid_point
         )
@@ -740,7 +821,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type='LDA'):
             ] += tau
 
     density_on_g_mesh = density_on_g_mesh.reshape([n_channels, density_slices, -1])
-    if xc_type != 'LDA':
+    if xc_type != "LDA":
         density_on_g_mesh[:, 1:4] = pbc_tools._get_Gv(mydf.cell, mydf.mesh).T
         density_on_g_mesh[:, 1:4] *= density_on_g_mesh[:, :1] * 1j
     return density_on_g_mesh
@@ -748,11 +829,13 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type='LDA'):
 
 def evaluate_xc_wrapper(pairs_info, xc_weights, img_phase, with_tau=False):
     if with_tau:
-        assert xc_weights.ndim == 3+2 and xc_weights.shape[1] == 2
+        assert xc_weights.ndim == 3 + 2 and xc_weights.shape[1] == 2
         n_channels = xc_weights.shape[0]
         # density_slices = 2
     else:
-        assert (xc_weights.ndim == 3+2 and xc_weights.shape[1] == 1) or (xc_weights.ndim == 3+1)
+        assert (xc_weights.ndim == 3 + 2 and xc_weights.shape[1] == 1) or (
+            xc_weights.ndim == 3 + 1
+        )
         n_channels = xc_weights.shape[0]
         # density_slices = 1
 
@@ -814,12 +897,12 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, img_phase, with_tau=False):
         )
         fock += fock_slice
         if err != 0:
-            raise RuntimeError(f'evaluate_xc_driver for li={i_angular} lj={j_angular} failed')
+            raise RuntimeError(
+                f"evaluate_xc_driver for li={i_angular} lj={j_angular} failed"
+            )
 
     if not (n_k_points == 1 and n_difference_images == 1):
-        return cp.einsum(
-            "kt, ntij -> nkij", phase_diff_among_images, fock
-        )
+        return cp.einsum("kt, ntij -> nkij", phase_diff_among_images, fock)
     else:
         return fock
 
@@ -888,7 +971,9 @@ def convert_xc_on_g_mesh_to_fock(
         n_ao_in_localized = len(pairs["ao_indices_in_localized"])
         libgpbc.update_dxyz_dabc(pairs["dxyz_dabc"].ctypes)
         img_phase = image_phase_for_kpts(cell, pairs["neighboring_images"], kpts)
-        fock_slice = evaluate_xc_wrapper(pairs, interpolated_xc, img_phase, with_tau=with_tau)
+        fock_slice = evaluate_xc_wrapper(
+            pairs, interpolated_xc, img_phase, with_tau=with_tau
+        )
         fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_localized"])
         fock_slice = cp.einsum("nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"])
 
@@ -929,14 +1014,22 @@ def convert_xc_on_g_mesh_to_fock(
 
 
 def evaluate_xc_gradient_wrapper(
-    gradient, pairs_info, xc_weights, dm_slice, img_phase, ignore_imag=True, with_tau=False
+    gradient,
+    pairs_info,
+    xc_weights,
+    dm_slice,
+    img_phase,
+    ignore_imag=True,
+    with_tau=False,
 ):
     if with_tau:
-        assert xc_weights.ndim == 3+2 and xc_weights.shape[1] == 2
+        assert xc_weights.ndim == 3 + 2 and xc_weights.shape[1] == 2
         n_channels = xc_weights.shape[0]
         # density_slices = 2
     else:
-        assert (xc_weights.ndim == 3+2 and xc_weights.shape[1] == 1) or (xc_weights.ndim == 3+1)
+        assert (xc_weights.ndim == 3 + 2 and xc_weights.shape[1] == 1) or (
+            xc_weights.ndim == 3 + 1
+        )
         n_channels = xc_weights.shape[0]
         # density_slices = 1
 
@@ -1006,7 +1099,9 @@ def evaluate_xc_gradient_wrapper(
             use_float_precision,
         )
         if err != 0:
-            raise RuntimeError(f'evaluate_xc_gradient_driver for li={i_angular} lj={j_angular} failed')
+            raise RuntimeError(
+                f"evaluate_xc_gradient_driver for li={i_angular} lj={j_angular} failed"
+            )
 
 
 def convert_xc_on_g_mesh_to_fock_gradient(
@@ -1088,7 +1183,8 @@ def convert_xc_on_g_mesh_to_fock_gradient(
 
     return gradient
 
-#FIXME: merge to multigrid_v1.get_pp
+
+# FIXME: merge to multigrid_v1.get_pp
 def get_nuc(ni, kpts=None):
     if ni.sorted_gaussian_pairs is None:
         ni.build()
@@ -1102,7 +1198,8 @@ def get_nuc(ni, kpts=None):
         vne = vne[0]
     return vne
 
-#FIXME: merge to multigrid_v1.get_pp
+
+# FIXME: merge to multigrid_v1.get_pp
 def get_pp(ni, kpts=None):
     """Get the periodic pseudopotential nuc-el AO matrix, with G=0 removed."""
     if ni.sorted_gaussian_pairs is None:
@@ -1132,8 +1229,9 @@ def get_pp(ni, kpts=None):
     log.timer("get_pp", *t0)
     return vpp
 
+
 def get_j_kpts(ni, dm_kpts, hermi=1, kpts=None, kpts_band=None):
-    '''Get the Coulomb (J) AO matrix at sampled k-points.
+    """Get the Coulomb (J) AO matrix at sampled k-points.
 
     Args:
         dm_kpts : (nkpts, nao, nao) ndarray or a list of (nkpts,nao,nao) ndarray
@@ -1149,7 +1247,7 @@ def get_j_kpts(ni, dm_kpts, hermi=1, kpts=None, kpts_band=None):
     Returns:
         vj : (nkpts, nao, nao) ndarray
         or list of vj if the input dm_kpts is a list of DMs
-    '''
+    """
     if kpts is None:
         kpts = np.zeros((1, 3))
     cell = ni.cell
@@ -1165,9 +1263,7 @@ def get_j_kpts(ni, dm_kpts, hermi=1, kpts=None, kpts_band=None):
     Gv = pbc_tools._get_Gv(cell, mesh)
     coulomb_kernel_on_g_mesh = pbc_tools.get_coulG(cell, Gv=Gv)
 
-    coulomb_on_g_mesh = cp.einsum(
-        "ng, g -> g", density[:, 0], coulomb_kernel_on_g_mesh
-    )
+    coulomb_on_g_mesh = cp.einsum("ng, g -> g", density[:, 0], coulomb_kernel_on_g_mesh)
     weight = cell.vol / ngrids
 
     density = density.reshape(-1, *mesh)
@@ -1176,16 +1272,28 @@ def get_j_kpts(ni, dm_kpts, hermi=1, kpts=None, kpts_band=None):
     density = ifft_in_place(density).real.reshape(nset, -1, ngrids)
     density /= weight
 
-    #if kpts_band is not None:
+    # if kpts_band is not None:
     #    ni = ni.copy().reset().build()
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     xc_for_fock = convert_xc_on_g_mesh_to_fock(ni, coulomb_on_g_mesh, hermi, kpts_band)
     t0 = log.timer("vj", *t0)
     return _format_jks(xc_for_fock, dm_kpts, input_band, kpts)
 
-def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
-           kpts=None, kpts_band=None, with_j=False, verbose=None):
-    '''Compute the XC energy and RKS XC matrix at sampled k-points.
+
+def nr_rks(
+    ni,
+    cell,
+    grids,
+    xc_code,
+    dm_kpts,
+    relativity=0,
+    hermi=1,
+    kpts=None,
+    kpts_band=None,
+    with_j=False,
+    verbose=None,
+):
+    """Compute the XC energy and RKS XC matrix at sampled k-points.
     multigrid version of function pbc.dft.numint.nr_rks.
 
     Args:
@@ -1204,7 +1312,7 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
         nelec : number of electrons obtained from the numerical integration
         veff : (nkpts, nao, nao) ndarray
             or list of veff if the input dm_kpts is a list of DMs
-    '''
+    """
     cell = ni.cell
     log = logger.new_logger(cell, verbose)
     t0 = log.init_timer()
@@ -1239,12 +1347,12 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
     density /= weight
 
     # eval_xc_eff supports float64 only
-    density = cp.asarray(density, dtype=np.float64, order='C')
+    density = cp.asarray(density, dtype=np.float64, order="C")
     if xc_type == "LDA":
         xc_for_energy, xc_for_fock = ni.eval_xc_eff(
             xc_code, density[0], deriv=1, xctype=xc_type
         )[:2]
-    elif xc_type == 'GGA' or xc_type == 'MGGA':
+    elif xc_type == "GGA" or xc_type == "MGGA":
         xc_for_energy, xc_for_fock = ni.eval_xc_eff(
             xc_code, density, deriv=1, xctype=xc_type
         )[:2]
@@ -1270,10 +1378,13 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
         xc_for_fock = xc_for_fock.reshape((-1, ngrids))
     elif xc_type == "MGGA":
         xc_for_fock[0] -= contract("gp, pg -> p", xc_for_fock[1:4], Gv) * 1j
-        xc_for_fock = cp.concatenate([
-            xc_for_fock[0].reshape((-1, ngrids)),
-            xc_for_fock[4].reshape((-1, ngrids)),
-        ], axis = 0)
+        xc_for_fock = cp.concatenate(
+            [
+                xc_for_fock[0].reshape((-1, ngrids)),
+                xc_for_fock[4].reshape((-1, ngrids)),
+            ],
+            axis=0,
+        )
     else:
         raise ValueError(f"Incorrect xc_type = {xc_type}")
 
@@ -1281,17 +1392,31 @@ def nr_rks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
         xc_for_fock[0] += coulomb_on_g_mesh
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
-    veff = convert_xc_on_g_mesh_to_fock(ni, xc_for_fock, hermi, kpts_band, with_tau = (xc_type == "MGGA"))
+    veff = convert_xc_on_g_mesh_to_fock(
+        ni, xc_for_fock, hermi, kpts_band, with_tau=(xc_type == "MGGA")
+    )
     veff = _format_jks(veff, dm_kpts, input_band, kpts)
     veff = tag_array(veff, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None)
     t0 = log.timer("xc", *t0)
     return n_electrons, xc_energy_sum, veff
 
+
 # Note nr_uks handles only one set of KUKS density matrices (alpha, beta) in
 # each call (nr_rks supports multiple sets of KRKS density matrices)
-def nr_uks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
-           kpts=None, kpts_band=None, with_j=False, verbose=None):
-    '''Compute the XC energy and UKS XC matrix at sampled k-points.
+def nr_uks(
+    ni,
+    cell,
+    grids,
+    xc_code,
+    dm_kpts,
+    relativity=0,
+    hermi=1,
+    kpts=None,
+    kpts_band=None,
+    with_j=False,
+    verbose=None,
+):
+    """Compute the XC energy and UKS XC matrix at sampled k-points.
     multigrid version of function pbc.dft.numint.nr_rks.
 
     Args:
@@ -1310,7 +1435,7 @@ def nr_uks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
         nelec : number of electrons obtained from the numerical integration
         veff : (nkpts, nao, nao) ndarray
             or list of veff if the input dm_kpts is a list of DMs
-    '''
+    """
     cell = ni.cell
     log = logger.new_logger(cell, verbose)
     t0 = log.init_timer()
@@ -1346,12 +1471,12 @@ def nr_uks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
     density /= weight
 
     # eval_xc_eff supports float64 only
-    density = cp.asarray(density, dtype=np.float64, order='C')
+    density = cp.asarray(density, dtype=np.float64, order="C")
     if xc_type == "LDA":
         xc_for_energy, xc_for_fock = ni.eval_xc_eff(
-            xc_code, density[:,0], deriv=1, xctype=xc_type
+            xc_code, density[:, 0], deriv=1, xctype=xc_type
         )[:2]
-    elif xc_type == 'GGA' or xc_type == 'MGGA':
+    elif xc_type == "GGA" or xc_type == "MGGA":
         xc_for_energy, xc_for_fock = ni.eval_xc_eff(
             xc_code, density, deriv=1, xctype=xc_type
         )[:2]
@@ -1377,10 +1502,13 @@ def nr_uks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
         xc_for_fock = xc_for_fock.reshape((nset, -1, ngrids))
     elif xc_type == "MGGA":
         xc_for_fock[:, 0] -= contract("ngp, pg -> np", xc_for_fock[:, 1:4], Gv) * 1j
-        xc_for_fock = cp.concatenate([
-            xc_for_fock[:, 0].reshape((nset, -1, ngrids)),
-            xc_for_fock[:, 4].reshape((nset, -1, ngrids)),
-        ], axis = 1)
+        xc_for_fock = cp.concatenate(
+            [
+                xc_for_fock[:, 0].reshape((nset, -1, ngrids)),
+                xc_for_fock[:, 4].reshape((nset, -1, ngrids)),
+            ],
+            axis=1,
+        )
     else:
         raise ValueError(f"Incorrect xc_type = {xc_type}")
 
@@ -1388,15 +1516,17 @@ def nr_uks(ni, cell, grids, xc_code, dm_kpts, relativity=0, hermi=1,
         xc_for_fock[:, 0] += coulomb_on_g_mesh
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
-    veff = convert_xc_on_g_mesh_to_fock(ni, xc_for_fock, hermi, kpts_band, with_tau = (xc_type == "MGGA"))
+    veff = convert_xc_on_g_mesh_to_fock(
+        ni, xc_for_fock, hermi, kpts_band, with_tau=(xc_type == "MGGA")
+    )
     veff = _format_jks(veff, dm_kpts, input_band, kpts)
     veff = tag_array(veff, ecoul=coulomb_energy, exc=xc_energy_sum, vj=None, vk=None)
     t0 = log.timer("xc", *t0)
     return n_electrons, xc_energy_sum, veff
 
+
 def get_rho(ni, dm, kpts=None):
-    '''Density in real space
-    '''
+    """Density in real space"""
     cell = ni.cell
     mesh = ni.mesh
     ngrids = np.prod(mesh)
@@ -1406,6 +1536,7 @@ def get_rho(ni, dm, kpts=None):
     # computing rhoR with IFFT, the weight factor is not needed.
     rhoR = ifft_in_place(density.reshape(-1, *mesh)).real / weight
     return rhoR.reshape(-1, ngrids)
+
 
 def get_veff_ip1(
     ni,
@@ -1436,9 +1567,7 @@ def get_veff_ip1(
 
     Gv = pbc_tools._get_Gv(cell, mesh)
     coulomb_kernel_on_g_mesh = pbc_tools.get_coulG(cell, Gv=Gv)
-    coulomb_on_g_mesh = cp.einsum(
-        "ng, g -> g", density[:, 0], coulomb_kernel_on_g_mesh
-    )
+    coulomb_on_g_mesh = cp.einsum("ng, g -> g", density[:, 0], coulomb_kernel_on_g_mesh)
 
     weight = cell.vol / ngrids
 
@@ -1453,13 +1582,9 @@ def get_veff_ip1(
     )
 
     if nset == 1:
-        xc_for_fock = ni.eval_xc_eff(
-            xc_code, density[0], deriv=1, xctype=xc_type
-        )[1]
+        xc_for_fock = ni.eval_xc_eff(xc_code, density[0], deriv=1, xctype=xc_type)[1]
     else:
-        xc_for_fock = ni.eval_xc_eff(
-            xc_code, density, deriv=1, xctype=xc_type
-        )[1]
+        xc_for_fock = ni.eval_xc_eff(xc_code, density, deriv=1, xctype=xc_type)[1]
 
     xc_for_fock = xc_for_fock.reshape(nset, -1, *mesh) * weight
     xc_for_fock = fft_in_place(xc_for_fock).reshape(nset, -1, ngrids)
@@ -1473,10 +1598,13 @@ def get_veff_ip1(
         xc_for_fock = xc_for_fock.reshape((nset, -1, ngrids))
     elif xc_type == "MGGA":
         xc_for_fock[:, 0] -= contract("ngp, pg -> np", xc_for_fock[:, 1:4], Gv) * 1j
-        xc_for_fock = cp.concatenate([
-            xc_for_fock[:, 0].reshape((nset, -1, ngrids)),
-            xc_for_fock[:, 4].reshape((nset, -1, ngrids)),
-        ], axis = 1)
+        xc_for_fock = cp.concatenate(
+            [
+                xc_for_fock[:, 0].reshape((nset, -1, ngrids)),
+                xc_for_fock[:, 4].reshape((nset, -1, ngrids)),
+            ],
+            axis=1,
+        )
     else:
         raise ValueError(f"Incorrect xc_type = {xc_type}")
 
@@ -1488,12 +1616,13 @@ def get_veff_ip1(
         xc_for_fock[:, 0] += multigrid_v1.eval_vpplocG_part1(cell, mesh)
 
     veff_gradient = convert_xc_on_g_mesh_to_fock_gradient(
-        ni, xc_for_fock, dm_kpts, hermi, kpts_band, with_tau = (xc_type == "MGGA")
+        ni, xc_for_fock, dm_kpts, hermi, kpts_band, with_tau=(xc_type == "MGGA")
     )
 
     t0 = log.timer("veff_gradient", *t0)
 
     return veff_gradient
+
 
 class MultiGridNumInt(lib.StreamObject, numint.LibXCMixin):
     def __init__(self, cell):
@@ -1511,8 +1640,7 @@ class MultiGridNumInt(lib.StreamObject, numint.LibXCMixin):
         self.sorted_gaussian_pairs = None
         return self
 
-    def get_j(self, dm, hermi=1, kpts=None, kpts_band=None,
-              omega=None, exxdiv='ewald'):
+    def get_j(self, dm, hermi=1, kpts=None, kpts_band=None, omega=None, exxdiv="ewald"):
         if kpts is not None:
             raise NotImplementedError
         vj = get_j_kpts(self, dm, hermi, kpts, kpts_band)
@@ -1524,7 +1652,7 @@ class MultiGridNumInt(lib.StreamObject, numint.LibXCMixin):
     get_rho = get_rho
     nr_rks = nr_rks
     nr_uks = nr_uks
-    get_vxc = nr_vxc = NotImplemented #numint_cpu.KNumInt.nr_vxc
+    get_vxc = nr_vxc = NotImplemented  # numint_cpu.KNumInt.nr_vxc
 
     eval_xc_eff = numint.eval_xc_eff
     _init_xcfuns = numint.NumInt._init_xcfuns
@@ -1532,11 +1660,11 @@ class MultiGridNumInt(lib.StreamObject, numint.LibXCMixin):
     nr_rks_fxc = NotImplemented
     nr_uks_fxc = NotImplemented
     nr_rks_fxc_st = NotImplemented
-    cache_xc_kernel  = NotImplemented
+    cache_xc_kernel = NotImplemented
     cache_xc_kernel1 = NotImplemented
 
     to_gpu = utils.to_gpu
     device = utils.device
 
     def to_cpu(self):
-        raise RuntimeError('Not available')
+        raise RuntimeError("Not available")

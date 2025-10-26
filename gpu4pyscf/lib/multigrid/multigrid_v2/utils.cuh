@@ -26,6 +26,29 @@ __host__ __device__ T distance_squared(const T x, const T y, const T z) {
   return x * x + y * y + z * z;
 }
 
+template <typename T, int i_angular, int j_angular>
+__host__ __device__ T approximate_polynomial_value(const double r_i_squared,
+                                                   const double r_j_squared,
+                                                   const double r_p_squared,
+                                                   const int derivative_order) {
+  T result =
+      pow(r_i_squared, i_angular / 2.0) * pow(r_j_squared, j_angular / 2.0);
+
+  if (derivative_order == 1) {
+    result *= -2.0 * sqrt(r_p_squared);
+    if constexpr (i_angular > 0) {
+      result += i_angular * pow(r_i_squared, (i_angular - 2) / 2.0) *
+                pow(r_j_squared, j_angular / 2.0);
+    }
+
+    if constexpr (j_angular > 0) {
+      result += j_angular * pow(r_i_squared, i_angular / 2.0) *
+                pow(r_j_squared, (j_angular - 2) / 2.0);
+    }
+  }
+  return result;
+}
+
 template <typename T, int ANG> __device__ constexpr T common_fac_sp() {
   if constexpr (ANG == 0) {
     return 0.282094791773878143;
