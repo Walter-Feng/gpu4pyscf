@@ -626,7 +626,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
 
 
 def evaluate_density_wrapper(
-    pairs_info, dm_slice, img_phase, ignore_imag=True, with_tau=False
+    cell, pairs_info, dm_slice, img_phase, ignore_imag=True, with_tau=False
 ):
     if with_tau:
         c_driver = libgpbc.evaluate_density_tau_driver
@@ -682,6 +682,9 @@ def evaluate_density_wrapper(
             dtype=density_matrix_with_translation_real_part.dtype,
         )
 
+    log = logger.new_logger(cell, cell.verbose)
+    t0 = log.init_timer()
+
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
 
@@ -718,8 +721,9 @@ def evaluate_density_wrapper(
             raise RuntimeError(
                 f"evaluate_density_driver for li={i_angular} lj={j_angular} failed"
             )
+    t1 = log.timer_debug1("density kernel", *t0)
 
-    return density
+    return density, cp.cuda.get_elapsed_time(t0[-1], t1[-1])
 
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
@@ -746,6 +750,8 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
     density_on_g_mesh = cp.zeros(
         (n_channels, density_slices, nx, ny, nz), dtype=cp.complex128
     )
+
+    kernel_time = 0
     for pairs in mydf.sorted_gaussian_pairs:
 
         mesh = pairs["mesh"]
@@ -787,12 +793,15 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
         libgpbc.update_dxyz_dabc(pairs["dxyz_dabc"].ctypes)
 
         img_phase = image_phase_for_kpts(cell, pairs["neighboring_images"], kpts)
-        density = (
+        density, kernel_subroutine = (
             evaluate_density_wrapper(
-                pairs, coeff_sandwiched_density_matrix, img_phase, with_tau=with_tau
+                cell, pairs, coeff_sandwiched_density_matrix, img_phase, with_tau=with_tau
             )
-            * weight_per_grid_point
         )
+
+        density *= weight_per_grid_point
+
+        kernel_time += kernel_subroutine
 
         if with_tau:
             assert density.shape[1] == 2
@@ -824,10 +833,11 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
     if xc_type != "LDA":
         density_on_g_mesh[:, 1:4] = pbc_tools._get_Gv(mydf.cell, mydf.mesh).T
         density_on_g_mesh[:, 1:4] *= density_on_g_mesh[:, :1] * 1j
+    print("density kernel: ", kernel_time, "ms")
     return density_on_g_mesh
 
 
-def evaluate_xc_wrapper(pairs_info, xc_weights, img_phase, with_tau=False):
+def evaluate_xc_wrapper(cell, pairs_info, xc_weights, img_phase, with_tau=False):
     if with_tau:
         assert xc_weights.ndim == 3 + 2 and xc_weights.shape[1] == 2
         n_channels = xc_weights.shape[0]
@@ -859,6 +869,10 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, img_phase, with_tau=False):
     else:
         assert xc_weights.dtype == cp.float64
         use_float_precision = ctypes.c_int(0)
+
+
+    log = logger.new_logger(cell, cell.verbose)
+    t0 = log.init_timer()
 
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         fock_slice = cp.zeros(
@@ -901,10 +915,12 @@ def evaluate_xc_wrapper(pairs_info, xc_weights, img_phase, with_tau=False):
                 f"evaluate_xc_driver for li={i_angular} lj={j_angular} failed"
             )
 
+    t1 = log.timer_debug1("xc kernel", *t0)
+
     if not (n_k_points == 1 and n_difference_images == 1):
         return cp.einsum("kt, ntij -> nkij", phase_diff_among_images, fock)
     else:
-        return fock
+        return fock, cp.cuda.get_elapsed_time(t0[-1], t1[-1])
 
 
 def convert_xc_on_g_mesh_to_fock(
@@ -957,6 +973,7 @@ def convert_xc_on_g_mesh_to_fock(
         data_type = complex_type(cp.float64)
 
     fock = cp.zeros((n_channels, n_k_points, nao, nao), dtype=data_type)
+    kernel_time = 0
 
     for pairs in mydf.sorted_gaussian_pairs:
         interpolated_xc = xc_on_g_mesh[
@@ -971,9 +988,10 @@ def convert_xc_on_g_mesh_to_fock(
         n_ao_in_localized = len(pairs["ao_indices_in_localized"])
         libgpbc.update_dxyz_dabc(pairs["dxyz_dabc"].ctypes)
         img_phase = image_phase_for_kpts(cell, pairs["neighboring_images"], kpts)
-        fock_slice = evaluate_xc_wrapper(
-            pairs, interpolated_xc, img_phase, with_tau=with_tau
+        fock_slice, kernel_subroutine = evaluate_xc_wrapper(
+            cell, pairs, interpolated_xc, img_phase, with_tau=with_tau
         )
+        kernel_time += kernel_subroutine
         fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_localized"])
         fock_slice = cp.einsum("nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"])
 
@@ -1010,6 +1028,8 @@ def convert_xc_on_g_mesh_to_fock(
         else:
             raise NotImplementedError
 
+
+    print("timing for xc kernel: ", kernel_time, "ms")
     return fock
 
 
