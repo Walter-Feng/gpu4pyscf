@@ -626,7 +626,7 @@ def sort_gaussian_pairs(mydf, xc_type="LDA"):
 
 
 def evaluate_density_wrapper(
-    cell, pairs_info, dm_slice, img_phase, ignore_imag=True, with_tau=False
+    pairs_info, dm_slice, img_phase, ignore_imag=True, with_tau=False
 ):
     if with_tau:
         c_driver = libgpbc.evaluate_density_tau_driver
@@ -682,9 +682,6 @@ def evaluate_density_wrapper(
             dtype=density_matrix_with_translation_real_part.dtype,
         )
 
-    log = logger.new_logger(cell, cell.verbose)
-    t0 = log.init_timer()
-
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         (i_angular, j_angular) = gaussians_per_angular_pair["angular"]
 
@@ -721,9 +718,8 @@ def evaluate_density_wrapper(
             raise RuntimeError(
                 f"evaluate_density_driver for li={i_angular} lj={j_angular} failed"
             )
-    t1 = log.timer_debug1("density kernel", *t0)
 
-    return density, cp.cuda.get_elapsed_time(t0[-1], t1[-1])
+    return density
 
 
 def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
@@ -745,6 +741,7 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
         raise ValueError(f"Incorrect xc_type = {xc_type}")
 
     cell = mydf.cell
+    log = logger.new_logger(cell, cell.verbose)
 
     nx, ny, nz = mydf.mesh
     density_on_g_mesh = cp.zeros(
@@ -752,12 +749,15 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
     )
 
     kernel_time = 0
+    fft_time = 0
+    contraction_time = 0
     for pairs in mydf.sorted_gaussian_pairs:
 
         mesh = pairs["mesh"]
 
         n_grid_points = np.prod(mesh)
         weight_per_grid_point = 1.0 / n_k_points * cell.vol / n_grid_points
+
 
         density_matrix_with_rows_in_localized = dms[
             :,
@@ -773,7 +773,11 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
             pairs["ao_indices_in_localized"],
         ]
 
+
         n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[3]
+
+        t0 = log.init_timer()
+
         density_matrix_with_rows_in_localized[
             :, :, :, n_ao_in_localized:
         ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2).conj()
@@ -790,18 +794,20 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
             pairs["concatenated_coeff"],
         )
 
+        contraction_time += log.timer_silent(*t0)[-1]
+        t0 = log.init_timer()
+
         libgpbc.update_dxyz_dabc(pairs["dxyz_dabc"].ctypes)
 
         img_phase = image_phase_for_kpts(cell, pairs["neighboring_images"], kpts)
-        density, kernel_subroutine = (
+        density = (
             evaluate_density_wrapper(
-                cell, pairs, coeff_sandwiched_density_matrix, img_phase, with_tau=with_tau
-            )
+                pairs, coeff_sandwiched_density_matrix, img_phase, with_tau=with_tau
+            ) * weight_per_grid_point
         )
 
-        density *= weight_per_grid_point
-
-        kernel_time += kernel_subroutine
+        kernel_time += log.timer_silent(*t0)[-1]
+        t0 = log.init_timer()
 
         if with_tau:
             assert density.shape[1] == 2
@@ -809,6 +815,8 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
             density = density[:, 0]
 
         density = fft_in_place(density)
+
+        fft_time += log.timer_silent(*t0)[-1]
 
         density_on_g_mesh[
             :,
@@ -834,10 +842,13 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
         density_on_g_mesh[:, 1:4] = pbc_tools._get_Gv(mydf.cell, mydf.mesh).T
         density_on_g_mesh[:, 1:4] *= density_on_g_mesh[:, :1] * 1j
     print("density kernel: ", kernel_time, "ms")
+    print("density fft: ", fft_time, "ms")
+    print("density contraction: ", contraction_time, "ms")
+
     return density_on_g_mesh
 
 
-def evaluate_xc_wrapper(cell, pairs_info, xc_weights, img_phase, with_tau=False):
+def evaluate_xc_wrapper(pairs_info, xc_weights, img_phase, with_tau=False):
     if with_tau:
         assert xc_weights.ndim == 3 + 2 and xc_weights.shape[1] == 2
         n_channels = xc_weights.shape[0]
@@ -869,10 +880,6 @@ def evaluate_xc_wrapper(cell, pairs_info, xc_weights, img_phase, with_tau=False)
     else:
         assert xc_weights.dtype == cp.float64
         use_float_precision = ctypes.c_int(0)
-
-
-    log = logger.new_logger(cell, cell.verbose)
-    t0 = log.init_timer()
 
     for gaussians_per_angular_pair in pairs_info["per_angular_pairs"]:
         fock_slice = cp.zeros(
@@ -915,13 +922,11 @@ def evaluate_xc_wrapper(cell, pairs_info, xc_weights, img_phase, with_tau=False)
                 f"evaluate_xc_driver for li={i_angular} lj={j_angular} failed"
             )
 
-    t1 = log.timer_debug1("xc kernel", *t0)
 
     if not (n_k_points == 1 and n_difference_images == 1):
         return cp.einsum("kt, ntij -> nkij", phase_diff_among_images, fock)
     else:
-        return fock, cp.cuda.get_elapsed_time(t0[-1], t1[-1])
-
+        return fock
 
 def convert_xc_on_g_mesh_to_fock(
     mydf,
@@ -974,8 +979,13 @@ def convert_xc_on_g_mesh_to_fock(
 
     fock = cp.zeros((n_channels, n_k_points, nao, nao), dtype=data_type)
     kernel_time = 0
+    fft_time = 0
+    contraction_time = 0
+    log = logger.new_logger(cell, cell.verbose)
 
     for pairs in mydf.sorted_gaussian_pairs:
+
+        t0 = log.init_timer()
         interpolated_xc = xc_on_g_mesh[
             :,
             :,
@@ -984,14 +994,19 @@ def convert_xc_on_g_mesh_to_fock(
             pairs["fft_grid"][2],
         ]
         interpolated_xc = cp.asarray(ifft_in_place(interpolated_xc).real, order="C")
+        fft_time += log.timer_silent(*t0)[-1]
+        t0 = log.init_timer()
 
         n_ao_in_localized = len(pairs["ao_indices_in_localized"])
         libgpbc.update_dxyz_dabc(pairs["dxyz_dabc"].ctypes)
         img_phase = image_phase_for_kpts(cell, pairs["neighboring_images"], kpts)
-        fock_slice, kernel_subroutine = evaluate_xc_wrapper(
-            cell, pairs, interpolated_xc, img_phase, with_tau=with_tau
+        fock_slice =  evaluate_xc_wrapper(
+            pairs, interpolated_xc, img_phase, with_tau=with_tau
         )
-        kernel_time += kernel_subroutine
+
+        kernel_time += log.timer_silent(*t0)[-1]
+        t0 = log.init_timer()
+        
         fock_slice = cp.einsum("nkpq,pi->nkiq", fock_slice, pairs["coeff_in_localized"])
         fock_slice = cp.einsum("nkiq,qj->nkij", fock_slice, pairs["concatenated_coeff"])
 
@@ -1016,6 +1031,9 @@ def convert_xc_on_g_mesh_to_fock(
             pairs["ao_indices_in_localized"][:, None],
             pairs["ao_indices_in_diffused"],
         ] += fock_slice[:, :, :, n_ao_in_localized:]
+
+        contraction_time += log.timer_silent(*t0)[-1]
+
         if hermi == 1:
             fock[
                 :,
@@ -1029,7 +1047,10 @@ def convert_xc_on_g_mesh_to_fock(
             raise NotImplementedError
 
 
-    print("timing for xc kernel: ", kernel_time, "ms")
+    print("xc kernel: ", kernel_time, "ms")
+    print("xc fft: ", fft_time, "ms")
+    print("xc contraction: ", contraction_time, "ms")
+
     return fock
 
 
@@ -1350,11 +1371,18 @@ def nr_rks(
     mesh = ni.mesh
     ngrids = np.prod(mesh)
 
+    tq = log.init_timer()
     density = evaluate_density_on_g_mesh(ni, dm_kpts, kpts, xc_type)
+    print("evaluate_density_on_g_mesh: ", log.timer_silent(*tq)[-1], "ms")
     rho_sf = density[0, 0]
 
+    tq = log.init_timer()
     Gv = pbc_tools._get_Gv(cell, mesh)
+    print("get_Gv: ", log.timer_silent(*tq)[-1], "ms")
+
+    tq = log.init_timer()
     coulomb_kernel_on_g_mesh = pbc_tools.get_coulG(cell, Gv=Gv)
+    print("get_coulG: ", log.timer_silent(*tq)[-1], "ms")
     coulomb_on_g_mesh = rho_sf * coulomb_kernel_on_g_mesh
     coulomb_energy = 0.5 * rho_sf.conj().dot(coulomb_on_g_mesh).real
     coulomb_energy /= cell.vol
@@ -1368,6 +1396,7 @@ def nr_rks(
 
     # eval_xc_eff supports float64 only
     density = cp.asarray(density, dtype=np.float64, order="C")
+    tq = log.init_timer()
     if xc_type == "LDA":
         xc_for_energy, xc_for_fock = ni.eval_xc_eff(
             xc_code, density[0], deriv=1, xctype=xc_type
@@ -1379,16 +1408,22 @@ def nr_rks(
     else:
         raise ValueError(f"Incorrect xc_type = {xc_type}")
 
+    print("libxc: ", log.timer_silent(*tq)[-1], "ms")
+
     rho_sf = density[0].real
     xc_energy_sum = rho_sf.dot(xc_for_energy.ravel()).get()[()] * weight
 
     # To reduce the memory usage, we reuse the xc_for_fock name.
     # Now xc_for_fock represents xc on G space
     xc_for_fock *= weight
+    tq = log.init_timer()
     xc_for_fock = fft_in_place(xc_for_fock.reshape(-1, *mesh)).reshape(-1, ngrids)
+    print("fft for xc:", log.timer_silent(*tq)[-1], "ms")
 
     log.debug("Multigrid exc %s  nelec %s", xc_energy_sum, n_electrons)
 
+
+    tq = log.init_timer()
     if xc_type == "LDA":
         pass
     elif xc_type == "GGA":
@@ -1407,6 +1442,8 @@ def nr_rks(
         )
     else:
         raise ValueError(f"Incorrect xc_type = {xc_type}")
+
+    print("merge Gv: ", log.timer_silent(*tq)[-1], "ms")
 
     if with_j:
         xc_for_fock[0] += coulomb_on_g_mesh
