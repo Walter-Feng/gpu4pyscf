@@ -505,7 +505,7 @@ class QMMMSCF(QMMM):
 
             else:
                 nuc = self.mol.energy_nuc()  # qm_nuc - qm_nuc
-           #  nuc = self.mol.energy_nuc()
+            #  nuc = self.mol.energy_nuc()
 
             # select mm atoms within rcut_hcore
             mol = self.mol
@@ -557,8 +557,8 @@ class QMMMSCF(QMMM):
 
 
 def grad_qm_multipole(
-            Tija, Tijab, Tijabc, qm_charges, qm_dipoles, qm_quads, mm_charges
-        ):
+    Tija, Tijab, Tijabc, qm_charges, qm_dipoles, qm_quads, mm_charges
+):
     Tc = contract("ijx,j->ix", Tija, mm_charges)
     res = contract("i,ix->ix", qm_charges, Tc)
     Tc = contract("ijxa,j->ixa", Tijab, mm_charges)
@@ -696,7 +696,6 @@ def qmmm_grad_for_scf(scf_grad):
     return scf_grad.view(lib.make_class((QMMMGrad, scf_grad.__class__)))
 
 
-
 class QMMMGrad:
     __name_mixin__ = "QMMM"
     _keys = {"de_ewald_mm", "de_nuc_mm"}
@@ -725,7 +724,7 @@ class QMMMGrad:
                 logger.debug2(self, "%.9g    %s", z, coords[i])
         return self
 
-    def grad_ewald_pulay(self, dm=None, with_mm=False, mm_ewald_pot=None, qm_ewald_pot=None):
+    def grad_ewald_pulay(self, dm=None, mm_ewald_pot=None, qm_ewald_pot=None):
         """PBC correction energy grad w.r.t. qm and mm atom positions"""
         cput0 = (logger.process_clock(), logger.perf_counter())
         if dm is None:
@@ -774,7 +773,7 @@ class QMMMGrad:
 
             b0, b1 = np.where(bas_atom == iatm)[0][[0, -1]]
             shlslc = (b0, b1 + 1, 0, mol.nbas)
-            with mol.with_common_orig(qm_coords[iatm].get()):
+            with mol.with_common_orig(qm_coords[iatm]):
                 # s1r[a,x,u,v] = \int phi_u (r_a-Ri_a) (-\nabla_x phi_v) dr
                 s1r.append(
                     cp.asarray(
@@ -831,14 +830,12 @@ class QMMMGrad:
 
         return qm_multipole_grad
 
-    def grad_ewald_real_space(self, dm=None, with_mm=False, mm_ewald_pot=None, qm_ewald_pot=None):
+    def grad_ewald_real_space(self, cell, dm=None, with_mm=False):
         """PBC correction energy grad w.r.t. qm and mm atom positions"""
         cput0 = (logger.process_clock(), logger.perf_counter())
         if dm is None:
             dm = self.base.make_rdm1()
         dm = cp.asarray(dm)
-        mol = self.base.mol
-        cell = self.base.mm_mol
         assert cell.dimension == 3
         qm_charges = self.base.get_qm_charges(dm)
         qm_dipoles = self.base.get_qm_dipoles(dm)
@@ -850,18 +847,9 @@ class QMMMGrad:
         # nuc grad due to qm multipole change due to ovlp change
         qm_multipole_grad = cp.zeros_like(qm_coords)
 
-        if mm_ewald_pot is None:
-            if self.base.mm_ewald_pot is not None:
-                mm_ewald_pot = self.base.mm_ewald_pot
-            else:
-                mm_ewald_pot = self.base.get_mm_ewald_pot(mol, cell)
-        if qm_ewald_pot is None:
-            qm_ewald_pot = self.base.get_qm_ewald_pot(mol, dm, self.base.qm_ewald_hess)
-
         ew_eta, ew_cut = cell.get_ewald_params()
 
         Lall = cp.asarray(cell.get_lattice_Ls())
-
 
         rmax_qm = max(cp.linalg.norm(qm_coords - cp.mean(qm_coords, axis=0), axis=-1))
         qm_ewovrl_grad = cp.zeros_like(qm_coords)
@@ -884,7 +872,7 @@ class QMMMGrad:
             raise RuntimeError(
                 f"Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}"
             )
-        for i0, i1 in lib.prange(0, mol.natm, blksize):
+        for i0, i1 in lib.prange(0, self.base.mol.natm, blksize):
             R = qm_coords[i0:i1, None, :] - all_mm_coords[None, :, :]
             r = cp.linalg.norm(R, axis=-1)
             r[r < 1e-16] = cp.inf
@@ -913,11 +901,13 @@ class QMMMGrad:
                 )
 
             # difference between MM gaussain charges and MM point charges
-            mask = dist2 > cell.rcut_hcore**2
-            zetas = cp.asarray(cell.get_zetas())
+            mask = dist2 > self.base.mm_mol.rcut_hcore**2
+            zetas = cp.asarray(self.base.mm_mol.get_zetas())
             min_expnt = cp.min(zetas)
 
-            max_ewrcut = pyscf.pbc.gto.cell._estimate_rcut(min_expnt, 0, 1.0, cell.precision)
+            max_ewrcut = pyscf.pbc.gto.cell._estimate_rcut(
+                min_expnt, 0, 1.0, cell.precision
+            )
             cut2 = (max_ewrcut + rmax_qm) ** 2
             mask = mask & (dist2 <= cut2)
             expnts = cp.hstack([cp.sqrt(zetas)] * len(Lall))[mask]
@@ -1034,8 +1024,7 @@ class QMMMGrad:
 
         return qm_ewovrl_grad, mm_ewovrl_grad
 
-
-    def grad_ewald_k_space(self, cell, mm_ewald_pot, dm=None):
+    def grad_ewald_k_space(self, cell, dm=None, with_mm=False):
         """PBC correction energy grad w.r.t. qm and mm atom positions"""
         if dm is None:
             dm = self.base.make_rdm1()
@@ -1093,6 +1082,7 @@ class QMMMGrad:
         TGGsinGvRqm = contract("gb,bg->g", Gv, temp)
 
         qm_ewg_grad = cp.zeros_like(qm_coords)
+        mm_ewg_grad = None
         if with_mm:
             mm_ewg_grad = cp.zeros_like(mm_coords)
 
@@ -1255,6 +1245,37 @@ class QMMMGrad:
 
         return qm_ewg_grad, mm_ewg_grad
 
+    def grad_ewald(self, dm=None, with_mm=False, mm_ewald_pot=None, qm_ewald_pot=None):
+        pulay = self.grad_ewald_pulay(dm, mm_ewald_pot, qm_ewald_pot)
+        ewald_real_qm, ewald_real_mm = self.grad_ewald_real_space(
+            self.base.mm_mol, dm, with_mm
+        )
+        ewald_k_qm, ewald_k_mm = self.grad_ewald_k_space(self.base.mm_mol, dm, with_mm)
+        grad_qm = pulay + ewald_real_qm + ewald_k_qm
+        if isinstance(self.base.mol, pyscf.pbc.gto.Cell):
+            lattice_vectors = self.base.mol.lattice_vectors()
+            cutoff = min(np.diag(lattice_vectors)) / 2
+            qm_mol = mm_mole.create_mm_cell(
+                self.base.mol.atom_coords(),
+                lattice_vectors,
+                charges=self.base.mol.atom_charges(),
+                rcut_ewald=cutoff,
+                rcut_hcore=cutoff,
+                unit="Bohr",
+            )
+
+            qm_mol.mesh = self.base.mm_mol.mesh
+            grad_real_qm_from_fake_images, _ = self.grad_ewald_real_space(qm_mol, dm)
+            grad_qm -= grad_real_qm_from_fake_images
+            grad_k_qm_from_fake_images, _ = self.grad_ewald_k_space(qm_mol, dm)
+            grad_qm -= grad_k_qm_from_fake_images
+
+        if with_mm:
+            grad_mm = ewald_real_mm + ewald_k_mm
+            return grad_qm.get(), grad_mm.get()
+        else:
+            return grad_qm.get()
+
     def get_hcore(self, mol=None, exclude_ecp=False):
         if mol is None:
             mol = self.mol
@@ -1412,4 +1433,5 @@ class QMMMGrad:
     def _finalize(self):
         g_ewald_qm, self.de_ewald_mm = self.grad_ewald(with_mm=True)
         self.de += g_ewald_qm
+        self.ewald_qm = g_ewald_qm
         super()._finalize()
