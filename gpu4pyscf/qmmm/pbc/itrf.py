@@ -16,14 +16,16 @@ import cupy as cp
 import numpy as np
 
 import pyscf
+import pyscf.pbc.grad.rhf as cpu_rhf
+from pyscf import df, grad, gto, lib
+from pyscf.lib import logger
+
 from gpu4pyscf import scf
 from gpu4pyscf.gto.int3c1e import int1e_grids
 from gpu4pyscf.gto.int3c1e_ip import int1e_grids_ip1, int1e_grids_ip2
 from gpu4pyscf.lib import cupy_helper
 from gpu4pyscf.qmmm.pbc import mm_mole
 from gpu4pyscf.qmmm.pbc.tools import get_multipole_tensors_pg, get_multipole_tensors_pp
-from pyscf import df, grad, gto, lib
-from pyscf.lib import logger
 
 contract = cupy_helper.contract
 
@@ -283,8 +285,6 @@ class QMMMSCF(QMMM):
         else:  # no MM charges
             pass
 
-        self.diff_hcore = h1e - cp.asarray(super().get_hcore(mol))
-
         j3c = None
         logger.timer(self, "get_hcore", *cput0)
         return h1e
@@ -478,18 +478,6 @@ class QMMMSCF(QMMM):
         e += contract("ixy,ixy->", cp.asarray(ewald_pot), self.get_qm_quadrupoles(dm))
         # TODO add energy correction if sum(charges) !=0 ?
 
-        mm_energy = contract(
-            "i,i->", cp.asarray(mm_ewald_pot[0]), self.get_qm_charges(dm)
-        )
-        mm_energy += contract(
-            "ix,ix->", cp.asarray(mm_ewald_pot[1]), self.get_qm_dipoles(dm)
-        )
-        mm_energy += contract(
-            "ixy,ixy->", cp.asarray(mm_ewald_pot[2]), self.get_qm_quadrupoles(dm)
-        )
-
-        self.self_computed_mm_energy = mm_energy
-
         return e
 
     def energy_nuc(self):
@@ -635,7 +623,7 @@ def add_mm_charges_grad(
 mm_charge_grad = add_mm_charges_grad
 
 
-def get_hcore_mm(scf_grad, mol=None):
+def grad_hcore_mm(scf_grad, mol=None):
     """
     Nuclear gradients of the electronic energy, w.r.t atomic orbitals
     """
@@ -1289,7 +1277,7 @@ class QMMMGrad:
         g_qm_orig = cp.empty([3, mol.nao, mol.nao])
         with lib.call_in_background(calculate_h1e) as calculate_hs:
             calculate_hs(self, g_qm_orig)
-            g_qm = get_hcore_mm(self)
+            g_qm = grad_hcore_mm(self)
 
         logger.timer(self, "get_hcore", *cput0)
         return g_qm_orig + g_qm
@@ -1433,5 +1421,10 @@ class QMMMGrad:
     def _finalize(self):
         g_ewald_qm, self.de_ewald_mm = self.grad_ewald(with_mm=True)
         self.de += g_ewald_qm
-        self.ewald_qm = g_ewald_qm
-        super()._finalize()
+
+        if isinstance(self.base.mol, pyscf.pbc.gto.Cell):
+            dm = self.base.make_rdm1()
+            self.de += 2 * cpu_rhf._contract_vhf_dm(
+                self, grad_hcore_mm(self).get(), dm.get()
+            )
+            super()._finalize()
