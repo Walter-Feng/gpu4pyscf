@@ -83,7 +83,7 @@ def iG_density(density, cell):
         np.array(np.ceil(mesh_in_int32 / np.array(block_dim)), dtype=np.int32)
     )
 
-    result = cp.zeros((3, *mesh), dtype=cp.complex128).reshape(3,-1)
+    result = cp.zeros((3, *mesh), dtype=cp.complex128).reshape(3, -1)
 
     custom_kernel = cp.RawKernel(
         r"""
@@ -136,6 +136,7 @@ def iG_density(density, cell):
     )
 
     return result
+
 
 def contract_iG_potential(gga_potential, cell):
     mesh = cell.mesh
@@ -1025,16 +1026,12 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
         raise ValueError(f"Incorrect xc_type = {xc_type}")
 
     cell = mydf.cell
-    log = logger.new_logger(cell, cell.verbose)
 
     nx, ny, nz = mydf.mesh
     density_on_g_mesh = cp.zeros(
         (n_channels, density_slices, nx, ny, nz), dtype=cp.complex128
     )
 
-    kernel_time = 0
-    fft_time = 0
-    contraction_time = 0
     for pairs in mydf.sorted_gaussian_pairs:
 
         mesh = pairs["mesh"]
@@ -1058,8 +1055,6 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
 
         n_ao_in_localized = density_matrix_with_rows_in_diffused.shape[3]
 
-        t0 = log.init_timer()
-
         density_matrix_with_rows_in_localized[
             :, :, :, n_ao_in_localized:
         ] += density_matrix_with_rows_in_diffused.transpose(0, 1, 3, 2).conj()
@@ -1079,9 +1074,6 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
             pairs["primitive_shape"],
         ).reshape(n_sets, n_k_points, *pairs["primitive_shape"])
 
-        contraction_time += log.timer_silent(*t0)[-1]
-        t0 = log.init_timer()
-
         libgpbc.update_dxyz_dabc(pairs["dxyz_dabc"].ctypes)
 
         img_phase = image_phase_for_kpts(cell, pairs["neighboring_images"], kpts)
@@ -1092,18 +1084,12 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
             * weight_per_grid_point
         )
 
-        kernel_time += log.timer_silent(*t0)[-1]
-        t0 = log.init_timer()
-
         if with_tau:
             assert density.shape[1] == 2
             tau = density[:, 1]
             density = density[:, 0]
 
         density = fft_in_place(density)
-
-        fft_time += log.timer_silent(*t0)[-1]
-
         density_on_g_mesh[
             :,
             0,
@@ -1127,9 +1113,6 @@ def evaluate_density_on_g_mesh(mydf, dm_kpts, kpts=None, xc_type="LDA"):
     if xc_type != "LDA":
         for i in range(len(density_on_g_mesh)):
             density_on_g_mesh[i, 1:4] = iG_density(density_on_g_mesh[i], cell)
-    print("density kernel: ", kernel_time, "ms")
-    print("density fft: ", fft_time, "ms")
-    print("density contraction: ", contraction_time, "ms")
 
     return density_on_g_mesh
 
@@ -1263,14 +1246,9 @@ def convert_xc_on_g_mesh_to_fock(
         data_type = complex_type(cp.float64)
 
     fock = cp.zeros((n_channels, n_k_points, nao, nao), dtype=data_type)
-    kernel_time = 0
-    fft_time = 0
-    contraction_time = 0
-    log = logger.new_logger(cell, cell.verbose)
 
     for pairs in mydf.sorted_gaussian_pairs:
 
-        t0 = log.init_timer()
         interpolated_xc = xc_on_g_mesh[
             :,
             :,
@@ -1279,8 +1257,6 @@ def convert_xc_on_g_mesh_to_fock(
             pairs["fft_grid"][2],
         ]
         interpolated_xc = cp.asarray(ifft_in_place(interpolated_xc).real, order="C")
-        fft_time += log.timer_silent(*t0)[-1]
-        t0 = log.init_timer()
 
         n_ao_in_localized = len(pairs["ao_indices_in_localized"])
         libgpbc.update_dxyz_dabc(pairs["dxyz_dabc"].ctypes)
@@ -1288,8 +1264,6 @@ def convert_xc_on_g_mesh_to_fock(
         fock_slice = evaluate_xc_wrapper(
             pairs, interpolated_xc, img_phase, with_tau=with_tau
         )
-        kernel_time += log.timer_silent(*t0)[-1]
-        t0 = log.init_timer()
         n_sets, n_k_points = fock_slice.shape[:2]
 
         fock_slice = fock_slice.reshape(-1, *pairs["primitive_shape"])
@@ -1323,8 +1297,6 @@ def convert_xc_on_g_mesh_to_fock(
             pairs["ao_indices_in_diffused"],
         ] += fock_slice[:, :, :, n_ao_in_localized:]
 
-        contraction_time += log.timer_silent(*t0)[-1]
-
         if hermi == 1:
             fock[
                 :,
@@ -1336,10 +1308,6 @@ def convert_xc_on_g_mesh_to_fock(
             )
         else:
             raise NotImplementedError
-
-    print("xc kernel: ", kernel_time, "ms")
-    print("xc fft: ", fft_time, "ms")
-    print("xc contraction: ", contraction_time, "ms")
 
     return fock
 
@@ -1662,15 +1630,9 @@ def nr_rks(
     mesh = ni.mesh
     ngrids = np.prod(mesh)
 
-    tq = log.init_timer()
     density = evaluate_density_on_g_mesh(ni, dm_kpts, kpts, xc_type)
-    print("evaluate_density_on_g_mesh: ", log.timer_silent(*tq)[-1], "ms")
     rho_sf = density[0, 0]
 
-    tq = log.init_timer()
-    Gv = pbc_tools._get_Gv(cell, mesh)
-
-    tq = log.init_timer()
     coulomb_on_g_mesh = rho_sf * ni.coulG
     coulomb_energy = 0.5 * rho_sf.conj().dot(coulomb_on_g_mesh).real
     coulomb_energy /= cell.vol
@@ -1684,7 +1646,6 @@ def nr_rks(
 
     # eval_xc_eff supports float64 only
     density = cp.asarray(density, dtype=np.float64, order="C")
-    tq = log.init_timer()
     if xc_type == "LDA":
         xc_for_energy, xc_for_fock = ni.eval_xc_eff(
             xc_code, density[0], deriv=1, xctype=xc_type
@@ -1696,21 +1657,16 @@ def nr_rks(
     else:
         raise ValueError(f"Incorrect xc_type = {xc_type}")
 
-    print("libxc: ", log.timer_silent(*tq)[-1], "ms")
-
     rho_sf = density[0].real
     xc_energy_sum = rho_sf.dot(xc_for_energy.ravel()).get()[()] * weight
 
     # To reduce the memory usage, we reuse the xc_for_fock name.
     # Now xc_for_fock represents xc on G space
     xc_for_fock *= weight
-    tq = log.init_timer()
     xc_for_fock = fft_in_place(xc_for_fock.reshape(-1, *mesh)).reshape(-1, ngrids)
-    print("fft for xc:", log.timer_silent(*tq)[-1], "ms")
 
     log.debug("Multigrid exc %s  nelec %s", xc_energy_sum, n_electrons)
 
-    tq = log.init_timer()
     if xc_type == "LDA":
         pass
     elif xc_type == "GGA":
@@ -1728,8 +1684,6 @@ def nr_rks(
         )
     else:
         raise ValueError(f"Incorrect xc_type = {xc_type}")
-
-    print("merge Gv: ", log.timer_silent(*tq)[-1], "ms")
 
     if with_j:
         xc_for_fock[0] += coulomb_on_g_mesh
@@ -1799,7 +1753,6 @@ def nr_uks(
     density = evaluate_density_on_g_mesh(ni, dm_kpts, kpts, xc_type)
     rho_sf = density[0, 0] + density[1, 0]
 
-    Gv = pbc_tools._get_Gv(cell, mesh)
     coulomb_on_g_mesh = rho_sf * ni.coulG
     coulomb_energy = 0.5 * rho_sf.conj().dot(coulomb_on_g_mesh).real
     coulomb_energy /= cell.vol
@@ -1935,7 +1888,7 @@ def get_veff_ip1(
     elif xc_type == "GGA":
         for i in xc_for_fock:
             contract_iG_potential(i, cell)
-        xc_for_fock = xc_for_fock[:,0]
+        xc_for_fock = xc_for_fock[:, 0]
         xc_for_fock = xc_for_fock.reshape((nset, -1, ngrids))
     elif xc_type == "MGGA":
         xc_for_fock[:, 0] -= contract("ngp, pg -> np", xc_for_fock[:, 1:4], Gv) * 1j
