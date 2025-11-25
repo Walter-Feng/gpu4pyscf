@@ -1905,9 +1905,8 @@ def get_veff_ip1(
     if with_j:
         xc_for_fock[:, 0] += coulomb_on_g_mesh
 
-    if with_pseudo:
-        assert cell._pseudo is not None
-        xc_for_fock[:, 0] += multigrid_v1.eval_vpplocG_part1(cell, mesh)
+    if cell._pseudo:
+        xc_for_fock[:, 0] += ni.cached_vpplocG_part1
 
     veff_gradient = convert_xc_on_g_mesh_to_fock_gradient(
         ni, xc_for_fock, dm_kpts, hermi, kpts_band, with_tau=(xc_type == "MGGA")
@@ -1926,6 +1925,9 @@ class MultiGridNumInt(lib.StreamObject, numint.LibXCMixin):
         self.sorted_gaussian_pairs = None
         Gv = pbc_tools._get_Gv(cell, cell.mesh)
         self.coulG = pbc_tools.get_coulG(cell, Gv=Gv)
+        self.build()
+        if cell._pseudo:
+            self.cached_vpplocG_part1 = multigrid_v1.eval_vpplocG_part1(cell, self.mesh)
 
     build = sort_gaussian_pairs
 
