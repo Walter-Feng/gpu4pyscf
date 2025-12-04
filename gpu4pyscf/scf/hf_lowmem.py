@@ -21,7 +21,7 @@ import numpy as np
 import cupy as cp
 from pyscf.scf import hf as hf_cpu
 from pyscf.scf import chkfile
-from gpu4pyscf.lib.cupy_helper import asarray, pack_tril, unpack_tril, eigh
+from gpu4pyscf.lib.cupy_helper import asarray, pack_tril, unpack_tril
 from gpu4pyscf import lib
 from gpu4pyscf.scf import diis, jk, j_engine, hf
 from gpu4pyscf.lib import logger
@@ -77,7 +77,8 @@ def kernel(mf, dm0=None, conv_tol=1e-10, conv_tol_grad=None,
         if mf.mo_coeff is None:
             s1e = mf.get_ovlp(mol)
             fock = mf.get_fock(h1e, s1e, vhf, dm)  # = h1e + vhf, no DIIS
-            mf.mo_energy, mf.mo_coeff = mf.eig(fock, s1e)
+            mf.mo_energy, mf.mo_coeff = mf.eig(fock, s1e, overwrite=True)
+            fock = s1e = None
             mf.mo_occ = mf.get_occ(mf.mo_energy, mf.mo_coeff)
             mf.converged = scf_conv
         return e_tot
@@ -92,7 +93,7 @@ def kernel(mf, dm0=None, conv_tol=1e-10, conv_tol_grad=None,
         # the input matrices. The input can be overwritten so as to reduce GPU
         # memory footprint.
         s1e = asarray(mf.get_ovlp(mol))
-        c = eigh(unpack_tril(asarray(h1e)), s1e, overwrite=True)[1]
+        c = mf.eig(unpack_tril(asarray(h1e)), s1e)[1]
         mf_diis.Corth = c.get()
         s1e = c = None
     else:
@@ -117,7 +118,7 @@ def kernel(mf, dm0=None, conv_tol=1e-10, conv_tol_grad=None,
         fock = mf.get_fock(h1e, s1e, vhf, dm, cycle, mf_diis) # on GPU
         t1 = log.timer_debug1('DIIS', *t1)
         cp.get_default_memory_pool().free_all_blocks()
-        mo_energy, mo_coeff = mf.eig(fock, s1e) # on GPU
+        mo_energy, mo_coeff = mf.eig(fock, s1e, overwrite=True) # on GPU
         fock = s1e = None
         t1 = log.timer_debug1('eig', *t1)
 
@@ -145,13 +146,13 @@ def kernel(mf, dm0=None, conv_tol=1e-10, conv_tol_grad=None,
     else:
         log.warn("SCF failed to converge")
 
-    if scf_conv and abs(mf.level_shift) > 0:
+    if scf_conv and mf.level_shift is not None:
         # An extra diagonalization, to remove level shift
         s1e = asarray(mf.get_ovlp(mol))
         fock = mf.get_fock(h1e, s1e, vhf)
 
         cp.get_default_memory_pool().free_all_blocks()
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, overwrite=True)
         fock = s1e = None
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         dm, dm_last = mf.make_wfn(mo_coeff, mo_occ), dm
@@ -228,7 +229,12 @@ class RHF(hf.RHF):
         if mol.spin != 0:
             raise RuntimeError(
                 f'Invalid number of electrons {mol.nelectron} for RHF method.')
-        return self
+        # If you wonder why I need to explicitly pass in parameters for super() function,
+        # it's because in dft.rks_lowmem.RKS, this method is copied, rather than inheriented.
+        return_value = super(hf.RHF, self).check_sanity()
+        if hasattr(self, 'overlap_canonical_decomposed_x') and self.overlap_canonical_decomposed_x is not None:
+            self.overlap_canonical_decomposed_x = self.overlap_canonical_decomposed_x.get()
+        return return_value
 
     def get_hcore(self, mol=None):
         '''The lower triangular part of Hcore'''
@@ -331,18 +337,17 @@ class RHF(hf.RHF):
 
         if diis_start_cycle is None:
             diis_start_cycle = self.diis_start_cycle
-        if level_shift_factor is None:
-            level_shift_factor = self.level_shift
         if damp_factor is None:
             damp_factor = self.damp
-
-        if 0 <= cycle < diis_start_cycle-1 and abs(damp_factor) > 1e-4:
-            f = hf.damping(s1e, dm*.5, f, damp_factor)
+        if damp_factor is not None:
+            raise NotImplementedError('SCF damping')
         if diis is not None and cycle >= diis_start_cycle:
             f = diis.update(s1e, dm, f)
             cp.get_default_memory_pool().free_all_blocks()
 
-        if abs(level_shift_factor) > 1e-4:
+        if level_shift_factor is None:
+            level_shift_factor = self.level_shift
+        if level_shift_factor is not None:
             dm_vir, dm = dm, None
             #:f = hf.level_shift(s1e, dm*.5, f, level_shift_factor)
             dm_vir = s1e.dot(dm_vir)
@@ -378,16 +383,6 @@ class RHF(hf.RHF):
         self.scf_summary['e2'] = e_coul
         logger.debug(self, 'E1 = %s  E_coul = %s', e1, e_coul)
         return e_tot, e_coul
-
-    def _eigh(self, h, s):
-        # In DIIS, fock and overlap matrices are temporarily constructed and
-        # discarded, they can be overwritten in the eigh solver.
-        e, c = eigh(h, s, overwrite=True)
-        # eigh allocates a large memory buffer "work". Immediately free the cupy
-        # memory after the eigh function to avoid this buffer being trapped by
-        # small-sized arrays.
-        cp.get_default_memory_pool().free_all_blocks()
-        return e, c
 
     def to_cpu(self):
         raise NotImplementedError

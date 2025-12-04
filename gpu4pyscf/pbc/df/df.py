@@ -54,7 +54,7 @@ class GDF(lib.StreamObject):
     '''
     blockdim = df_cpu.GDF.blockdim
 
-    _keys = df_cpu.GDF._keys.union({'is_gamma_point', 'nao'})
+    _keys = df_cpu.GDF._keys.union({'is_gamma_point', 'nao', 'kmesh'})
 
     def __init__(self, cell, kpts=None):
         df_cpu.GDF.__init__(self, cell, kpts)
@@ -74,7 +74,7 @@ class GDF(lib.StreamObject):
         if isinstance(self._kpts, KPoints):
             return self._kpts
         else:
-            return self.cell.get_abs_kpts(self._kpts)
+            return self.cell.get_abs_kpts(cp.asnumpy(self._kpts))
 
     @kpts.setter
     def kpts(self, val):
@@ -149,10 +149,10 @@ class GDF(lib.StreamObject):
         return self
 
     has_kpts = df_cpu.GDF.has_kpts
-    weighted_coulG = return_cupy_array(aft_cpu.weighted_coulG)
+    weighted_coulG = AFTDF.weighted_coulG
     pw_loop = NotImplemented
     ft_loop = NotImplemented
-    range_coulomb = aft_cpu.AFTDFMixin.range_coulomb
+    range_coulomb = AFTDF.range_coulomb
 
     def get_naoaux(self):
         if self._cderi is None:
@@ -182,23 +182,26 @@ class GDF(lib.StreamObject):
             aux_iter = lib.prange(0, naux, blksize)
         ao_pair_mapping, diag_idx = self._cderi_idx
         cderi_idx = cp.asarray(ao_pair_mapping), cp.asarray(diag_idx)
-        npairs = len(ao_pair_mapping)
         if unpack:
             expLk = fft_matrix(self.kmesh)
             nao = cell.nao
             kk_conserv = k2gamma.double_translation_indices(self.kmesh)
-            out_buf = ndarray(blksize*nkpts*nao**2, np.complex128, buffer=out)
+            out_buf = out
 
-        cderi_buf = ndarray(blksize*nkpts*npairs, np.complex128, buffer=out)
+        cderi_buf = out
         for k_aux, p0, p1 in aux_iter:
             tmp = self._cderi[k_aux][p0:p1,:]
             if tmp.size == 0:
                 return
-            out = cp.ndarray(tmp.shape, dtype=tmp.dtype, memptr=cderi_buf.data)
+            out = ndarray(tmp.shape, dtype=tmp.dtype, buffer=cderi_buf)
             out.set(tmp)
             if unpack:
+                # cderi_compressed and out_buf share the same memory. However,
+                # cderi_compressed in rsdf_builder will be copied to a temporary
+                # array. Its content can be overwritten in the output.
+                cderi_compressed = out
                 out = rsdf_builder.unpack_cderi(
-                    out, cderi_idx, k_aux, kk_conserv, expLk, nao,
+                    cderi_compressed, cderi_idx, k_aux, kk_conserv, expLk, nao,
                     buf=buf, out=out_buf)
             yield k_aux, out, 1
             if p0 == 0 and cell.dimension == 2 and k_aux in self._cderip:
@@ -209,24 +212,10 @@ class GDF(lib.StreamObject):
                 yield k_aux, out, -1
 
     def get_pp(self, kpts=None):
-        kpts, is_single_kpt = _check_kpts(self, kpts)
-        if is_single_kpt and is_zero(kpts):
-            vpp = rsdf_builder.get_pp(self.cell)
-        else:
-            vpp = rsdf_builder.get_pp(self.cell, kpts)
-            if is_single_kpt:
-                vpp = vpp[0]
-        return vpp
+        return rsdf_builder.get_pp(self.cell, kpts)
 
     def get_nuc(self, kpts=None):
-        kpts, is_single_kpt = _check_kpts(self, kpts)
-        if is_single_kpt and is_zero(kpts):
-            nuc = rsdf_builder.get_nuc(self.cell)
-        else:
-            nuc = rsdf_builder.get_nuc(self.cell, kpts)
-            if is_single_kpt:
-                nuc = nuc[0]
-        return nuc
+        return rsdf_builder.get_nuc(self.cell, kpts)
 
     # Note: Special exxdiv by default should not be used for an arbitrary
     # input density matrix. When the df object was used with the molecular
@@ -250,7 +239,7 @@ class GDF(lib.StreamObject):
         if self.is_gamma_point:
             return df_jk_real.get_jk(self, dm, hermi, with_j, with_k, exxdiv)
         else:
-            kpts, is_single_kpt = _check_kpts(self, kpts)
+            kpts, is_single_kpt = _check_kpts(kpts, dm)
             if is_single_kpt:
                 return df_jk.get_jk(self, dm, hermi, kpts[0], kpts_band, with_j,
                                     with_k, exxdiv)
@@ -260,6 +249,10 @@ class GDF(lib.StreamObject):
         if with_j:
             vj = df_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band)
         return vj, vk
+
+    get_j_e1 = NotImplemented
+    get_k_e1 = NotImplemented
+    get_jk_e1 = NotImplemented
 
     get_eri = get_ao_eri = NotImplemented
     ao2mo = get_mo_eri = NotImplemented

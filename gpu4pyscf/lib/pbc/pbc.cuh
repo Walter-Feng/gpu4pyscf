@@ -66,26 +66,16 @@
 typedef struct {
     int cell0_natm; // in bvk-cell
     int cell0_nbas; // in bvk-cell
-    int bvk_ncells; // number of images in the BvK cell
-    int nimgs; // number of images in lattice sum
     int *atm;
     int *bas;
     double *env;
     int *ao_loc; // in bvk-cell
+    int bvk_ncells; // number of images in the BvK cell
+    int nimgs; // number of images in lattice sum
     double *img_coords; // vectors in lattice sum
 } PBCIntEnvVars;
-
-typedef struct {
-    int8_t ioff;
-    int8_t joff;
-    int8_t koff;
-    int8_t loff;
-} GXYZOffset;
 
 #ifdef __CUDACC__
 extern __constant__ int16_t c_pair_idx[];
 extern __constant__ int c_pair_offsets[];
-
-extern __constant__ int _c_cartesian_lexical_xyz[];
-extern __constant__ GXYZOffset c_gxyz_offset[];
 #endif

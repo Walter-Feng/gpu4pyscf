@@ -27,7 +27,7 @@ from gpu4pyscf.lib.cupy_helper import (
 from gpu4pyscf.dft import rks, uks, numint
 from gpu4pyscf.scf import hf, uhf, rohf
 from gpu4pyscf.df import df, int3c2e
-from gpu4pyscf.__config__ import _streams, num_devices
+from gpu4pyscf.__config__ import num_devices
 
 def _pin_memory(array):
     mem = cupy.cuda.alloc_pinned_memory(array.nbytes)
@@ -134,10 +134,11 @@ class _DFHF:
             vj, vk = self.with_df.get_jk(dm, hermi, with_j, with_k,
                                          self.direct_scf_tol, omega)
         else:
-            vj, vk = super().get_jk(mol, dm, hermi, with_j, with_k, omega)
+            raise ValueError(f"with_df field not found in a df object (type = {type(self)}) during a get_jk() call.")
+            # vj, vk = super().get_jk(mol, dm, hermi, with_j, with_k, omega)
         return vj, vk
 
-    def nuc_grad_method(self):
+    def Gradients(self):
         if self.istype('_Solvation'):
             raise NotImplementedError(
                 'Gradients of solvent are not computed. '
@@ -156,8 +157,6 @@ class _DFHF:
             from gpu4pyscf.df.grad import uhf as uhf_grad
             return uhf_grad.Gradients(self)
         raise NotImplementedError()
-
-    Gradients = nuc_grad_method
 
     def Hessian(self):
         if self.istype('_Solvation'):
@@ -296,7 +295,7 @@ def _jk_task_with_mo(dfobj, dms, mo_coeff, mo_occ,
                      with_j=True, with_k=True, hermi=0, device_id=0):
     ''' Calculate J and K matrices on single GPU
     '''
-    with cupy.cuda.Device(device_id), _streams[device_id]:
+    with cupy.cuda.Device(device_id):
         assert isinstance(dfobj.verbose, int)
         log = logger.new_logger(dfobj.mol, dfobj.verbose)
         t0 = log.init_timer()
@@ -361,7 +360,7 @@ def _jk_task_with_mo1(dfobj, dms, mo1s, occ_coeffs,
         For CP-HF or TDDFT
     '''
     vj = vk = None
-    with cupy.cuda.Device(device_id), _streams[device_id]:
+    with cupy.cuda.Device(device_id):
         assert isinstance(dfobj.verbose, int)
         log = logger.new_logger(dfobj.mol, dfobj.verbose)
         t0 = log.init_timer()
@@ -422,7 +421,7 @@ def _jk_task_with_mo1(dfobj, dms, mo1s, occ_coeffs,
 def _jk_task_with_dm(dfobj, dms, with_j=True, with_k=True, hermi=0, device_id=0):
     ''' Calculate J and K matrices with density matrix
     '''
-    with cupy.cuda.Device(device_id), _streams[device_id]:
+    with cupy.cuda.Device(device_id):
         assert isinstance(dfobj.verbose, int)
         log = logger.new_logger(dfobj.mol, dfobj.verbose)
         t0 = log.init_timer()

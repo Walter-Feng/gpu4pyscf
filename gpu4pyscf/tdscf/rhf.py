@@ -294,6 +294,12 @@ def gen_tda_operation(td, mf, fock_ao=None, singlet=True, wfnsym=None):
     assert mo_coeff.dtype == cp.float64
     mo_energy = mf.mo_energy
     mo_occ = mf.mo_occ
+    if not isinstance(mo_coeff, cp.ndarray):
+        mo_coeff = cp.asarray(mo_coeff)
+    if not isinstance(mo_energy, cp.ndarray):
+        mo_energy = cp.asarray(mo_energy)
+    if not isinstance(mo_occ, cp.ndarray):
+        mo_occ = cp.asarray(mo_occ)
     occidx = mo_occ == 2
     viridx = mo_occ == 0
     orbv = mo_coeff[:,viridx]
@@ -351,7 +357,7 @@ class TD_Scanner(lib.SinglePointScanner):
 class TDBase(lib.StreamObject):
     to_gpu = utils.to_gpu
     device = utils.device
-    to_cpu = utils.to_cpu
+    to_cpu = NotImplemented
 
     conv_tol              = tdhf_cpu.TDBase.conv_tol
     nstates               = tdhf_cpu.TDBase.nstates
@@ -412,8 +418,11 @@ class TDBase(lib.StreamObject):
     def nuc_grad_method(self):
         return self.Gradients()
 
-    def nac_method(self):
+    def NAC(self):
         raise NotImplementedError
+
+    def nac_method(self):
+        return self.NAC()
 
     as_scanner = as_scanner
 
@@ -574,13 +583,19 @@ class TDA(TDBase):
             from gpu4pyscf.grad import tdrhf
             return tdrhf.Gradients(self)
 
-    def nac_method(self):
+    def NAC(self):
         if getattr(self._scf, 'with_df', None):
             from gpu4pyscf.df.nac import tdrhf
             return tdrhf.NAC(self)
         else:
             from gpu4pyscf.nac import tdrhf
             return tdrhf.NAC(self)
+
+    def to_cpu(self):
+        out = utils.to_cpu(self)
+        if out.xy is not None:
+            out.xy = [(cp.asnumpy(x), None) for x, y in out.xy]
+        return out
 
 CIS = TDA
 
@@ -597,6 +612,12 @@ def gen_tdhf_operation(td, mf, fock_ao=None, singlet=True, wfnsym=None):
     assert mo_coeff.dtype == cp.float64
     mo_energy = mf.mo_energy
     mo_occ = mf.mo_occ
+    if not isinstance(mo_coeff, cp.ndarray):
+        mo_coeff = cp.asarray(mo_coeff)
+    if not isinstance(mo_energy, cp.ndarray):
+        mo_energy = cp.asarray(mo_energy)
+    if not isinstance(mo_occ, cp.ndarray):
+        mo_occ = cp.asarray(mo_occ)
     occidx = mo_occ == 2
     viridx = mo_occ == 0
     orbv = mo_coeff[:,viridx]
@@ -693,7 +714,13 @@ class TDHF(TDBase):
         return self.e, self.xy
 
     Gradients = TDA.Gradients
-    nac_method = TDA.nac_method
+    NAC = TDA.NAC
+
+    def to_cpu(self):
+        out = utils.to_cpu(self)
+        if out.xy is not None:
+            out.xy = [(cp.asnumpy(x), cp.asnumpy(y)) for x, y in out.xy]
+        return out
 
 TDRHF = TDHF
 
