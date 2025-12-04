@@ -1591,7 +1591,8 @@ def get_j_kpts(ni, dm_kpts, hermi=1, kpts=None, kpts_band=None):
 
     density = evaluate_density_on_g_mesh(ni, dm_kpts, kpts)
     Gv = pbc_tools._get_Gv(cell, mesh)
-    coulomb_kernel_on_g_mesh = pbc_tools.get_coulG(cell, Gv=Gv)
+    # coulomb_kernel_on_g_mesh = pbc_tools.get_coulG(cell, Gv=Gv)
+    coulomb_kernel_on_g_mesh = ni.coulG
 
     coulomb_on_g_mesh = cp.einsum("ng, g -> g", density[:, 0], coulomb_kernel_on_g_mesh)
     weight = cell.vol / ngrids
@@ -1974,8 +1975,6 @@ class MultiGridNumInt(lib.StreamObject, numint.LibXCMixin):
         Gv = pbc_tools._get_Gv(cell, cell.mesh)
         self.coulG = pbc_tools.get_coulG(cell, Gv=Gv)
         self.build()
-        if cell._pseudo:
-            self.cached_vpplocG_part1 = multigrid_v1.eval_vpplocG_part1(cell, self.mesh)
 
     build = sort_gaussian_pairs
 
