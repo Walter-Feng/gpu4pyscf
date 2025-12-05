@@ -18,6 +18,7 @@ import cupy as cp
 import numpy as np
 
 from pyscf import lib
+from gpu4pyscf.lib import logger, utils
 import pyscf.pbc.grad.rhf as cpu_rhf
 from pyscf.pbc.lib.kpts_helper import gamma_point
 from pyscf.pbc.gto.pseudo import pp_int
@@ -28,7 +29,8 @@ from gpu4pyscf.pbc.dft import multigrid_v2
 from gpu4pyscf.pbc.gto import int1e
 from gpu4pyscf.pbc.grad.pp import vpploc_part1_nuc_grad
 
-__all__ = ['Gradients']
+__all__ = ["Gradients"]
+
 
 class GradientsBase(mol_rhf.GradientsBase):
     get_ovlp = NotImplemented
@@ -53,7 +55,8 @@ class Gradients(GradientsBase):
     ):
         mf = self.base
         cell = mf.cell
-        assert hasattr(mf, '_numint')
+        log = logger.new_logger(cell)
+        assert hasattr(mf, "_numint")
         assert isinstance(mf._numint, multigrid_v2.MultiGridNumInt)
 
         if mo_energy is None:
@@ -72,10 +75,13 @@ class Gradients(GradientsBase):
             atmlst = range(cell.natm)
 
         ni = mf._numint
-        assert hasattr(mf, 'xc'), 'HF gradients not supported'
+        assert hasattr(mf, "xc"), "HF gradients not supported"
         de = multigrid_v2.get_veff_ip1(ni, mf.xc, dm0, with_j=True).get()
+
+        t0 = log.init_timer()
         s1 = int1e.int1e_ipovlp(cell)[0].get()
         de += cpu_rhf._contract_vhf_dm(self, s1, dme0) * 2
+        t0 = log.timer("ovlp grad", *t0)
 
         # the CPU code requires the attribute .rhoG
         rhoG = multigrid_v2.evaluate_density_on_g_mesh(ni, dm0).get()
@@ -83,10 +89,13 @@ class Gradients(GradientsBase):
             de += vpploc_part1_nuc_grad(ni, dm0_cpu)
         de += pp_int.vpploc_part2_nuc_grad(cell, dm0_cpu)
         de += pp_int.vppnl_nuc_grad(cell, dm0_cpu)
+        t0 = log.timer("pp grad", *t0)
+
         core_hamiltonian_gradient = int1e.int1e_ipkin(cell)[0].get()
         kinetic_contribution = cpu_rhf._contract_vhf_dm(
             self, core_hamiltonian_gradient, dm0_cpu
         )
         de -= kinetic_contribution * 2
+        t0 = log.timer("kin grad", *t0)
 
         return de
