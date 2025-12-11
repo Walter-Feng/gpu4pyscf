@@ -21,7 +21,6 @@ import warnings
 import math
 import numpy as np
 import cupy as cp
-import scipy.linalg
 from collections import Counter
 from pyscf.gto import ANG_OF, ATOM_OF, NPRIM_OF, NCTR_OF, PTR_COORD, PTR_COEFF
 from pyscf import lib, gto
@@ -29,11 +28,11 @@ from pyscf.scf import _vhf
 from gpu4pyscf.lib.cupy_helper import (
     load_library, condense, transpose_sum, reduce_to_device, hermi_triu,
     asarray)
-from gpu4pyscf.__config__ import _streams, num_devices, shm_size
+from gpu4pyscf.__config__ import num_devices, shm_size
 from gpu4pyscf.__config__ import props as gpu_specs
 from gpu4pyscf.lib import logger
 from gpu4pyscf.lib import multi_gpu
-from gpu4pyscf.gto.mole import group_basis, cart2sph_by_l
+from gpu4pyscf.gto.mole import group_basis, cart2sph_by_l, extract_pgto_params
 
 __all__ = [
     'get_jk', 'get_j', 'get_k',
@@ -162,11 +161,20 @@ def apply_coeff_C_mat_CT(spherical_matrix, mol, sorted_mol, uniq_l_ctr,
     spherical_matrix_ndim = spherical_matrix.ndim
     if spherical_matrix_ndim == 2:
         spherical_matrix = spherical_matrix[None]
-    counts = spherical_matrix.shape[0]
     n_spherical = mol.nao
     assert spherical_matrix.shape[1] == n_spherical
     assert spherical_matrix.shape[2] == n_spherical
     n_cartesian = sorted_mol.nao
+
+    output_complex = False
+    if spherical_matrix.dtype == np.complex128:
+        spherical_matrix = spherical_matrix.view(np.float64)
+        spherical_matrix = spherical_matrix.reshape(-1,n_spherical,n_spherical,2)
+        spherical_matrix = spherical_matrix.transpose(3,0,1,2).reshape(-1,n_spherical,n_spherical)
+        output_complex = True
+    else:
+        assert spherical_matrix.dtype == np.float64
+    counts = spherical_matrix.shape[0]
 
     l_ctr_count = np.asarray(l_ctr_offsets[1:] - l_ctr_offsets[:-1], dtype = np.int32)
     l_ctr_l = np.asarray(uniq_l_ctr[:,0], dtype=np.int32, order='C')
@@ -193,6 +201,11 @@ def apply_coeff_C_mat_CT(spherical_matrix, mol, sorted_mol, uniq_l_ctr,
             ctypes.c_bool(mol.cart),
         )
 
+    if output_complex:
+        outR, outI = out.reshape(2, -1, n_cartesian, n_cartesian)
+        out = outR.astype(np.complex128)
+        out.imag = outI
+
     if spherical_matrix_ndim == 2:
         out = out[0]
     return out
@@ -207,11 +220,20 @@ def apply_coeff_CT_mat_C(cartesian_matrix, mol, sorted_mol, uniq_l_ctr,
     cartesian_matrix_ndim = cartesian_matrix.ndim
     if cartesian_matrix_ndim == 2:
         cartesian_matrix = cartesian_matrix[None]
-    counts = cartesian_matrix.shape[0]
     n_cartesian = sorted_mol.nao
     assert cartesian_matrix.shape[1] == n_cartesian
     assert cartesian_matrix.shape[2] == n_cartesian
     n_spherical = mol.nao
+
+    output_complex = False
+    if cartesian_matrix.dtype == np.complex128:
+        cartesian_matrix = cartesian_matrix.view(np.float64)
+        cartesian_matrix = cartesian_matrix.reshape(-1,n_cartesian,n_cartesian,2)
+        cartesian_matrix = cartesian_matrix.transpose(3,0,1,2).reshape(-1,n_cartesian,n_cartesian)
+        output_complex = True
+    else:
+        assert cartesian_matrix.dtype == np.float64
+    counts = cartesian_matrix.shape[0]
 
     l_ctr_count = np.asarray(l_ctr_offsets[1:] - l_ctr_offsets[:-1], dtype = np.int32)
     l_ctr_l = np.asarray(uniq_l_ctr[:,0], dtype=np.int32, order='C')
@@ -238,6 +260,11 @@ def apply_coeff_CT_mat_C(cartesian_matrix, mol, sorted_mol, uniq_l_ctr,
             ctypes.c_bool(mol.cart),
         )
 
+    if output_complex:
+        outR, outI = out.reshape(2, -1, n_spherical, n_spherical)
+        out = outR.astype(np.complex128)
+        out.imag = outI
+
     if cartesian_matrix_ndim == 2:
         out = out[0]
     return out
@@ -246,6 +273,7 @@ def apply_coeff_CT_mat_C(cartesian_matrix, mol, sorted_mol, uniq_l_ctr,
 class _VHFOpt:
     def __init__(self, mol, cutoff=1e-13, tile=TILE):
         self.mol = mol
+        self.sorted_mol = None
         self.direct_scf_tol = cutoff
         self.uniq_l_ctr = None
         self.l_ctr_offsets = None
@@ -253,6 +281,15 @@ class _VHFOpt:
         self.tile = tile
 
         # Hold cache on GPU devices
+        self._rys_envs = {}
+        self._q_cond = {}
+        self._tile_q_cond = {}
+        self._s_estimator = {}
+        self._cupy_ao_idx = {}
+
+    def reset(self, mol):
+        self.mol = mol
+        self.sorted_mol = None
         self._rys_envs = {}
         self._q_cond = {}
         self._tile_q_cond = {}
@@ -283,11 +320,12 @@ class _VHFOpt:
         ao_loc = mol.ao_loc
         q_cond = np.empty((nbas,nbas))
         intor = mol._add_suffix('int2e')
-        _vhf.libcvhf.CVHFnr_int2e_q_cond(
-            getattr(_vhf.libcvhf, intor), lib.c_null_ptr(),
-            q_cond.ctypes, ao_loc.ctypes,
-            mol._atm.ctypes, ctypes.c_int(mol.natm),
-            mol._bas.ctypes, ctypes.c_int(mol.nbas), mol._env.ctypes)
+        with mol.with_integral_screen(self.direct_scf_tol**2):
+            _vhf.libcvhf.CVHFnr_int2e_q_cond(
+                getattr(_vhf.libcvhf, intor), lib.c_null_ptr(),
+                q_cond.ctypes, ao_loc.ctypes,
+                mol._atm.ctypes, ctypes.c_int(mol.natm),
+                mol._bas.ctypes, ctypes.c_int(mol.nbas), mol._env.ctypes)
         q_cond = np.log(q_cond + 1e-300).astype(np.float32)
         self.q_cond_cpu = q_cond
 
@@ -301,9 +339,28 @@ class _VHFOpt:
         if mol.omega < 0:
             # CVHFnr_sr_int2e_q_cond in pyscf has bugs in upper bound estimator.
             # Use the local version of s_estimator instead
-            s_estimator = np.empty((nbas,nbas), dtype=np.float32)
+
+            # FIXME: To avoid changing the CUDA kernel function signature,
+            # temporarily attach the extra information to the s_estimator array and
+            # pass it along with s_estimator.
+            # This is a workaround and should be addressed in the future.
+            s_estimator = np.empty((nbas+2,nbas), dtype=np.float32)
+            # The most diffuse pGTO in each shell is used to estimate the
+            # asymptotic value of SR integrals. In a contracted shell, the
+            # diffuse_ctr_coef for the diffuse_exps may only represent a portion
+            # of the AO basis. Using this ctr_coef can introduce errors in the SR
+            # integral estimation. The diffuse pGTO is normalized to approximate the
+            # entire shell.
+            diffuse_exps, _ = extract_pgto_params(mol, 'diffuse')
+            l = mol._bas[:,ANG_OF]
+            diffuse_ctr_coef = gto.gto_norm(l, diffuse_exps)
+            diffuse_exps = diffuse_exps.astype(np.float32)
+            diffuse_ctr_coef = diffuse_ctr_coef.astype(np.float32)
+            s_estimator[nbas] = diffuse_exps
+            s_estimator[nbas+1] = diffuse_ctr_coef
             libvhf_rys.sr_eri_s_estimator(
                 s_estimator.ctypes, ctypes.c_float(mol.omega),
+                diffuse_exps.ctypes, diffuse_ctr_coef.ctypes,
                 mol._atm.ctypes, ctypes.c_int(mol.natm),
                 mol._bas.ctypes, ctypes.c_int(mol.nbas), mol._env.ctypes)
             self.s_estimator_cpu = s_estimator
@@ -401,59 +458,30 @@ class _VHFOpt:
 
         return out
 
-    @property
+    @multi_gpu.property(cache='_q_cond')
     def q_cond(self):
-        device_id = cp.cuda.Device().id
-        if device_id not in self._q_cond:
-            with cp.cuda.Device(device_id), _streams[device_id]:
-                self._q_cond[device_id] = asarray(self.q_cond_cpu)
-        return self._q_cond[device_id]
+        return asarray(self.q_cond_cpu)
 
-    @property
+    @multi_gpu.property(cache='_tile_q_cond')
     def tile_q_cond(self):
-        device_id = cp.cuda.Device().id
-        if device_id not in self._tile_q_cond:
-            with cp.cuda.Device(device_id), _streams[device_id]:
-                q_cpu = self._tile_q_cond_cpu
-                self._tile_q_cond[device_id] = asarray(q_cpu)
-        return self._tile_q_cond[device_id]
+        return asarray(self._tile_q_cond_cpu)
 
-    @property
+    @multi_gpu.property(cache='_s_estimator')
     def s_estimator(self):
-        if not self.mol.omega < 0:
-            return None
-        device_id = cp.cuda.Device().id
-        if device_id not in self._rys_envs:
-            with cp.cuda.Device(device_id), _streams[device_id]:
-                s_cpu = self.s_estimator_cpu
-                self._s_estimator[device_id] = asarray(s_cpu)
-        return self._s_estimator[device_id]
+        return asarray(self.s_estimator_cpu)
 
-    @property
+    @multi_gpu.property(cache='_cupy_ao_idx')
     def cupy_ao_idx(self):
-        device_id = cp.cuda.Device().id
-        if device_id not in self._cupy_ao_idx:
-            with cp.cuda.Device(device_id), _streams[device_id]:
-                ao_idx_cpu = self.ao_idx
-                self._cupy_ao_idx[device_id] = cp.asarray(ao_idx_cpu, dtype = cp.int32)
-        return self._cupy_ao_idx[device_id]
+        return asarray(self.ao_idx, dtype = cp.int32)
 
-    @property
+    @multi_gpu.property(cache='_rys_envs')
     def rys_envs(self):
-        device_id = cp.cuda.Device().id
-        if device_id not in self._rys_envs:
-            with cp.cuda.Device(device_id), _streams[device_id]:
-                mol = self.sorted_mol
-                _atm = cp.array(mol._atm)
-                _bas = cp.array(mol._bas)
-                _env = cp.array(_scale_sp_ctr_coeff(mol))
-                ao_loc = cp.array(mol.ao_loc)
-                self._rys_envs[device_id] = rys_envs = RysIntEnvVars(
-                    mol.natm, mol.nbas,
-                    _atm.data.ptr, _bas.data.ptr, _env.data.ptr,
-                    ao_loc.data.ptr)
-                rys_envs._env_ref_holder = (_atm, _bas, _env, ao_loc)
-        return self._rys_envs[device_id]
+        mol = self.sorted_mol
+        _atm = cp.array(mol._atm)
+        _bas = cp.array(mol._bas)
+        _env = cp.array(_scale_sp_ctr_coeff(mol))
+        ao_loc = cp.array(mol.ao_loc)
+        return RysIntEnvVars.new(mol.natm, mol.nbas, _atm, _bas, _env, ao_loc)
 
     @property
     def coeff(self):
@@ -515,6 +543,7 @@ class _VHFOpt:
 
         def proc(dms, dm_cond):
             device_id = cp.cuda.device.get_device_id()
+            stream = cp.cuda.get_current_stream()
             log = logger.new_logger(mol, verbose)
             t0 = log.init_timer()
             dms = cp.asarray(dms) # transfer to current device
@@ -560,7 +589,7 @@ class _VHFOpt:
                         ctypes.cast(vk.data.ptr, ctypes.c_void_p),
                         ctypes.cast(dms.data.ptr, ctypes.c_void_p),
                         ctypes.c_int(n_dm), ctypes.c_int(nao),
-                        rys_envs, (ctypes.c_int*8)(*shls_slice),
+                        ctypes.byref(rys_envs), (ctypes.c_int*8)(*shls_slice),
                         ctypes.c_int(SHM_SIZE),
                         ctypes.c_int(npairs_ij), ctypes.c_int(_npairs_kl),
                         ctypes.cast(pair_ij_mapping.data.ptr, ctypes.c_void_p),
@@ -582,6 +611,8 @@ class _VHFOpt:
                     t1, t1p = log.timer_debug1(msg, *t1), t1
                     timing_counter[llll] += t1[1] - t1p[1]
                     kern_counts += 1
+                if num_devices > 1:
+                    stream.synchronize()
 
             if hermi == 1:
                 vj *= 2.
@@ -677,6 +708,7 @@ class _VHFOpt:
 
         def proc(dm_xyz, dm_cond):
             device_id = cp.cuda.device.get_device_id()
+            stream = cp.cuda.get_current_stream()
             log = logger.new_logger(mol, verbose)
             t0 = log.init_timer()
             dm_xyz = asarray(dm_xyz) # transfer to current device
@@ -726,7 +758,7 @@ class _VHFOpt:
                         ctypes.cast(vj_xyz.data.ptr, ctypes.c_void_p),
                         ctypes.cast(dm_xyz.data.ptr, ctypes.c_void_p),
                         ctypes.c_int(n_dm), ctypes.c_int(nao),
-                        rys_envs, (ctypes.c_int*3)(*scheme),
+                        ctypes.byref(rys_envs), (ctypes.c_int*3)(*scheme),
                         (ctypes.c_int*8)(*shls_slice),
                         ctypes.c_int(npairs_ij), ctypes.c_int(_npairs_kl),
                         ctypes.cast(pair_ij_mapping.data.ptr, ctypes.c_void_p),
@@ -750,6 +782,8 @@ class _VHFOpt:
                         timing_collection[llll] = 0
                     timing_collection[llll] += t1[1] - t1p[1]
                     kern_counts += 1
+                if num_devices > 1:
+                    stream.synchronize()
             return vj_xyz, kern_counts, timing_collection
 
         results = multi_gpu.run(proc, args=(dm_xyz, dm_cond), non_blocking=True)
@@ -792,7 +826,7 @@ class _VHFOpt:
 
     def get_k(self, dms, hermi, verbose):
         '''
-        Build JK for the sorted_mol. Density matrices dms and the return K
+        Build K matrix for the sorted_mol. Density matrices dms and the return K
         matrix are all corresponding to the sorted_mol
         '''
         if callable(dms):
@@ -823,6 +857,7 @@ class _VHFOpt:
 
         def proc(dms, dm_cond):
             device_id = cp.cuda.device.get_device_id()
+            stream = cp.cuda.stream.get_current_stream()
             log = logger.new_logger(mol, verbose)
             t0 = log.init_timer()
             dms = cp.asarray(dms) # transfer to current device
@@ -865,7 +900,7 @@ class _VHFOpt:
                         ctypes.cast(vk.data.ptr, ctypes.c_void_p),
                         ctypes.cast(dms.data.ptr, ctypes.c_void_p),
                         ctypes.c_int(n_dm), ctypes.c_int(nao),
-                        rys_envs, (ctypes.c_int*8)(*shls_slice),
+                        ctypes.byref(rys_envs), (ctypes.c_int*8)(*shls_slice),
                         ctypes.c_int(SHM_SIZE),
                         ctypes.c_int(npairs_ij), ctypes.c_int(_npairs_kl),
                         ctypes.cast(pair_ij_mapping.data.ptr, ctypes.c_void_p),
@@ -887,6 +922,8 @@ class _VHFOpt:
                     t1, t1p = log.timer_debug1(msg, *t1), t1
                     timing_counter[llll] += t1[1] - t1p[1]
                     kern_counts += 1
+                if num_devices > 1:
+                    stream.synchronize()
 
             if hermi == 1:
                 vk = transpose_sum(vk)
@@ -952,7 +989,6 @@ class RysIntEnvVars(ctypes.Structure):
                             env.data.ptr, ao_loc.data.ptr)
         # Keep a reference to these arrays, prevent releasing them upon returning
         obj._env_ref_holder = (atm, bas, env, ao_loc)
-        obj._device = cp.cuda.device.get_device_id()
         return obj
 
     def copy(self):
@@ -962,6 +998,10 @@ class RysIntEnvVars(ctypes.Structure):
         env = cp.asarray(env)
         ao_loc = cp.asarray(ao_loc)
         return RysIntEnvVars.new(self.natm, self.nbas, atm, bas, env, ao_loc)
+
+    @property
+    def device(self):
+        return self._env_ref_holder[0].device
 
 def _scale_sp_ctr_coeff(mol):
     # Match normalization factors of s, p functions in libcint
@@ -1038,13 +1078,11 @@ def _make_tril_pair_mappings(l_ctr_bas_loc, q_cond, cutoff, tile=4):
             njsh = jsh1 - jsh0
             ntiles_i = (nish+tile-1) // tile
             ntiles_j = (njsh+tile-1) // tile
-            pair_ij = (cp.arange(ish0, ish0+ntiles_i*tile, dtype=np.int32)[:,None] * nbas +
-                       cp.arange(jsh0, jsh0+ntiles_j*tile, dtype=np.int32))
-            pair_ij = pair_ij.reshape(ntiles_i,tile,ntiles_j,tile).transpose(0,2,1,3)
             ish = cp.arange(ish0, ish0+ntiles_i*tile, dtype=np.int32).reshape(ntiles_i,tile)
             jsh = cp.arange(jsh0, jsh0+ntiles_j*tile, dtype=np.int32).reshape(ntiles_j,tile)
             ish = ish[:,None,:,None]
             jsh = jsh[None,:,None,:]
+            pair_ij = ish * nbas + jsh
             if i == j:
                 pair_ij = pair_ij[(ish >= jsh) & (ish < ish1) & (jsh < jsh1)]
             else:
@@ -1060,6 +1098,7 @@ def _make_j_engine_pair_locs(mol):
     return np.asarray(pair_loc, dtype=np.int32)
 
 def quartets_scheme(mol, l_ctr_pattern, with_j, with_k, shm_size=SHM_SIZE):
+    raise RuntimeError('deprecated')
     ls = l_ctr_pattern[:,0]
     li, lj, lk, ll = ls
     order = li + lj + lk + ll

@@ -552,8 +552,6 @@ class QMMMSCF(QMMM):
         scf_grad = super().Gradients()
         return qmmm_grad_for_scf(scf_grad)
 
-    Gradients = nuc_grad_method
-
 
 def grad_qm_multipole(
     Tija, Tijab, Tijabc, qm_charges, qm_dipoles, qm_quads, mm_charges

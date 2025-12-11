@@ -33,9 +33,10 @@ from gpu4pyscf.lib.cupy_helper import (reduce_to_device,
     contract, tag_array, transpose_sum, get_avail_mem, condense,
     krylov)
 from gpu4pyscf.__config__ import props as gpu_specs
-from gpu4pyscf.__config__ import _streams, num_devices
+from gpu4pyscf.__config__ import num_devices
 from gpu4pyscf.lib import logger
 from gpu4pyscf.lib import multi_gpu
+from gpu4pyscf.lib import utils
 from gpu4pyscf.scf.jk import (
     LMAX, QUEUE_DEPTH, SHM_SIZE, THREADS, GROUP_SIZE, libvhf_rys, _VHFOpt,
     init_constant, _make_tril_tile_mappings, _make_tril_pair_mappings,
@@ -132,8 +133,8 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
     if mo_energy is None: mo_energy = mf.mo_energy
     if mo_occ is None:    mo_occ = mf.mo_occ
     if mo_coeff is None:  mo_coeff = mf.mo_coeff
-    assert atmlst is None
-    atmlst = range(mol.natm)
+    if atmlst is None:
+        atmlst = range(mol.natm)
 
     mocc = mo_coeff[:,mo_occ>0]
     dm0 = mocc.dot(mocc.T) * 2
@@ -629,6 +630,9 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
     e_ai = 1 / (e_a[:,None] + level_shift - e_i)
     nvir, nocc = e_ai.shape
 
+    if cupy.any(cp.isinf(e_ai)) or cupy.any(cp.isnan(e_ai)):
+        raise ValueError(f"e_ai = {e_ai} contains inf or nan, likely because HOMO-LUMO gap is zero.")
+
     mocc = mo_coeff[:,occidx]
     nao, nmo = mo_coeff.shape
     natm = mol.natm
@@ -721,51 +725,43 @@ def gen_vind(hessobj, mo_coeff, mo_occ):
 
 def hess_nuc_elec(mol, dm):
     '''
-    Calculate hessian contribution due to (nuc, elec) pair, w/o ECP
+    H1e hessian nuclear repulsion contribution that originates from differentiating nuclear position
+    (both first derivative d2I_dAdC and second derivative d2I_dC2)
+    w/o ECP
     '''
-    from gpu4pyscf.df import int3c2e
     coords = mol.atom_coords()
     charges = cupy.asarray(mol.atom_charges(), dtype=np.float64)
 
-    fakemol = gto.fakemol_for_charges(coords)
-    fakemol.output = mol.output
-    fakemol.verbose = mol.verbose
-    fakemol.stdout = mol.stdout
-    intopt = int3c2e.VHFOpt(mol, fakemol, 'int2e')
-    intopt.build(1e-14, diag_block_with_triu=True, aosym=False,
-                 group_size=int3c2e.BLKSIZE, group_size_aux=int3c2e.BLKSIZE)
-    dm = intopt.sort_orbitals(cupy.asarray(dm), axis=[0,1])
+    aoslice = mol.aoslice_by_atom()
+    aoslice = numpy.array(aoslice)
 
-    natm = mol.natm
-    nao = mol.nao
-    hcore_diag = cupy.zeros([9,natm])
-    hcore_aa = cupy.zeros([9,natm,nao])
-    for i0,i1,j0,j1,k0,k1,int3c_blk in int3c2e.loop_int3c2e_general(intopt, ip_type='ipip1'):
-        haa = contract('xpji,ij->xpi', int3c_blk, dm[i0:i1,j0:j1])
-        hcore_aa[:,k0:k1,i0:i1] += haa
-        hcore_diag[:,k0:k1] -= contract('xpji,ij->xp', int3c_blk, dm[i0:i1,j0:j1])
+    from gpu4pyscf.gto import int3c1e
+    from gpu4pyscf.gto.int3c1e_ipip import int1e_grids_ip1ip2, int1e_grids_ipip2
+    intopt_derivative = int3c1e.VHFOpt(mol)
+    intopt_derivative.build(cutoff = 1e-14, aosym = False)
 
-    hcore_ab = cupy.zeros([9,natm,nao])
-    for i0,i1,j0,j1,k0,k1,int3c_blk in int3c2e.loop_int3c2e_general(intopt, ip_type='ipvip1'):
-        hab = contract('xpji,ij->xpi', int3c_blk, dm[i0:i1,j0:j1])
-        hcore_ab[:,k0:k1,i0:i1] += hab
-        hcore_diag[:,k0:k1] -= contract('xpji,ij->xp', int3c_blk, dm[i0:i1,j0:j1])
+    d2e = cupy.zeros([3, 3, mol.natm, mol.natm])
 
-    hcore_diag = contract('xp,p->xp', hcore_diag, charges)
-    hcore_aa = contract('xpj,p->xpj', hcore_aa, charges)
-    hcore_ab = contract('xpj,p->xpj', hcore_ab, charges)
+    for j_atom in range(mol.natm):
+        # TODO: It is computing one charge at a time, and it's likely slow
+        g0,g1 = j_atom,j_atom+1
+        d2I_dAdC = int1e_grids_ip1ip2(mol, coords[g0:g1, :], charges = charges[g0:g1], intopt = intopt_derivative)
 
-    aoslices = mol.aoslice_by_atom()
-    ao2atom = int3c2e.get_ao2atom(intopt, aoslices)
+        for i_atom in range(mol.natm):
+            p0,p1 = aoslice[i_atom, 2:]
+            d2e[:, :, i_atom, j_atom] += contract('ij,dDij->dD', dm[p0:p1, :], d2I_dAdC[:, :, p0:p1, :])
+            d2e[:, :, i_atom, j_atom] += contract('ij,dDij->dD', dm[:, p0:p1], d2I_dAdC[:, :, p0:p1, :].transpose(0,1,3,2))
 
-    hcore_aa = contract('xpj,jq->xpq', hcore_aa, ao2atom).reshape([3,3,natm,natm])
-    hcore_ab = contract('xpj,jq->xpq', hcore_ab, ao2atom).reshape([3,3,natm,natm])
-    hcore = hcore_aa + hcore_aa.transpose([1,0,3,2])
-    hcore+= hcore_ab.transpose([1,0,2,3]) + hcore_ab.transpose([0,1,3,2])
-    hcore_diag = hcore_diag.reshape([3,3,natm])
-    idx = np.arange(natm)
-    hcore[:,:,idx,idx] += hcore_diag
-    return hcore * 2.0
+            d2e[:, :, j_atom, i_atom] += contract('ij,dDij->dD', dm[p0:p1, :], d2I_dAdC[:, :, p0:p1, :].transpose(1,0,2,3))
+            d2e[:, :, j_atom, i_atom] += contract('ij,dDij->dD', dm[:, p0:p1], d2I_dAdC[:, :, p0:p1, :].transpose(1,0,3,2))
+    d2I_dAdC = None
+
+    d2I_dC2 = int1e_grids_ipip2(mol, coords, dm = dm, intopt = intopt_derivative)
+    for i_atom in range(mol.natm):
+        d2e[:, :, i_atom, i_atom] += d2I_dC2[:, :, i_atom] * charges[i_atom]
+    d2I_dC2 = None
+
+    return -d2e
 
 def hess_nuc_elec_ecp(mol, dm):
     '''
@@ -916,6 +912,11 @@ def _get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
     return vj - 0.5 * vk
 
 class HessianBase(lib.StreamObject):
+
+    to_cpu = utils.to_cpu
+    to_gpu = utils.to_gpu
+    device = utils.device
+
     # attributes
     max_cycle   = rhf_hess_cpu.HessianBase.max_cycle
     level_shift = rhf_hess_cpu.HessianBase.level_shift
@@ -952,18 +953,14 @@ class HessianBase(lib.StreamObject):
                  self.max_memory, lib.current_memory()[0])
         return self
 
-    def to_cpu(self):
-        mf = self.base.to_cpu()
-        from importlib import import_module
-        mod = import_module(self.__module__.replace('gpu4pyscf', 'pyscf'))
-        cls = getattr(mod, self.__class__.__name__)
-        obj = cls(mf)
-        return obj
+    def reset(self, mol=None):
+        if mol is not None:
+            self.mol = mol
+        self.base.reset(mol)
+        return self
 
 class Hessian(HessianBase):
     '''Non-relativistic restricted Hartree-Fock hessian'''
-
-    from gpu4pyscf.lib.utils import to_gpu, device
 
     def __init__(self, scf_method):
         self.verbose = scf_method.verbose

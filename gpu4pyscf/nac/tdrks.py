@@ -71,8 +71,7 @@ def get_nacv_ge(td_nac, x_yI, EI, singlet=True, atmlst=None, verbose=logger.INFO
     nvir = nmo - nocc
     orbv = mo_coeff[:, nocc:]
     orbo = mo_coeff[:, :nocc]
-    if getattr(mf, 'with_solvent', None) is not None:
-        raise NotImplementedError('With solvent is not supported yet')
+    log = logger.new_logger(td_nac, verbose)
 
     xI, yI = x_yI
     xI = cp.asarray(xI).reshape(nocc, nvir).T
@@ -85,8 +84,33 @@ def get_nacv_ge(td_nac, x_yI, EI, singlet=True, atmlst=None, verbose=logger.INFO
     ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
     with_k = ni.libxc.is_hybrid_xc(mf.xc)
+    if isinstance(td_nac.base, tdscf.ris.TDDFT) or isinstance(td_nac.base, tdscf.ris.TDA):
+        if td_nac.ris_zvector_solver:
+            log.note('Use ris-approximated Z-vector solver')
+            from gpu4pyscf.dft import rks
+            from gpu4pyscf.tdscf.ris import get_auxmol
+            from gpu4pyscf.grad import tdrks_ris
 
-    vresp = mf.gen_response(singlet=None, hermi=1)
+            theta = td_nac.base.theta
+            J_fit = td_nac.base.J_fit
+            K_fit = td_nac.base.K_fit
+            auxmol_J = get_auxmol(mol=mol, theta=theta, fitting_basis=J_fit)
+            if K_fit == J_fit and (omega == 0 or omega is None):
+                auxmol_K = auxmol_J
+            else:
+                auxmol_K = get_auxmol(mol=mol, theta=theta, fitting_basis=K_fit)
+            mf_J = rks.RKS(mol).density_fit()
+            mf_J.with_df.auxmol = auxmol_J
+            mf_K = rks.RKS(mol).density_fit()
+            mf_K.with_df.auxmol = auxmol_K
+            vresp = tdrks_ris.gen_response_ris(mf, mf_J, mf_K, mo_coeff, mo_occ, singlet=None, hermi=1)
+        else:
+            log.note('Use standard Z-vector solver')
+            vresp = td_nac.base._scf.gen_response(singlet=None, hermi=1)
+    else:
+        if getattr(td_nac, 'ris_zvector_solver', None) is not None:
+            raise NotImplementedError('Ris-approximated Z-vector solver is not supported for standard TDDFT or TDA')
+        vresp = td_nac.base.gen_response(singlet=None, hermi=1)
 
     def fvind(x):
         dm = reduce(cp.dot, (orbv, x.reshape(nvir, nocc) * 2, orbo.T)) # double occupency
@@ -121,6 +145,7 @@ def get_nacv_ge(td_nac, x_yI, EI, singlet=True, atmlst=None, verbose=logger.INFO
     mf_grad = mf.nuc_grad_method()
     s1 = mf_grad.get_ovlp(mol)
     dmz1doo = z1aoS
+    td_nac._dmz1doo = dmz1doo
     oo0 = reduce(cp.dot, (orbo, orbo.T)) * 2.0
 
     if atmlst is None:
@@ -242,8 +267,6 @@ def get_nacv_ee(td_nac, x_yI, x_yJ, EI, EJ, singlet=True, atmlst=None, verbose=l
     nvir = nmo - nocc
     orbv = mo_coeff[:, nocc:]
     orbo = mo_coeff[:, :nocc]
-    if getattr(mf, 'with_solvent', None) is not None:
-        raise NotImplementedError('With solvent is not supported yet')
 
     xI, yI = x_yI
     xJ, yJ = x_yJ
@@ -265,6 +288,8 @@ def get_nacv_ee(td_nac, x_yI, x_yJ, EI, EJ, singlet=True, atmlst=None, verbose=l
     xmyJ = (xJ - yJ)
     dmxpyJ = reduce(cp.dot, (orbv, xpyJ, orbo.T)) 
     dmxmyJ = reduce(cp.dot, (orbv, xmyJ, orbo.T)) 
+    td_nac._dmxpyI = dmxpyI
+    td_nac._dmxpyJ = dmxpyJ
 
     rIJoo =-contract('ai,aj->ij', xJ, xI) - contract('ai,aj->ij', yI, yJ)
     rIJvv = contract('ai,bi->ab', xI, xJ) + contract('ai,bi->ab', yJ, yI)
@@ -335,13 +360,16 @@ def get_nacv_ee(td_nac, x_yI, x_yJ, EI, EJ, singlet=True, atmlst=None, verbose=l
             vk2J += vk2J_omega * (alpha - hyb)
 
         veff0doo = vj0IJ * 2 - vk0IJ + f1ooIJ[0] + k1aoIJ[0] * 2
+        veff0doo += td_nac.solvent_response(dmzooIJ)
         wvo = reduce(cp.dot, (orbv.T, veff0doo, orbo)) * 2
         veffI = vj1I * 2 - vk1I + f1voI[0] * 2
+        veffI += td_nac.solvent_response(dmxpyI + dmxpyI.T)
         veffI *= 0.5
         veff0mopI = reduce(cp.dot, (mo_coeff.T, veffI, mo_coeff))
         wvo -= contract("ki,ai->ak", veff0mopI[:nocc, :nocc], xpyJ) * 2  
         wvo += contract("ac,ai->ci", veff0mopI[nocc:, nocc:], xpyJ) * 2
         veffJ = vj1J * 2 - vk1J + f1voJ[0] * 2
+        veffJ += td_nac.solvent_response(dmxpyJ + dmxpyJ.T)
         veffJ *= 0.5
         veff0mopJ = reduce(cp.dot, (mo_coeff.T, veffJ, mo_coeff))
         wvo -= contract("ki,ai->ak", veff0mopJ[:nocc, :nocc], xpyI) * 2  
@@ -369,13 +397,16 @@ def get_nacv_ee(td_nac, x_yI, x_yJ, EI, EJ, singlet=True, atmlst=None, verbose=l
             vj1J = cp.asarray(vj1J)
 
         veff0doo = vj0IJ * 2 + f1ooIJ[0] + k1aoIJ[0] * 2
+        veff0doo += td_nac.solvent_response(dmzooIJ)
         wvo = reduce(cp.dot, (orbv.T, veff0doo, orbo)) * 2
         veffI = vj1I * 2 + f1voI[0] * 2
+        veffI += td_nac.solvent_response(dmxpyI + dmxpyI.T)
         veffI *= 0.5
         veff0mopI = reduce(cp.dot, (mo_coeff.T, veffI, mo_coeff))
         wvo -= contract("ki,ai->ak", veff0mopI[:nocc, :nocc], xpyJ) * 2  
         wvo += contract("ac,ai->ci", veff0mopI[nocc:, nocc:], xpyJ) * 2
         veffJ = vj1J * 2 + f1voJ[0] * 2
+        veffJ += td_nac.solvent_response(dmxpyJ + dmxpyJ.T)
         veffJ *= 0.5
         veff0mopJ = reduce(cp.dot, (mo_coeff.T, veffJ, mo_coeff))
         wvo -= contract("ki,ai->ak", veff0mopJ[:nocc, :nocc], xpyI) * 2  
@@ -383,7 +414,7 @@ def get_nacv_ee(td_nac, x_yI, x_yJ, EI, EJ, singlet=True, atmlst=None, verbose=l
         veff0momI = cp.zeros((nmo, nmo))
         veff0momJ = cp.zeros((nmo, nmo))
 
-    vresp = mf.gen_response(singlet=None, hermi=1)
+    vresp = td_nac.base.gen_response(singlet=None, hermi=1)
 
     def fvind(x):
         dm = reduce(cp.dot, (orbv, x.reshape(nvir, nocc) * 2, orbo.T)) # double occupency
@@ -453,6 +484,7 @@ def get_nacv_ee(td_nac, x_yI, x_yJ, EI, EJ, singlet=True, atmlst=None, verbose=l
     s1 = mf_grad.get_ovlp(mol)
     z1aoS = (z1ao + z1ao.T)*0.5* (EJ - EI)
     dmz1doo = z1aoS + dmzooIJ  # P
+    td_nac._dmz1doo = dmz1doo
     oo0 = reduce(cp.dot, (orbo, orbo.T))*2  # D
 
     if atmlst is None:
@@ -612,6 +644,3 @@ class NAC(tdrhf.NAC):
     @lib.with_doc(get_nacv_ee.__doc__)
     def get_nacv_ee(self, x_yI, x_yJ, EI, EJ, singlet, atmlst=None, verbose=logger.INFO):
         return get_nacv_ee(self, x_yI, x_yJ, EI, EJ, singlet, atmlst, verbose)
-
-
-

@@ -13,13 +13,14 @@
 # limitations under the License.
 
 
+import builtins
 from concurrent.futures import ThreadPoolExecutor
 import functools
 import cupy as cp
 import numpy as np
 from pyscf.lib import prange
 from gpu4pyscf.lib.memcpy import p2p_transfer
-from gpu4pyscf.__config__ import num_devices, _streams
+from gpu4pyscf.__config__ import num_devices
 
 __all__ = [
     'run', 'map', 'reduce', 'array_reduce', 'array_broadcast', 'lru_cache'
@@ -37,7 +38,7 @@ def run(func, args=(), kwargs={}, non_blocking=False):
     synchronize()
 
     def proc(device_id):
-        with cp.cuda.Device(device_id), _streams[device_id]:
+        with cp.cuda.Device(device_id):
             return func(*args, **kwargs)
 
     if not non_blocking:
@@ -109,13 +110,14 @@ def array_broadcast(a):
     out = [None] * num_devices
     out[0] = a
 
+    Device = cp.cuda.Device
     # Tree broadcast
     step = num_devices >> 1
     while step > 0:
         for device_id in range(0, num_devices, 2*step):
             if device_id + step < num_devices:
-                _streams[device_id].synchronize()
-                with cp.cuda.Device(device_id+step), _streams[device_id+step]:
+                Device(device_id).synchronize()
+                with Device(device_id+step):
                     out[device_id+step] = dst = cp.empty_like(a)
                     p2p_transfer(dst, a)
         step >>= 1
@@ -134,22 +136,24 @@ def array_reduce(array_list, inplace=False):
     dtype = a0.dtype
     assert all(x.dtype == dtype for x in array_list)
 
+    Device = cp.cuda.Device
     array_list = list(array_list)
     for device_id in range(num_devices):
-        with cp.cuda.Device(device_id), _streams[device_id]:
+        with Device(device_id):
             if inplace or device_id % 2 == 1:
                 array_list[device_id] = array_list[device_id].ravel()
             else:
                 array_list[device_id] = array_list[device_id].copy().ravel()
 
+    Device = cp.cuda.Device
     blksize = 1024*1024*1024 // dtype.itemsize # 1GB
     # Tree-reduce
     step = 1
     while step < num_devices:
         for device_id in range(0, num_devices, 2*step):
             if device_id + step < num_devices:
-                _streams[device_id+step].synchronize()
-                with cp.cuda.Device(device_id), _streams[device_id]:
+                Device(device_id+step).synchronize()
+                with Device(device_id):
                     dst = array_list[device_id]
                     src = array_list[device_id+step]
                     buf = cp.empty_like(dst[:blksize])
@@ -157,6 +161,37 @@ def array_reduce(array_list, inplace=False):
                         dst[p0:p1] += p2p_transfer(buf[:p1-p0], src[p0:p1])
         step *= 2
     return array_list[0].reshape(out_shape)
+
+def property(cache=None):
+    '''@property decorator that automatically transfers cupy arrays to side
+    devices.
+
+    When cache is specified, data for each device will be cached in the
+    attribute defined by the specified name
+    '''
+    assert isinstance(cache, str)
+
+    def new_decorator(method):
+        def attr_method(obj):
+            device_id = cp.cuda.device.get_device_id()
+            _cache = getattr(obj, cache, None) # _cache must be a dict
+            if cache is None or not isinstance(_cache, dict):
+                out = method(obj)
+                if device_id != out.device:
+                    # the output of method might not be a cupy array
+                    out = out.copy()
+                return out
+
+            if device_id in _cache:
+                out = _cache[device_id]
+            else:
+                out = method(obj)
+                if device_id != out.device:
+                    out = out.copy()
+                    _cache[device_id] = out
+            return out
+        return builtins.property(attr_method)
+    return new_decorator
 
 def lru_cache(size):
     '''LRU cache for multiple devices'''
@@ -175,10 +210,8 @@ def synchronize(devices=None):
     '''Synchronize cross all devices and all streams'''
     if num_devices > 1:
         if devices is None:
-            for s in _streams:
-                s.synchronize()
-        else:
-            for device_id in devices:
-                cp.cuda.Device(device_id).synchronize()
+            devices = range(num_devices)
+        for device_id in devices:
+            cp.cuda.Device(device_id).synchronize()
 
-    cp.cuda.get_current_stream().synchronize()
+    cp.cuda.Device().synchronize()

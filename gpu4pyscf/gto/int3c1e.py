@@ -24,8 +24,9 @@ from gpu4pyscf.lib import logger
 from gpu4pyscf.scf.int4c2e import BasisProdCache
 from gpu4pyscf.df.int3c2e import sort_mol, _split_l_ctr_groups, get_pairing
 from gpu4pyscf.gto.mole import basis_seg_contraction
-from gpu4pyscf.__config__ import num_devices, _streams
+from gpu4pyscf.__config__ import num_devices
 
+GPU_AO_LMAX = 4
 BLKSIZE = 128
 
 libgint = load_library('libgint')
@@ -99,6 +100,8 @@ class VHFOpt(_vhf.VHFOpt):
         self.cart_ao_loc = [cart_ao_loc[cp] for cp in l_ctr_offsets]
         self.sph_ao_loc = [sph_ao_loc[cp] for cp in l_ctr_offsets]
         self.angular = [l[0] for l in uniq_l_ctr]
+        if any(np.array(self.angular) > GPU_AO_LMAX):
+            raise NotImplementedError("H orbital or higher (5Z basis or higher) is not supported")
 
         # Sorted AO indices
         ao_loc = mol.ao_loc_nr(cart=original_mol.cart)
@@ -133,7 +136,7 @@ class VHFOpt(_vhf.VHFOpt):
 
         self._bpcache = {}
         for n in range(num_devices):
-            with cp.cuda.Device(n), _streams[n]:
+            with cp.cuda.Device(n):
                 bpcache = ctypes.POINTER(BasisProdCache)()
                 scale_shellpair_diag = 1.0
                 libgint.GINTinit_basis_prod(
