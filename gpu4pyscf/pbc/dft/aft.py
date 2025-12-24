@@ -2,8 +2,7 @@
 # Copyright 2025 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# you may not use this file except in compliance with the License. You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
@@ -34,7 +33,7 @@ import gpu4pyscf.pbc.dft.gen_grid as gen_grid
 from gpu4pyscf.lib.cupy_helper import contract, tag_array, load_library
 
 
-def common_fac_sp(angular: int):
+def common_fac_sp(angular: int) -> float:
     match angular:
         case 0:
             return 0.282094791773878143
@@ -44,7 +43,7 @@ def common_fac_sp(angular: int):
             return 1.0
 
 
-def polynomials(coords: cp.ndarray, angular: int):
+def polynomials(coords: cp.ndarray, angular: int) -> cp.ndarray:
     assert coords.shape[-1] == 3
     x, y, z = coords.T
     n_functions = (angular + 1) * (angular + 2) // 2
@@ -71,13 +70,61 @@ def polynomials(coords: cp.ndarray, angular: int):
     return result * common_fac_sp(angular)
 
 
-def power_series(norm_coords: cp.ndarray, max_power: int):
-    result = cp.zeros((max_power + 1, len(norm_coords)))
-    result[0] = norm_coords
-    for i in range(max_power):
-        result[i + 1] = result[i] * norm_coords
+def orbital_coefficient(angular: int) -> cp.ndarray:
+    match angular:
+        case 0:
+            return cp.ones((1, 3, 1)) * common_fac_sp(angular)
+        case 1:
+            pass
+
+
+def hermite_polynomials(g: cp.ndarray, max_power: int) -> cp.ndarray:
+    result = cp.ones((max_power + 1, len(g)))
+
+    if max_power == 0:
+        return result
+
+    result[1] = g
+
+    for i in range(max_power - 1):
+        result[i + 2] = 2 * g * result[i + 1] - 2 * (i + 1) * result[i]
 
     return result
+
+
+def hermite_polynomials_in_xyz(g_xyz: cp.ndarray, max_power: int) -> cp.ndarray:
+    result = cp.ones((3, (max_power + 1), g_xyz.shape[-1]))
+
+    for i in range(3):
+        result[i] = hermite_polynomials(g_xyz[i], max_power)
+
+    return result
+
+
+def binomial_tensor(to_i: float, to_j: float, i_angular: int, j_angular: int):
+    dd_polynomial_tensor = cp.array(
+        [
+            [[1, 0, 0, 0, 0], [to_j, 1, 0, 0, 0], [to_j**2, 2 * to_j, 1, 0, 0]],
+            [
+                [to_i, 1, 0, 0, 0],
+                [to_i * to_j, to_i + to_j, 1, 0, 0],
+                [to_i * to_j**2, 2 * to_i * to_j + to_j**2, to_i + 2 * to_j, 1, 0],
+            ],
+            [
+                [to_i**2, 2 * to_i, 1, 0, 0],
+                [to_i**2 * to_j, to_i**2 + 2 * to_i * to_j, 2 * to_i + to_j, 1, 0],
+                [
+                    to_i**2 * to_j**2,
+                    2 * to_i**2 * to_j + 2 * to_i * to_j**2,
+                    to_i**2 + 4 * to_i * to_j + to_j**2,
+                    2 * to_i + 2 * to_j,
+                    1,
+                ],
+            ],
+        ]
+    )
+
+    return dd_polynomial_tensor[: (i_angular + 1), : (j_angular + 1), (i_angular + j_angular + 1)]
 
 
 class AFTDFNumInt(pbc_numint.NumInt):
@@ -222,6 +269,9 @@ dm = cp.ones((cell.nao_nr(), cell.nao_nr()))
 ref_numint = multigrid_v2.MultiGridNumInt(cell)
 grid_coords = exp_numint.grid.coords.get()
 reciprocal_coords = cell.get_Gv()
+
+hermite_G = hermite_polynomials_in_xyz(cp.asarray(reciprocal_coords.T), 5)
+print(hermite_G)
 
 # Note: analytical expression of a fft of one dimension gaussian function f(x)
 # is equivalent to, in Mathematica,
