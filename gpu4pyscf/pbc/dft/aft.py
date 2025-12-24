@@ -43,6 +43,18 @@ def common_fac_sp(angular: int) -> float:
             return 1.0
 
 
+def power_series(coords: cp.ndarray, max_angular: int) -> cp.ndarray:
+    assert coords.shape[-1] == 3
+
+    result = cp.ones((3, max_angular + 1, len(coords)))
+
+    for xyz in range(3):
+        for i in range(max_angular):
+            result[xyz, i + 1] = cp.power(coords[:, xyz], i + 1)
+
+    return result
+
+
 def polynomials(coords: cp.ndarray, angular: int) -> cp.ndarray:
     assert coords.shape[-1] == 3
     x, y, z = coords.T
@@ -101,7 +113,42 @@ def hermite_polynomials_in_xyz(g_xyz: cp.ndarray, max_power: int) -> cp.ndarray:
     return result
 
 
+def polynomial_tensor(angular):
+    n_functions = (angular + 1) * (angular + 2) // 2
+
+    result = np.zeros((n_functions, 3, angular + 1))
+    result[:, :, 0] = 1.0
+    match angular:
+        case 0:
+            pass
+        case 1:
+            result[0, 0] = np.array([0, 1])
+            result[1, 1] = np.array([0, 1])
+            result[2, 2] = np.array([0, 1])
+        case 2:
+            result[0, 0] = np.array([0, 0, 1])  # x^2
+
+            result[1, 0] = np.array([0, 1, 0])  # x y
+            result[1, 1] = np.array([0, 1, 0])  # x y
+
+            result[2, 0] = np.array([0, 1, 0])  # x z
+            result[2, 2] = np.array([0, 1, 0])  # x z
+
+            result[3, 1] = np.array([0, 0, 1])  # y^2
+
+            result[4, 1] = np.array([0, 1, 0])  # y z
+            result[4, 2] = np.array([0, 1, 0])  # y z
+
+            result[5, 2] = np.array([0, 0, 1])  # z^2
+        case _:
+            raise NotImplementedError
+
+    return cp.asarray(result)
+
+
 def binomial_tensor(to_i: float, to_j: float, i_angular: int, j_angular: int):
+    # produces a C(i, j, k) tensor, which represents the coefficients
+    # (x + x_i)^i (x+ x_j^j) = \sum C(i, j, k) x^k
     dd_polynomial_tensor = cp.array(
         [
             [[1, 0, 0, 0, 0], [to_j, 1, 0, 0, 0], [to_j**2, 2 * to_j, 1, 0, 0]],
