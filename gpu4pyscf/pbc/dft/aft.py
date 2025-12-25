@@ -96,7 +96,7 @@ def hermite_polynomials(g: cp.ndarray, max_power: int) -> cp.ndarray:
     if max_power == 0:
         return result
 
-    result[1] = g
+    result[1] = 2 * g
 
     for i in range(max_power - 1):
         result[i + 2] = 2 * g * result[i + 1] - 2 * (i + 1) * result[i]
@@ -104,16 +104,17 @@ def hermite_polynomials(g: cp.ndarray, max_power: int) -> cp.ndarray:
     return result
 
 
-def hermite_polynomials_in_xyz(g_xyz: cp.ndarray, max_power: int) -> cp.ndarray:
-    result = cp.ones((3, (max_power + 1), g_xyz.shape[-1]))
+def hermite_polynomials_in_xyz(g_xyz: cp.ndarray, max_power: int, exponent_reciprocal: float) -> cp.ndarray:
+    result = cp.ones((3, (max_power + 1), g_xyz.shape[0]), dtype=cp.complex128)
+    factor = cp.array([np.pow(-1j * np.sqrt(exponent_reciprocal), i) for i in range(max_power + 1)])
 
     for i in range(3):
-        result[i] = hermite_polynomials(g_xyz[i], max_power)
+        result[i] = factor[:, None] * hermite_polynomials(g_xyz[:, i] * np.sqrt(exponent_reciprocal), max_power)
 
     return result
 
 
-def polynomial_tensor(angular):
+def polynomial_tensor(angular: int):
     n_functions = (angular + 1) * (angular + 2) // 2
 
     result = np.zeros((n_functions, 3, angular + 1))
@@ -146,32 +147,54 @@ def polynomial_tensor(angular):
     return cp.asarray(result)
 
 
-def binomial_tensor(to_i: float, to_j: float, i_angular: int, j_angular: int):
+def binomial_tensor(from_i: float, from_j: float, i_angular: int, j_angular: int):
     # produces a C(i, j, k) tensor, which represents the coefficients
     # (x + x_i)^i (x+ x_j^j) = \sum C(i, j, k) x^k
     dd_polynomial_tensor = cp.array(
         [
-            [[1, 0, 0, 0, 0], [to_j, 1, 0, 0, 0], [to_j**2, 2 * to_j, 1, 0, 0]],
+            [[1, 0, 0, 0, 0], [from_j, 1, 0, 0, 0], [from_j**2, 2 * from_j, 1, 0, 0]],
             [
-                [to_i, 1, 0, 0, 0],
-                [to_i * to_j, to_i + to_j, 1, 0, 0],
-                [to_i * to_j**2, 2 * to_i * to_j + to_j**2, to_i + 2 * to_j, 1, 0],
+                [from_i, 1, 0, 0, 0],
+                [from_i * from_j, from_i + from_j, 1, 0, 0],
+                [from_i * from_j**2, 2 * from_i * from_j + from_j**2, from_i + 2 * from_j, 1, 0],
             ],
             [
-                [to_i**2, 2 * to_i, 1, 0, 0],
-                [to_i**2 * to_j, to_i**2 + 2 * to_i * to_j, 2 * to_i + to_j, 1, 0],
+                [from_i**2, 2 * from_i, 1, 0, 0],
+                [from_i**2 * from_j, from_i**2 + 2 * from_i * from_j, 2 * from_i + from_j, 1, 0],
                 [
-                    to_i**2 * to_j**2,
-                    2 * to_i**2 * to_j + 2 * to_i * to_j**2,
-                    to_i**2 + 4 * to_i * to_j + to_j**2,
-                    2 * to_i + 2 * to_j,
+                    from_i**2 * from_j**2,
+                    2 * from_i**2 * from_j + 2 * from_i * from_j**2,
+                    from_i**2 + 4 * from_i * from_j + from_j**2,
+                    2 * from_i + 2 * from_j,
                     1,
                 ],
             ],
         ]
     )
 
-    return dd_polynomial_tensor[: (i_angular + 1), : (j_angular + 1), (i_angular + j_angular + 1)]
+    return dd_polynomial_tensor[: (i_angular + 1), : (j_angular + 1), : (i_angular + j_angular + 1)]
+
+
+def binomial_tensor_xyz(from_i: np.ndarray, from_j: np.ndarray, i_angular: int, j_angular: int):
+    return cp.array([binomial_tensor(from_i[dim], from_j[dim], i_angular, j_angular) for dim in range(3)])
+
+
+def polynomial_expansion(from_i: np.ndarray, from_j: np.ndarray, i_angular: int, j_angular: int):
+    i_polynomial = polynomial_tensor(i_angular)
+    j_polynomial = polynomial_tensor(j_angular)
+
+    binomial_tensor = binomial_tensor_xyz(from_i, from_j, i_angular, j_angular)
+    binomial_tensor *= np.pow(common_fac_sp(i_angular) * common_fac_sp(j_angular), 1 / 3)
+
+    return cp.einsum('ixp, jxq, xpqc -> xijc', i_polynomial, j_polynomial, binomial_tensor)
+
+
+def polynomial_expansion_on_coords(
+    from_i: np.ndarray, from_j: np.ndarray, i_angular: int, j_angular: int, powered_coords: cp.ndarray
+):
+    expansion_tensor = polynomial_expansion(from_i, from_j, i_angular, j_angular)
+    xyz_unmerged = cp.einsum('xijc, xcg->xijg', expansion_tensor, powered_coords)
+    return cp.prod(xyz_unmerged, axis=0)
 
 
 class AFTDFNumInt(pbc_numint.NumInt):
@@ -214,6 +237,28 @@ class AFTDFNumInt(pbc_numint.NumInt):
         z = cell._env[cell._atm[atom_indices, PTR_COORD] + 2]
         primitive_coords = np.transpose(np.array([x, y, z]))
 
+        for i in range(self.n_primitives):
+            for j in range(i, self.n_primitives):
+                selected_shell_pair = [i, j]
+                i_functions, j_functions = [
+                    np.arange(self.shell_to_ao[i], self.shell_to_ao[i + 1]) for i in selected_shell_pair
+                ]
+
+                reference = multigrid_v2.fft_in_place(
+                    cp.einsum(
+                        'gi, gj -> ijg', self.primitive_values[:, i_functions], self.primitive_values[:, j_functions]
+                    ).reshape(len(i_functions), len(j_functions), *cell.mesh)
+                ).reshape(len(i_functions), len(j_functions), -1)
+                reference *= cell.vol / len(self.Gv)
+
+                result = self.get_primitive_pair_values_in_reciprocal(*selected_shell_pair)
+
+                if cp.linalg.norm(reference - result) > 1e-8:
+                    print(i, j, cp.linalg.norm(reference - result))
+                    assert 0
+
+        assert 0
+
         return self
 
     def get_j(self, dm: cp.ndarray, hermi=1, kpts=None, kpts_band=None, omega=None, exxdiv='ewald'):
@@ -235,31 +280,35 @@ class AFTDFNumInt(pbc_numint.NumInt):
         i_angular, j_angular = cell._bas[primitive_pair, ANG_OF]
 
         i_exponent, j_exponent = cell._env[cell._bas[primitive_pair, PTR_EXP]]
+        pair_exponent = i_exponent + j_exponent
+        pair_exponent_reciprocal = 0.25 / pair_exponent
+
         i_coeff, j_coeff = cell._env[cell._bas[primitive_pair, PTR_COEFF]]
+        factor = i_coeff * j_coeff * np.sqrt((np.pi / pair_exponent) ** 3)
 
         i_center_ptr, j_center_ptr = cell._atm[[i_atom_index, j_atom_index], PTR_COORD]
         i_center_reference = cell._env[i_center_ptr : i_center_ptr + 3]
-        j_center_reference = cell._env[j_center_ptr : j_center_ptr + 3]
+        j_center = cell._env[j_center_ptr : j_center_ptr + 3]
 
-        result = cp.zeros((len(i_function_indices), len(j_function_indices), np.prod(self.cell.mesh)))
-        i_function = cp.zeros((len(i_function_indices), np.prod(self.cell.mesh)))
-        j_function = cp.zeros((len(j_function_indices), np.prod(self.cell.mesh)))
+        result = cp.zeros(
+            (len(i_function_indices), len(j_function_indices), np.prod(self.cell.mesh)), dtype=cp.complex128
+        )
+
+        hermite_G = hermite_polynomials_in_xyz(self.Gv, i_angular + j_angular, pair_exponent_reciprocal)
+        norm_squared = cp.sum(self.Gv * self.Gv, axis=1)
 
         for image in self.neighboring_images:
-            i_center = cp.asarray(i_center_reference + image)
-            i_polynomial = polynomials(real_coords - i_center, i_angular)
-            i_exp = i_coeff * cp.exp(-i_exponent * cp.linalg.norm(real_coords - i_center, axis=1) ** 2)
-            i_result = i_polynomial * i_exp
-            i_function += i_result
+            i_center = i_center_reference + image
+            pair_center = (i_exponent * i_center + j_exponent * j_center) / pair_exponent
+            from_i = pair_center - i_center
+            from_j = pair_center - j_center
+            cartesian = polynomial_expansion_on_coords(from_i, from_j, i_angular, j_angular, hermite_G)
+            exponent_prefactor = np.exp(-i_exponent * j_exponent / pair_exponent * np.sum((from_i - from_j) ** 2))
 
-            j_center = cp.asarray(j_center_reference + image)
-            j_polynomial = polynomials(real_coords - j_center, j_angular)
-            j_exp = j_coeff * cp.exp(-j_exponent * cp.linalg.norm(real_coords - j_center, axis=1) ** 2)
-            j_result = j_polynomial * j_exp
-            j_function += j_result
+            exp = cp.exp(-norm_squared * pair_exponent_reciprocal)
+            phase = cp.exp(-1j * self.Gv @ cp.asarray(pair_center))
 
-        result = cp.einsum('ag, bg-> abg', i_function, j_function)
-
+            result += exp * phase * (factor * exponent_prefactor) * cartesian
         return result
 
     def evaluate_reciprocal_density(self, dm: cp.ndarray):
@@ -318,7 +367,6 @@ grid_coords = exp_numint.grid.coords.get()
 reciprocal_coords = cell.get_Gv()
 
 hermite_G = hermite_polynomials_in_xyz(cp.asarray(reciprocal_coords.T), 5)
-print(hermite_G)
 
 # Note: analytical expression of a fft of one dimension gaussian function f(x)
 # is equivalent to, in Mathematica,
