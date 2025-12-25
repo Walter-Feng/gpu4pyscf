@@ -237,28 +237,6 @@ class AFTDFNumInt(pbc_numint.NumInt):
         z = cell._env[cell._atm[atom_indices, PTR_COORD] + 2]
         primitive_coords = np.transpose(np.array([x, y, z]))
 
-        for i in range(self.n_primitives):
-            for j in range(i, self.n_primitives):
-                selected_shell_pair = [i, j]
-                i_functions, j_functions = [
-                    np.arange(self.shell_to_ao[i], self.shell_to_ao[i + 1]) for i in selected_shell_pair
-                ]
-
-                reference = multigrid_v2.fft_in_place(
-                    cp.einsum(
-                        'gi, gj -> ijg', self.primitive_values[:, i_functions], self.primitive_values[:, j_functions]
-                    ).reshape(len(i_functions), len(j_functions), *cell.mesh)
-                ).reshape(len(i_functions), len(j_functions), -1)
-                reference *= cell.vol / len(self.Gv)
-
-                result = self.get_primitive_pair_values_in_reciprocal(*selected_shell_pair)
-
-                if cp.linalg.norm(reference - result) > 1e-8:
-                    print(i, j, cp.linalg.norm(reference - result))
-                    assert 0
-
-        assert 0
-
         return self
 
     def get_j(self, dm: cp.ndarray, hermi=1, kpts=None, kpts_band=None, omega=None, exxdiv='ewald'):
