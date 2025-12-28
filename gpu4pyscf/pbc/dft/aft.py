@@ -32,6 +32,7 @@ import gpu4pyscf.pbc.dft.multigrid_v2 as multigrid_v2
 import gpu4pyscf.pbc.dft.gen_grid as gen_grid
 from gpu4pyscf.lib.cupy_helper import contract, tag_array, load_library
 
+# s[i, n] := Solve[ Integrate[4 Pi g^2 g^i Exp[- g^2], {g, g0, Infinity}] == 10^(-n), g0]
 gaussian_integration_cutoff_table = np.array(
     [
         [1.56458, 2.24417, 2.74084, 3.15292, 3.51327, 3.83771, 4.13534, 4.41192, 4.67142, 4.91669, 5.14986],
@@ -46,6 +47,7 @@ gaussian_integration_cutoff_table = np.array(
     ]
 )
 
+# s[n] := Integrate[4 Pi g^2 g^n Exp[- g^2], {g, 0, Infinity}]
 gaussian_integration_values = np.array(
     [5.56833, 6.28319, 8.35249, 12.5664, 20.8812, 37.6991, 73.0843, 150.796, 328.879]
 )
@@ -218,6 +220,11 @@ def polynomial_expansion_on_coords(
 class AFTDFNumInt(pbc_numint.NumInt):
     def __init__(self, cell: gto.Cell):
         self.cell = cell
+        if self.cell.precision:
+            self.precision = self.cell.precision
+        else:
+            self.precision = 1e-8
+
         self.mesh = cell.mesh
         self.grid = gen_grid.UniformGrids(cell)
         self.tasks = None
@@ -227,11 +234,11 @@ class AFTDFNumInt(pbc_numint.NumInt):
         self.build()
 
     def build(self):
-        cell = self.cell
-        cell, transform_coeff = cell.decontract_basis(to_cart=True)
+        contracted_cell = self.cell
+        cell, transform_coeff = contracted_cell.decontract_basis(to_cart=True)
         sorted_transform_coeff, transform_shape = multigrid_v2.sort_contraction_coefficients(transform_coeff)
 
-        neighboring_images = get_lattice_Ls(cell)
+        neighboring_images = get_lattice_Ls(contracted_cell)
         images_sort_index = np.argsort(np.linalg.norm(neighboring_images, axis=1))
         neighboring_images = neighboring_images[images_sort_index]
 
@@ -247,21 +254,13 @@ class AFTDFNumInt(pbc_numint.NumInt):
         self.primitive_values = pbc_numint.eval_ao(cell, self.grid.coords)
         self.neighboring_images = neighboring_images
 
-        exponents = cell._env[cell._bas[:, PTR_EXP]]
-        angulars = cell._bas[:, ANG_OF]
-        atom_indices = cell._bas[:, ATOM_OF]
-        x = cell._env[cell._atm[atom_indices, PTR_COORD]]
-        y = cell._env[cell._atm[atom_indices, PTR_COORD] + 1]
-        z = cell._env[cell._atm[atom_indices, PTR_COORD] + 2]
-        primitive_coords = np.transpose(np.array([x, y, z]))
-
         left_shell_list = []
         right_shell_list = []
         image_list = []
         cutoffs = []
 
-        precision = 1e-6
-        log_precision = int(np.ceil(-np.log10(precision)))
+        log_precision = int(np.ceil(-np.log10(self.precision)))
+
         for i_primitive in range(self.n_primitives):
             for j_primitive in range(self.n_primitives):
                 primitive_pair = [i_primitive, j_primitive]
@@ -279,14 +278,15 @@ class AFTDFNumInt(pbc_numint.NumInt):
                     * j_coeff
                     * np.sqrt((np.pi / pair_exponent) ** 3)
                     * np.sqrt(pair_exponent_reciprocal) ** (total_angular + 2)
+                    * 2**total_angular  # leading hermitian polynomial factor
                 )
                 i_center_ptr, j_center_ptr = cell._atm[[i_atom_index, j_atom_index], PTR_COORD]
                 i_center_reference = cell._env[i_center_ptr : i_center_ptr + 3]
                 j_center = cell._env[j_center_ptr : j_center_ptr + 3]
                 integration_factor = gaussian_integration_values[total_angular]
 
-                for image in range(len(self.neighboring_images)):
-                    i_center = i_center_reference + image
+                for image_index in range(len(self.neighboring_images)):
+                    i_center = i_center_reference + self.neighboring_images[image_index]
                     pair_center = (i_exponent * i_center + j_exponent * j_center) / pair_exponent
                     from_i = pair_center - i_center
                     from_j = pair_center - j_center
@@ -295,12 +295,12 @@ class AFTDFNumInt(pbc_numint.NumInt):
                     )
 
                     total_prefactor = pair_prefactor * exponent_prefactor
-                    if total_prefactor * integration_factor < precision:
+                    if total_prefactor < self.precision:
                         continue
                     else:
                         left_shell_list.append(i_primitive)
                         right_shell_list.append(j_primitive)
-                        image_list.append(image)
+                        image_list.append(image_index)
 
                         equivalent_offset_for_cutoff = int(np.ceil(np.log10(total_prefactor)))
                         offset = log_precision + equivalent_offset_for_cutoff
@@ -315,16 +315,20 @@ class AFTDFNumInt(pbc_numint.NumInt):
 
                         cutoffs.append(cutoff)
 
-        left_shell_list = np.array(left_shell_list, dtype=cp.int32)
-        right_shell_list = np.array(right_shell_list, dtype=cp.int32)
-        image_list = np.array(image_list, dtype=cp.int32)
-        cutoffs = np.array(cutoffs)
+        left_shell_list = np.array(left_shell_list, dtype=np.int32)
+        right_shell_list = np.array(right_shell_list, dtype=np.int32)
+        image_list = np.array(image_list, dtype=np.int32)
+        cutoffs = np.array(cutoffs, dtype=np.int32)
 
         sort_index = np.argsort(-cutoffs)
         left_shell_list = left_shell_list[sort_index]
         right_shell_list = right_shell_list[sort_index]
         image_list = image_list[sort_index]
         cutoffs = cutoffs[sort_index]
+
+        self.screened_pairs = [
+            {'left_shell': left_shell_list, 'right_shell': right_shell_list, 'images': image_list, 'cutoffs': cutoffs}
+        ]
 
         return self
 
@@ -336,11 +340,7 @@ class AFTDFNumInt(pbc_numint.NumInt):
         # return vj
 
     def get_primitive_pair_values_in_reciprocal(self, i_primitive, j_primitive, image_index, cutoff):
-        real_coords = cp.asarray(self.grid.coords)
         cell = self.primitive
-
-        i_function_indices = np.arange(self.shell_to_ao[i_primitive], self.shell_to_ao[i_primitive + 1])
-        j_function_indices = np.arange(self.shell_to_ao[j_primitive], self.shell_to_ao[j_primitive + 1])
 
         primitive_pair = [i_primitive, j_primitive]
         i_atom_index, j_atom_index = cell._bas[primitive_pair, ATOM_OF]
@@ -349,7 +349,6 @@ class AFTDFNumInt(pbc_numint.NumInt):
         i_exponent, j_exponent = cell._env[cell._bas[primitive_pair, PTR_EXP]]
         pair_exponent = i_exponent + j_exponent
         pair_exponent_reciprocal = 0.25 / pair_exponent
-
         i_coeff, j_coeff = cell._env[cell._bas[primitive_pair, PTR_COEFF]]
         factor = i_coeff * j_coeff * np.sqrt((np.pi / pair_exponent) ** 3)
 
@@ -375,7 +374,7 @@ class AFTDFNumInt(pbc_numint.NumInt):
         exp *= screening
         phase = cp.exp(-1j * self.Gv @ cp.asarray(pair_center))
 
-        return exp * phase * (factor * exponent_prefactor) * cartesian, (i_function_indices, j_function_indices)
+        return exp * phase * (factor * exponent_prefactor) * cartesian
 
     def evaluate_reciprocal_density(self, dm: cp.ndarray):
         cell = self.primitive
@@ -384,17 +383,30 @@ class AFTDFNumInt(pbc_numint.NumInt):
         dm_primitive_shape = (n_ao, n_ao)
         n_k_points = 1
         n_grid_points = len(self.grid.coords)
-        weight = 1.0 / n_k_points * cell.vol / n_grid_points
-        dm = dm.reshape(-1, *dm_shape[-2:]) * weight
+        dm = dm.reshape(-1, *dm_shape[-2:])
         dm_primitive = multigrid_v2.contracted_to_primitive(
             dm, self.transform_coeff, self.transform_coeff, dm_primitive_shape
         )
 
-        ao_pairs = cp.einsum('gi, gj -> ijg', self.primitive_values, self.primitive_values).reshape(-1, *cell.mesh)
+        result = cp.zeros((n_k_points, n_grid_points), dtype=cp.complex128)
 
-        ao_pairs = multigrid_v2.fft_in_place(ao_pairs)
-        ao_pairs = ao_pairs.reshape(*dm_primitive_shape, -1)
-        return cp.einsum('kij, ijg -> kg', dm_primitive, ao_pairs)
+        for pairs in self.screened_pairs:
+            for i, j, image, cutoff in zip(
+                pairs['left_shell'], pairs['right_shell'], pairs['images'], pairs['cutoffs']
+            ):
+                i_function_indices = np.arange(self.shell_to_ao[i], self.shell_to_ao[i + 1])
+                j_function_indices = np.arange(self.shell_to_ao[j], self.shell_to_ao[j + 1])
+
+                ao_pairs = self.get_primitive_pair_values_in_reciprocal(i, j, image, cutoff)
+
+                dm_block = dm_primitive[:, i_function_indices[:, None], j_function_indices[None, :]]
+                result += cp.einsum(
+                    'ijg, kij -> kg',
+                    ao_pairs,
+                    dm_block,
+                )
+
+        return result
 
     get_vxc = nr_vxc = NotImplemented  # numint_cpu.KNumInt.nr_vxc
 
@@ -422,15 +434,19 @@ cell = gto.Cell(
          """,
     basis='gth-dzvp',
     pseudo='gth-pbe',
+    precision=1e-6,
     verbose=0,
 )
 
 mf = RKS(cell, xc='pbe')
 exp_numint = AFTDFNumInt(cell)
+exp_numint.build()
 dm = cp.ones((cell.nao_nr(), cell.nao_nr()))
+exp_density = exp_numint.evaluate_reciprocal_density(dm)
 ref_numint = multigrid_v2.MultiGridNumInt(cell)
-grid_coords = exp_numint.grid.coords.get()
-reciprocal_coords = cell.get_Gv()
+ref_density = multigrid_v2.evaluate_density_on_g_mesh(ref_numint, dm)
+print(exp_density - ref_density)
+print(cp.abs(exp_density - ref_density)[0, 0, 0] / cp.abs(ref_density[0, 0, 0]))
 
 # Note: analytical expression of a fft of one dimension gaussian function f(x)
 # is equivalent to, in Mathematica,
@@ -445,27 +461,27 @@ reciprocal_coords = cell.get_Gv()
 # If centered at r0, should be good with multiplying with a phase factor exp[- I G r0].
 # An example is given below.
 
-alpha = 10.0
-center = np.array([2.0, 1.0, 0.0])
-grid_coords -= center
-r = np.linalg.norm(grid_coords, axis=1).reshape(cell.mesh)
-g = np.linalg.norm(reciprocal_coords, axis=1).reshape(cell.mesh)
-test_gaussian = (
-    np.exp(-alpha * r * r) * grid_coords[:, 0].reshape(cell.mesh) ** 3 * grid_coords[:, 1].reshape(cell.mesh)
-)
-ref_reciprocal = np.fft.fftn(test_gaussian, axes=(-3, -2, -1)) / len(grid_coords) * cell.vol
-phase_factor = np.exp(-1j * reciprocal_coords @ center).reshape(cell.mesh)
-exp_reciprocal = (
-    np.exp(-g * g / 4 / alpha)
-    * np.sqrt(np.pi / alpha) ** 3
-    * 1j
-    * (-6 * alpha * reciprocal_coords[:, 0].reshape(cell.mesh) + reciprocal_coords[:, 0].reshape(cell.mesh) ** 3)
-    / (2 * alpha) ** 3
-    * (-1j)
-    * reciprocal_coords[:, 1].reshape(cell.mesh)
-    / 2
-    / alpha
-) * phase_factor
-
-diff = ref_reciprocal - exp_reciprocal
-assert np.abs(diff).max() < 1e-10
+# alpha = 10.0
+# center = np.array([2.0, 1.0, 0.0])
+# grid_coords -= center
+# r = np.linalg.norm(grid_coords, axis=1).reshape(cell.mesh)
+# g = np.linalg.norm(reciprocal_coords, axis=1).reshape(cell.mesh)
+# test_gaussian = (
+#     np.exp(-alpha * r * r) * grid_coords[:, 0].reshape(cell.mesh) ** 3 * grid_coords[:, 1].reshape(cell.mesh)
+# )
+# ref_reciprocal = np.fft.fftn(test_gaussian, axes=(-3, -2, -1)) / len(grid_coords) * cell.vol
+# phase_factor = np.exp(-1j * reciprocal_coords @ center).reshape(cell.mesh)
+# exp_reciprocal = (
+#     np.exp(-g * g / 4 / alpha)
+#     * np.sqrt(np.pi / alpha) ** 3
+#     * 1j
+#     * (-6 * alpha * reciprocal_coords[:, 0].reshape(cell.mesh) + reciprocal_coords[:, 0].reshape(cell.mesh) ** 3)
+#     / (2 * alpha) ** 3
+#     * (-1j)
+#     * reciprocal_coords[:, 1].reshape(cell.mesh)
+#     / 2
+#     / alpha
+# ) * phase_factor
+#
+# diff = ref_reciprocal - exp_reciprocal
+# assert np.abs(diff).max() < 1e-10
