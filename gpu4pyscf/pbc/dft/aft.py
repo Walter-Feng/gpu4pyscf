@@ -294,7 +294,7 @@ class AFTDFNumInt(pbc_numint.NumInt):
                         -i_exponent * j_exponent / pair_exponent * np.sum((from_i - from_j) ** 2)
                     )
 
-                    total_prefactor = pair_prefactor * exponent_prefactor
+                    total_prefactor = pair_prefactor * exponent_prefactor * integration_factor
                     if total_prefactor < self.precision:
                         continue
                     else:
