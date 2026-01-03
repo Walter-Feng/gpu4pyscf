@@ -15,11 +15,10 @@
  */
 
 #pragma once
-namespace gpu4pyscf::gpbc::multi_grid {
+namespace gpu4pyscf::aft {
 
-extern __constant__ double lattice_vectors[9];
-extern __constant__ double reciprocal_lattice_vectors[9];
-extern __constant__ double dxyz_dabc[9];
-extern __constant__ double reciprocal_norm[3];
+extern __constant__ double G[9];
+extern __constant__ double G_norm[3];
+extern __constant__ double gaussian_cutoff_table[99];
 
-} // namespace gpu4pyscf::gpbc::multi_grid
+} // namespace gpu4pyscf::aft

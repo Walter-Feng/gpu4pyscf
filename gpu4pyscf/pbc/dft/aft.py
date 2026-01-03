@@ -13,13 +13,14 @@
 # limitations under the License.
 
 
+import ctypes
 import numpy as np
 import cupy as cp
 
 import pyscf.pbc.gto as gto
 from pyscf.pbc.gto.eval_gto import get_lattice_Ls
 from pyscf.gto.moleintor import make_loc
-from pyscf.gto import ATOM_OF, ANG_OF, NPRIM_OF, NCTR_OF, PTR_EXP, PTR_COEFF, PTR_COORD
+from pyscf.gto import ATOM_OF, ANG_OF, NPRIM_OF, PTR_EXP, PTR_COEFF, PTR_COORD
 from pyscf import lib
 
 from gpu4pyscf.dft import numint as mol_numint
@@ -31,6 +32,8 @@ from gpu4pyscf.pbc.tools import pbc as pbc_tools
 import gpu4pyscf.pbc.dft.multigrid_v2 as multigrid_v2
 import gpu4pyscf.pbc.dft.gen_grid as gen_grid
 from gpu4pyscf.lib.cupy_helper import contract, tag_array, load_library
+
+libaft = load_library('libaft')
 
 # s[i, n] := Solve[ Integrate[4 Pi g^2 g^i Exp[- g^2], {g, g0, Infinity}] == 10^(-n), g0]
 gaussian_integration_cutoff_table = np.array(
@@ -47,6 +50,7 @@ gaussian_integration_cutoff_table = np.array(
     ]
 )
 
+
 # s[n] := Integrate[4 Pi g^2 g^n Exp[- g^2], {g, 0, Infinity}]
 gaussian_integration_values = np.array(
     [5.56833, 6.28319, 8.35249, 12.5664, 20.8812, 37.6991, 73.0843, 150.796, 328.879]
@@ -61,6 +65,30 @@ def common_fac_sp(angular: int) -> float:
             return 0.488602511902919921
         case _:
             return 1.0
+
+
+def check_cartesian(density, Gv, p, q, exponent, i_angular, j_angular):
+    Gv = cp.asarray(Gv.T, order='C')
+    n_grid = Gv.shape[-1]
+    result = cp.zeros(n_grid, dtype=cp.complex128)
+
+    libaft.check_cartesian(
+        multigrid_v2.cast_to_pointer(result),
+        multigrid_v2.cast_to_pointer(density),
+        multigrid_v2.cast_to_pointer(Gv),
+        ctypes.c_int(n_grid),
+        ctypes.c_double(p[0]),
+        ctypes.c_double(p[1]),
+        ctypes.c_double(p[2]),
+        ctypes.c_double(q[0]),
+        ctypes.c_double(q[1]),
+        ctypes.c_double(q[2]),
+        ctypes.c_double(exponent),
+        ctypes.c_int(i_angular),
+        ctypes.c_int(j_angular),
+    )
+
+    return result * common_fac_sp(i_angular) * common_fac_sp(j_angular)
 
 
 def power_series(coords: cp.ndarray, max_angular: int) -> cp.ndarray:
@@ -339,7 +367,7 @@ class AFTDFNumInt(pbc_numint.NumInt):
         # vj = get_j_kpts(self, dm, hermi, kpts, kpts_band)
         # return vj
 
-    def get_primitive_pair_values_in_reciprocal(self, i_primitive, j_primitive, image_index, cutoff):
+    def get_primitive_pair_values_in_reciprocal(self, i_primitive, j_primitive, image_index, cutoff, dm_block=None):
         cell = self.primitive
 
         primitive_pair = [i_primitive, j_primitive]
@@ -374,6 +402,14 @@ class AFTDFNumInt(pbc_numint.NumInt):
         exp *= screening
         phase = cp.exp(-1j * self.Gv @ cp.asarray(pair_center))
 
+        if i_angular * 10 + j_angular == 22 and dm_block is not None:
+            dm = cp.asarray(dm_block[0], dtype=cp.double)
+            from_cuda = check_cartesian(dm, self.Gv, from_i, from_j, pair_exponent_reciprocal, i_angular, j_angular)
+            from_cupy = cp.einsum('ij, ijg -> g', dm, cartesian)
+            print(cp.linalg.norm(from_cupy - from_cuda))
+
+            assert 0
+
         return exp * phase * (factor * exponent_prefactor) * cartesian
 
     def evaluate_reciprocal_density(self, dm: cp.ndarray):
@@ -397,9 +433,10 @@ class AFTDFNumInt(pbc_numint.NumInt):
                 i_function_indices = np.arange(self.shell_to_ao[i], self.shell_to_ao[i + 1])
                 j_function_indices = np.arange(self.shell_to_ao[j], self.shell_to_ao[j + 1])
 
-                ao_pairs = self.get_primitive_pair_values_in_reciprocal(i, j, image, cutoff)
-
                 dm_block = dm_primitive[:, i_function_indices[:, None], j_function_indices[None, :]]
+
+                ao_pairs = self.get_primitive_pair_values_in_reciprocal(i, j, image, cutoff, dm_block=dm_block)
+
                 result += cp.einsum(
                     'ijg, kij -> kg',
                     ao_pairs,
@@ -445,8 +482,6 @@ dm = cp.ones((cell.nao_nr(), cell.nao_nr()))
 exp_density = exp_numint.evaluate_reciprocal_density(dm)
 ref_numint = multigrid_v2.MultiGridNumInt(cell)
 ref_density = multigrid_v2.evaluate_density_on_g_mesh(ref_numint, dm)
-print(exp_density - ref_density)
-print(cp.abs(exp_density - ref_density)[0, 0, 0] / cp.abs(ref_density[0, 0, 0]))
 
 # Note: analytical expression of a fft of one dimension gaussian function f(x)
 # is equivalent to, in Mathematica,

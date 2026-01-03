@@ -134,6 +134,7 @@ add_subdirectory(gvhf-rys)
 add_subdirectory(gvhf-md)
 add_subdirectory(pbc)
 add_subdirectory(multigrid)
+add_subdirectory(aft)
 add_subdirectory(ecp)
 
 option(BUILD_LIBXC "Using libxc for DFT" ON)

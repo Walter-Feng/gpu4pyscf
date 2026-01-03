@@ -24,9 +24,9 @@ axialExpressions = Map[Flatten, Map[ToString[CForm[FullSimplify[#]]]&,
 			axial[x + px, y + py, z + pz, highestAngular], 
 			axial[x + qx, y + qy, z + qz, highestAngular], 1]]/.Power->converter] /. {
 				x->HoldForm[hx[[1]]], y->HoldForm[hy[[1]]], z->HoldForm[hz[[1]]],
-				px->HoldForm[ax[[0]]], qx->HoldForm[bx[[0]]],
-				py->HoldForm[ay[[0]]], qy->HoldForm[by[[0]]],
-				pz->HoldForm[az[[0]]], qz->HoldForm[bz[[0]]]
+				px->HoldForm[ax[[1]]], qx->HoldForm[bx[[1]]],
+				py->HoldForm[ay[[1]]], qy->HoldForm[by[[1]]],
+				pz->HoldForm[az[[1]]], qz->HoldForm[bz[[1]]]
 		}
 	, {4}], {2}];
 
