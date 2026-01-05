@@ -14,6 +14,7 @@
 
 
 import ctypes
+from random import gauss
 import numpy as np
 import cupy as cp
 
@@ -67,6 +68,12 @@ def common_fac_sp(angular: int) -> float:
             return 1.0
 
 
+def update_reciprocal_lattice(cell):
+    libaft.update_reciprocal_lattice_vectors(
+        multigrid_v2.cast_to_pointer(cp.asarray(cell.reciprocal_vectors().T, order='C')),
+    )
+
+
 def check_cartesian(density, Gv, p, q, exponent, i_angular, j_angular):
     Gv = cp.asarray(Gv.T, order='C')
     n_grid = Gv.shape[-1]
@@ -89,6 +96,56 @@ def check_cartesian(density, Gv, p, q, exponent, i_angular, j_angular):
     )
 
     return result * common_fac_sp(i_angular) * common_fac_sp(j_angular)
+
+
+def evaluate_density(
+    density,
+    non_trivial_pairs,
+    n_shells,
+    n_contributing_pairs_in_blocks,
+    shell_to_ao_indices,
+    n_functions,
+    sorted_block_index,
+    image_indices,
+    vectors_to_neighboring_images,
+    mesh,
+    n_blocks,
+    atm,
+    bas,
+    env,
+    i_angular,
+    j_angular,
+):
+    grid_size = np.prod(mesh)
+    result = cp.zeros(grid_size, dtype=cp.complex128)
+
+    libaft.evaluate_density(
+        multigrid_v2.cast_to_pointer(result),
+        multigrid_v2.cast_to_pointer(density),
+        multigrid_v2.cast_to_pointer(non_trivial_pairs),
+        ctypes.c_int(n_shells),
+        multigrid_v2.cast_to_pointer(n_contributing_pairs_in_blocks),
+        multigrid_v2.cast_to_pointer(shell_to_ao_indices),
+        ctypes.c_int(n_functions),
+        multigrid_v2.cast_to_pointer(sorted_block_index),
+        ctypes.c_int(len(sorted_block_index)),
+        multigrid_v2.cast_to_pointer(image_indices),
+        multigrid_v2.cast_to_pointer(vectors_to_neighboring_images),
+        ctypes.c_int(len(vectors_to_neighboring_images)),
+        ctypes.c_int(mesh[0]),
+        ctypes.c_int(mesh[1]),
+        ctypes.c_int(mesh[2]),
+        ctypes.c_int(n_blocks[0]),
+        ctypes.c_int(n_blocks[1]),
+        ctypes.c_int(n_blocks[2]),
+        multigrid_v2.cast_to_pointer(atm),
+        multigrid_v2.cast_to_pointer(bas),
+        multigrid_v2.cast_to_pointer(env),
+        ctypes.c_int(i_angular),
+        ctypes.c_int(j_angular),
+    )
+
+    return result
 
 
 def power_series(coords: cp.ndarray, max_angular: int) -> cp.ndarray:
@@ -247,6 +304,8 @@ def polynomial_expansion_on_coords(
 
 class AFTDFNumInt(pbc_numint.NumInt):
     def __init__(self, cell: gto.Cell):
+        update_reciprocal_lattice(cell)
+
         self.cell = cell
         if self.cell.precision:
             self.precision = self.cell.precision
@@ -272,7 +331,7 @@ class AFTDFNumInt(pbc_numint.NumInt):
 
         self.primitive = cell
         self.transform_coeff = sorted_transform_coeff
-        self.shell_to_ao = np.asarray(make_loc(cell._bas, 'cart'), dtype=cp.int32)
+        self.shell_to_ao = cp.asarray(make_loc(cell._bas, 'cart'), dtype=cp.int32)
         self.n_primitives = len(cell._bas)
         self.n_primitive_functions = transform_shape[0]
         self.n_functions = transform_shape[1]
@@ -280,11 +339,12 @@ class AFTDFNumInt(pbc_numint.NumInt):
         self.Gv = cp.asarray(cell.get_Gv())
 
         self.primitive_values = pbc_numint.eval_ao(cell, self.grid.coords)
-        self.neighboring_images = neighboring_images
+        self.neighboring_images = cp.asarray(neighboring_images, dtype=cp.double)
 
         left_shell_list = []
         right_shell_list = []
         image_list = []
+        angular_pair = []
         cutoffs = []
 
         log_precision = int(np.ceil(-np.log10(self.precision)))
@@ -313,8 +373,9 @@ class AFTDFNumInt(pbc_numint.NumInt):
                 j_center = cell._env[j_center_ptr : j_center_ptr + 3]
                 integration_factor = gaussian_integration_values[total_angular]
 
+                neighboring_images_on_host = self.neighboring_images.get()
                 for image_index in range(len(self.neighboring_images)):
-                    i_center = i_center_reference + self.neighboring_images[image_index]
+                    i_center = i_center_reference + neighboring_images_on_host[image_index]
                     pair_center = (i_exponent * i_center + j_exponent * j_center) / pair_exponent
                     from_i = pair_center - i_center
                     from_j = pair_center - j_center
@@ -329,6 +390,7 @@ class AFTDFNumInt(pbc_numint.NumInt):
                         left_shell_list.append(i_primitive)
                         right_shell_list.append(j_primitive)
                         image_list.append(image_index)
+                        angular_pair.append((i_angular, j_angular))
 
                         equivalent_offset_for_cutoff = int(np.ceil(np.log10(total_prefactor)))
                         offset = log_precision + equivalent_offset_for_cutoff
@@ -343,20 +405,43 @@ class AFTDFNumInt(pbc_numint.NumInt):
 
                         cutoffs.append(cutoff)
 
-        left_shell_list = np.array(left_shell_list, dtype=np.int32)
-        right_shell_list = np.array(right_shell_list, dtype=np.int32)
-        image_list = np.array(image_list, dtype=np.int32)
-        cutoffs = np.array(cutoffs, dtype=np.int32)
+        left_shell_list = cp.array(left_shell_list, dtype=cp.int32)
+        right_shell_list = cp.array(right_shell_list, dtype=cp.int32)
+        image_list = cp.array(image_list, dtype=cp.int32)
+        cutoffs = cp.array(cutoffs)
+        angular_pair = cp.array(angular_pair, dtype=cp.int32)
 
-        sort_index = np.argsort(-cutoffs)
-        left_shell_list = left_shell_list[sort_index]
-        right_shell_list = right_shell_list[sort_index]
-        image_list = image_list[sort_index]
-        cutoffs = cutoffs[sort_index]
+        unique_angular_pairs, unique_indices = multigrid_v2.unique_with_multiple_keys(angular_pair)
+        unique_angular_pairs = unique_angular_pairs.get()
+        self.screened_pairs = []
+        self.n_blocks = self.mesh // 8 * 2
+        for i, angular in enumerate(unique_angular_pairs):
+            corresponding_pairs = cp.where(unique_indices == i)[0]
 
-        self.screened_pairs = [
-            {'left_shell': left_shell_list, 'right_shell': right_shell_list, 'images': image_list, 'cutoffs': cutoffs}
-        ]
+            cutoff = cutoffs[corresponding_pairs]
+            sort_index = cp.argsort(-cutoff)
+
+            corresponding_pairs = corresponding_pairs[sort_index]
+            cutoff = cutoff[sort_index]
+
+            left = left_shell_list[corresponding_pairs]
+            right = right_shell_list[corresponding_pairs]
+            image = image_list[corresponding_pairs]
+            self.screened_pairs.append(
+                {
+                    'angular': angular,
+                    'left_shell': left,
+                    'right_shell': right,
+                    'images': image,
+                    'cutoffs': cutoff,
+                    'shells': left * self.n_primitives + right,
+                    'n_pairs_per_block': cp.full(np.prod(self.n_blocks), len(cutoff), dtype=cp.int32),
+                }
+            )
+
+        self.atm = cp.asarray(cell._atm, dtype=cp.int32)
+        self.bas = cp.asarray(cell._bas, dtype=cp.int32)
+        self.env = cp.asarray(cell._env, dtype=cp.float64)
 
         return self
 
@@ -366,51 +451,6 @@ class AFTDFNumInt(pbc_numint.NumInt):
         pass
         # vj = get_j_kpts(self, dm, hermi, kpts, kpts_band)
         # return vj
-
-    def get_primitive_pair_values_in_reciprocal(self, i_primitive, j_primitive, image_index, cutoff, dm_block=None):
-        cell = self.primitive
-
-        primitive_pair = [i_primitive, j_primitive]
-        i_atom_index, j_atom_index = cell._bas[primitive_pair, ATOM_OF]
-        i_angular, j_angular = cell._bas[primitive_pair, ANG_OF]
-
-        i_exponent, j_exponent = cell._env[cell._bas[primitive_pair, PTR_EXP]]
-        pair_exponent = i_exponent + j_exponent
-        pair_exponent_reciprocal = 0.25 / pair_exponent
-        i_coeff, j_coeff = cell._env[cell._bas[primitive_pair, PTR_COEFF]]
-        factor = i_coeff * j_coeff * np.sqrt((np.pi / pair_exponent) ** 3)
-
-        i_center_ptr, j_center_ptr = cell._atm[[i_atom_index, j_atom_index], PTR_COORD]
-        i_center_reference = cell._env[i_center_ptr : i_center_ptr + 3]
-        j_center = cell._env[j_center_ptr : j_center_ptr + 3]
-
-        screening = cp.ones(self.Gv.shape[0])
-        screening[cp.linalg.norm(self.Gv, axis=1) > cutoff] = 0
-
-        hermite_G = hermite_polynomials_in_xyz(self.Gv, i_angular + j_angular, pair_exponent_reciprocal)
-        norm_squared = cp.sum(self.Gv * self.Gv, axis=1)
-
-        image = self.neighboring_images[image_index]
-        i_center = i_center_reference + image
-        pair_center = (i_exponent * i_center + j_exponent * j_center) / pair_exponent
-        from_i = pair_center - i_center
-        from_j = pair_center - j_center
-        exponent_prefactor = np.exp(-i_exponent * j_exponent / pair_exponent * np.sum((from_i - from_j) ** 2))
-
-        cartesian = polynomial_expansion_on_coords(from_i, from_j, i_angular, j_angular, hermite_G)
-        exp = cp.exp(-norm_squared * pair_exponent_reciprocal)
-        exp *= screening
-        phase = cp.exp(-1j * self.Gv @ cp.asarray(pair_center))
-
-        if i_angular * 10 + j_angular == 22 and dm_block is not None:
-            dm = cp.asarray(dm_block[0], dtype=cp.double)
-            from_cuda = check_cartesian(dm, self.Gv, from_i, from_j, pair_exponent_reciprocal, i_angular, j_angular)
-            from_cupy = cp.einsum('ij, ijg -> g', dm, cartesian)
-            print(cp.linalg.norm(from_cupy - from_cuda))
-
-            assert 0
-
-        return exp * phase * (factor * exponent_prefactor) * cartesian
 
     def evaluate_reciprocal_density(self, dm: cp.ndarray):
         cell = self.primitive
@@ -427,21 +467,25 @@ class AFTDFNumInt(pbc_numint.NumInt):
         result = cp.zeros((n_k_points, n_grid_points), dtype=cp.complex128)
 
         for pairs in self.screened_pairs:
-            for i, j, image, cutoff in zip(
-                pairs['left_shell'], pairs['right_shell'], pairs['images'], pairs['cutoffs']
-            ):
-                i_function_indices = np.arange(self.shell_to_ao[i], self.shell_to_ao[i + 1])
-                j_function_indices = np.arange(self.shell_to_ao[j], self.shell_to_ao[j + 1])
+            density = evaluate_density(
+                dm_primitive,
+                pairs['shells'],
+                self.n_primitives,
+                pairs['n_pairs_per_block'],
+                self.shell_to_ao,
+                self.n_primitive_functions,
+                cp.arange(np.prod(self.n_blocks), dtype=cp.int32),
+                pairs['images'],
+                self.neighboring_images,
+                self.mesh,
+                self.n_blocks,
+                self.atm,
+                self.bas,
+                self.env,
+                *pairs['angular'],
+            )
 
-                dm_block = dm_primitive[:, i_function_indices[:, None], j_function_indices[None, :]]
-
-                ao_pairs = self.get_primitive_pair_values_in_reciprocal(i, j, image, cutoff, dm_block=dm_block)
-
-                result += cp.einsum(
-                    'ijg, kij -> kg',
-                    ao_pairs,
-                    dm_block,
-                )
+            result[0] += density
 
         return result
 
@@ -471,7 +515,7 @@ cell = gto.Cell(
          """,
     basis='gth-dzvp',
     pseudo='gth-pbe',
-    precision=1e-6,
+    precision=1e-10,
     verbose=0,
 )
 
@@ -480,43 +524,7 @@ exp_numint = AFTDFNumInt(cell)
 exp_numint.build()
 dm = cp.ones((cell.nao_nr(), cell.nao_nr()))
 exp_density = exp_numint.evaluate_reciprocal_density(dm)
+print(exp_density)
 ref_numint = multigrid_v2.MultiGridNumInt(cell)
 ref_density = multigrid_v2.evaluate_density_on_g_mesh(ref_numint, dm)
-
-# Note: analytical expression of a fft of one dimension gaussian function f(x)
-# is equivalent to, in Mathematica,
-# Sqrt[2Pi] InverseFourierTransform[f[x], x, G]
-# So in three dimensional systems it should be something like, analytically,
-# F[ x^a y^b z^c exp[- p (x^2 + y^2 + z^2)] =
-#   (I 2 Sqrt[p])^(- a - b - c)
-#           HermiteH[a, Gx / Sqrt[4 p]]
-#           HermiteH[b, Gy / Sqrt[4 p]]
-#           HermiteH[c, Gz / Sqrt[4 p]]
-#               (Pi / p)^(3/2) exp [- (Gx^2 + Gy^2 + Gz^2) / 4 a]
-# If centered at r0, should be good with multiplying with a phase factor exp[- I G r0].
-# An example is given below.
-
-# alpha = 10.0
-# center = np.array([2.0, 1.0, 0.0])
-# grid_coords -= center
-# r = np.linalg.norm(grid_coords, axis=1).reshape(cell.mesh)
-# g = np.linalg.norm(reciprocal_coords, axis=1).reshape(cell.mesh)
-# test_gaussian = (
-#     np.exp(-alpha * r * r) * grid_coords[:, 0].reshape(cell.mesh) ** 3 * grid_coords[:, 1].reshape(cell.mesh)
-# )
-# ref_reciprocal = np.fft.fftn(test_gaussian, axes=(-3, -2, -1)) / len(grid_coords) * cell.vol
-# phase_factor = np.exp(-1j * reciprocal_coords @ center).reshape(cell.mesh)
-# exp_reciprocal = (
-#     np.exp(-g * g / 4 / alpha)
-#     * np.sqrt(np.pi / alpha) ** 3
-#     * 1j
-#     * (-6 * alpha * reciprocal_coords[:, 0].reshape(cell.mesh) + reciprocal_coords[:, 0].reshape(cell.mesh) ** 3)
-#     / (2 * alpha) ** 3
-#     * (-1j)
-#     * reciprocal_coords[:, 1].reshape(cell.mesh)
-#     / 2
-#     / alpha
-# ) * phase_factor
-#
-# diff = ref_reciprocal - exp_reciprocal
-# assert np.abs(diff).max() < 1e-10
+print(cp.abs(exp_density - ref_density).max())

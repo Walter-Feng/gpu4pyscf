@@ -19,17 +19,18 @@
 #include <cuda/std/complex>
 
 namespace gpu4pyscf::aft {
+template <typename T> using complex = cuda::std::complex<T>;
 
-template <int angular>
-__forceinline__ __device__ void
-hermite_polynomial(cuda::std::complex<double> hermite[],
-                   const double renormalized_g, const double sqrt_exponent) {
+template <typename T, int angular>
+__forceinline__ __device__ void hermite_polynomial(complex<T> hermite[],
+                                                   const T renormalized_g,
+                                                   const T sqrt_exponent) {
 
-  const cuda::std::complex<double> factor{0.0, -sqrt_exponent};
-  cuda::std::complex<double> accumulated_factor = factor;
+  const complex<T> factor{0.0, -sqrt_exponent};
+  complex<T> accumulated_factor = factor;
 
-  double hermite_real_0 = 1;
-  double hermite_real_1 = 2.0 * renormalized_g;
+  T hermite_real_0 = 1;
+  T hermite_real_1 = 2.0 * renormalized_g;
 
   hermite[0] = 1.0;
 
@@ -39,7 +40,7 @@ hermite_polynomial(cuda::std::complex<double> hermite[],
 
 #pragma unroll
   for (int i = 0; i < angular - 1; i++) {
-    const double hermite_real =
+    const T hermite_real =
         hermite_real_1 * 2.0 * renormalized_g - 2.0 * (i + 1) * hermite_real_0;
     accumulated_factor = accumulated_factor * factor;
     hermite[i + 2] = hermite_real * accumulated_factor;
@@ -48,8 +49,8 @@ hermite_polynomial(cuda::std::complex<double> hermite[],
   }
 }
 
-template <int angular>
-__forceinline__ __device__ void power_series(double array[], const double x) {
+template <typename T, int angular>
+__forceinline__ __device__ void power_series(T array[], const T x) {
   array[0] = 1;
 #pragma unroll
   for (int i = 1; i <= angular; i++) {
@@ -57,39 +58,36 @@ __forceinline__ __device__ void power_series(double array[], const double x) {
   }
 }
 
-template <int i_angular, int j_angular>
-__forceinline__ __device__ cuda::std::complex<double>
-contract_with_density(const double density[], const double exponent,
-                      const double gx, const double gy, const double gz,
-                      const double px, const double py, const double pz,
-                      const double qx, const double qy, const double qz) {
+template <typename T, int i_angular, int j_angular>
+__forceinline__ __device__ complex<T>
+contract_with_density(const T density[], const T exponent, const T gx,
+                      const T gy, const T gz, const T px, const T py,
+                      const T pz, const T qx, const T qy, const T qz) {
 
   constexpr int total_angular = i_angular + j_angular;
-  cuda::std::complex<double> result = 0;
-  const double sqrt_exponent = sqrt(exponent);
+  complex<T> result = 0;
+  const T sqrt_exponent = sqrt(exponent);
 
-  cuda::std::complex<double> hx[total_angular + 1];
-  hermite_polynomial<total_angular>(hx, sqrt_exponent * gx, sqrt_exponent);
-  cuda::std::complex<double> hy[total_angular + 1];
-  hermite_polynomial<total_angular>(hy, sqrt_exponent * gy, sqrt_exponent);
-  cuda::std::complex<double> hz[total_angular + 1];
-  hermite_polynomial<total_angular>(hz, sqrt_exponent * gz, sqrt_exponent);
+  complex<T> hx[total_angular + 1];
+  hermite_polynomial<T, total_angular>(hx, sqrt_exponent * gx, sqrt_exponent);
+  complex<T> hy[total_angular + 1];
+  hermite_polynomial<T, total_angular>(hy, sqrt_exponent * gy, sqrt_exponent);
+  complex<T> hz[total_angular + 1];
+  hermite_polynomial<T, total_angular>(hz, sqrt_exponent * gz, sqrt_exponent);
 
-  const int tid = threadIdx.x + blockIdx.x * blockDim.x;
+  T ax[i_angular + 1];
+  power_series<T, i_angular>(ax, px);
+  T ay[i_angular + 1];
+  power_series<T, i_angular>(ay, py);
+  T az[i_angular + 1];
+  power_series<T, i_angular>(az, pz);
 
-  double ax[i_angular + 1];
-  power_series<i_angular>(ax, px);
-  double ay[i_angular + 1];
-  power_series<i_angular>(ay, py);
-  double az[i_angular + 1];
-  power_series<i_angular>(az, pz);
-
-  double bx[j_angular + 1];
-  power_series<j_angular>(bx, qx);
-  double by[j_angular + 1];
-  power_series<j_angular>(by, qy);
-  double bz[j_angular + 1];
-  power_series<j_angular>(bz, qz);
+  T bx[j_angular + 1];
+  power_series<T, j_angular>(bx, qx);
+  T by[j_angular + 1];
+  power_series<T, j_angular>(by, qy);
+  T bz[j_angular + 1];
+  power_series<T, j_angular>(bz, qz);
 
   if constexpr (i_angular == 0 && j_angular == 0) {
     result += density[0] * (1);
