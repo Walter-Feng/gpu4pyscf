@@ -15,10 +15,13 @@
  */
 
 #pragma once
+
+#define BLOCK_DIM_XYZ 4
+
 namespace gpu4pyscf::aft {
 
 extern __constant__ double G[9];
-extern __constant__ double G_norm[3];
 extern __constant__ double gaussian_cutoff_table[99];
+extern __constant__ double gaussian_integration_values[9];
 
 } // namespace gpu4pyscf::aft

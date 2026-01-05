@@ -26,32 +26,7 @@
 namespace gpu4pyscf::aft {
 
 __constant__ double G[9];
-__constant__ double G_norm[3];
-__constant__ double gaussian_cutoff_table[99];
 
-template <int i_angular, int j_angular>
-__global__ void
-check_cartesian(cuDoubleComplex *cartesian, const double *density,
-                const double *G, const int n_grid, const double px,
-                const double py, const double pz, const double qx,
-                const double qy, const double qz, const double exponent) {
-
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= n_grid) {
-    return;
-  }
-
-  double gx, gy, gz;
-  gx = G[tid];
-  gy = G[tid + n_grid];
-  gz = G[tid + 2 * n_grid];
-
-  auto value = contract_with_density<double, i_angular, j_angular>(
-      density, exponent, gx, gy, gz, px, py, pz, qx, qy, qz);
-
-  atomicAdd(&((cartesian + tid)->x), value.real());
-  atomicAdd(&((cartesian + tid)->y), value.imag());
-}
 } // namespace gpu4pyscf::aft
 
 extern "C" {
@@ -60,36 +35,6 @@ void update_reciprocal_lattice_vectors(
   checkCudaErrors(cudaMemcpyToSymbol(gpu4pyscf::aft::G,
                                      reciprocal_lattice_vectors_on_device,
                                      9 * sizeof(double)));
-}
-
-void check_cartesian(cuDoubleComplex *cartesian, const double *density,
-                     const double *G, const int n_grid, const double px,
-                     const double py, const double pz, const double qx,
-                     const double qy, const double qz, const double exponent,
-                     const int i_angular, const int j_angular) {
-  switch (i_angular * 10 + j_angular) {
-  case 0:
-    gpu4pyscf::aft::check_cartesian<0, 0><<<(n_grid + 255) / 256, 256>>>(
-        cartesian, density, G, n_grid, px, py, pz, qx, qy, qz, exponent);
-    break;
-  case 10:
-    gpu4pyscf::aft::check_cartesian<1, 0><<<(n_grid + 255) / 256, 256>>>(
-        cartesian, density, G, n_grid, px, py, pz, qx, qy, qz, exponent);
-    break;
-  case 01:
-    gpu4pyscf::aft::check_cartesian<0, 1><<<(n_grid + 255) / 256, 256>>>(
-        cartesian, density, G, n_grid, px, py, pz, qx, qy, qz, exponent);
-    break;
-  case 11:
-    gpu4pyscf::aft::check_cartesian<1, 1><<<(n_grid + 255) / 256, 256>>>(
-        cartesian, density, G, n_grid, px, py, pz, qx, qy, qz, exponent);
-    break;
-
-  case 22:
-    gpu4pyscf::aft::check_cartesian<2, 2><<<(n_grid + 255) / 256, 256>>>(
-        cartesian, density, G, n_grid, px, py, pz, qx, qy, qz, exponent);
-    break;
-  }
 }
 
 int evaluate_density(

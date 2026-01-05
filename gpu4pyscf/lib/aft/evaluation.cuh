@@ -15,21 +15,16 @@
  */
 
 #pragma once
-
-#include "cartesian.cuh"
-#include "constant_objects.cuh"
-#include "multigrid/multigrid_v2/cartesian.cuh"
-#include "multigrid/multigrid_v2/utils.cuh"
-#include "utils.cuh"
-#include <assert.h>
 #include <cuComplex.h>
 #include <cub/cub.cuh>
 #include <cuda/std/complex>
-#include <gint/cuda_alloc.cuh>
-#include <gint/gint.h>
 #include <stdio.h>
 
-#define BLOCK_DIM_XYZ 4
+#include "cartesian.cuh"
+#include "constant_objects.cuh"
+#include "gint/cuda_alloc.cuh"
+#include "gint/gint.h"
+#include "multigrid/multigrid_v2/utils.cuh"
 
 namespace gpu4pyscf::aft {
 using gpbc::multi_grid::distance_squared;

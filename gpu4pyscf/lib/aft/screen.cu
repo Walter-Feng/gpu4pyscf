@@ -14,226 +14,248 @@
  * limitations under the License.
  */
 
-#include <complex.h>
-#include <gint/cuda_alloc.cuh>
-#include <gint/gint.h>
-#include <stdio.h>
+#include <cub/cub.cuh>
 
-#include "screening.cuh"
+#include "constant_objects.cuh"
+#include "gint/gint.h"
+#include "multigrid/multigrid_v2/utils.cuh"
 
+namespace gpu4pyscf::aft {
+
+// s[i, n] := Solve[ Integrate[4 Pi g^2 g^i Exp[- g^2], {g, g0, Infinity}] ==
+// 10^(-n), g0]
+
+__constant__ double gaussian_cutoff_table[99] = {
+    1.56458, 2.24417, 2.74084, 3.15292, 3.51327, 3.83771,
+    4.13534, 4.41192, 4.67142, 4.91669, 5.14986,
+
+    1.81533, 2.46995, 2.95244, 3.35429, 3.70657, 4.02436,
+    4.3163,  4.58795, 4.84308, 5.08443, 5.31406,
+
+    2.09092, 2.70638, 3.17011, 3.55956, 3.90255, 4.2129,
+    4.49865, 4.76499, 5.01549, 5.25274, 5.47867,
+
+    2.37682, 2.94857, 3.39132, 3.76715, 4.10012, 4.40256,
+    4.6818,  4.9426,  5.1883,  5.4213,  5.64344,
+
+    2.66372, 3.19284, 3.61404, 3.97578, 4.2984,  4.59269,
+    4.86524, 5.12038, 5.36117, 5.58986, 5.80815,
+
+    2.9466,  3.4366,  3.83673, 4.18444, 4.49665, 4.78274,
+    5.04855, 5.29798, 5.53383, 5.75818, 5.97261,
+
+    3.22305, 3.67817, 4.0583,  4.39234, 4.69431, 4.97228,
+    5.23138, 5.47513, 5.70606, 5.92608, 6.13664,
+
+    3.49208, 3.91647, 4.27794, 4.5989,  4.89094, 5.16095,
+    5.41346, 5.6516,  5.87766, 6.09339, 6.30012,
+
+    3.7535,  4.1509,  4.49513, 4.8037,  5.08618, 5.34848,
+    5.59455, 5.82719, 6.04847, 6.25997, 6.46293,
+};
+
+// s[n] := Integrate[4 Pi g^2 g^n Exp[- g^2], {g, 0, Infinity}]
+__constant__ double gaussian_integration_values[9] = {
+    5.56833, 6.28319, 8.35249, 12.5664, 20.8812,
+    37.6991, 73.0843, 150.796, 328.879};
+
+using gpu4pyscf::gpbc::multi_grid::distance_squared;
+
+__global__ void
+count_non_trivial_pairs_kernel(int *n_counts, const int n_primitives,
+                               const double *vectors_to_neighboring_images,
+                               const int n_images, const int *atm,
+                               const int *bas, const double *env,
+                               const int log_precision) {
+  int i_shell = threadIdx.x + blockDim.x * blockIdx.x;
+  int j_shell = threadIdx.y + blockDim.y * blockIdx.y;
+  int image_index = threadIdx.z + blockDim.z * blockIdx.z;
+  bool is_valid_pair = i_shell < n_primitives && j_shell < n_primitives &&
+                       image_index < n_images;
+
+  if (!is_valid_pair) {
+    i_shell = 0;
+    j_shell = 0;
+    image_index = 0;
+  }
+
+  const double i_exponent = env[bas(PTR_EXP, i_shell)];
+  const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
+  const double i_x =
+      env[i_coord_offset] + vectors_to_neighboring_images[image_index * 3];
+  const double i_y = env[i_coord_offset + 1] +
+                     vectors_to_neighboring_images[image_index * 3 + 1];
+  const double i_z = env[i_coord_offset + 2] +
+                     vectors_to_neighboring_images[image_index * 3 + 2];
+
+  const double i_coeff = env[bas(PTR_COEFF, i_shell)];
+  const int i_angular = bas(ANG_OF, i_shell);
+
+  const double j_exponent = env[bas(PTR_EXP, j_shell)];
+  const int j_coord_offset = atm(PTR_COORD, bas(ATOM_OF, j_shell));
+  const double j_x = env[j_coord_offset];
+  const double j_y = env[j_coord_offset + 1];
+  const double j_z = env[j_coord_offset + 2];
+  const double j_coeff = env[bas(PTR_COEFF, j_shell)];
+  const int j_angular = bas(ANG_OF, j_shell);
+
+  const double pair_exponent = i_exponent + j_exponent;
+  const double pair_exponent_in_prefactor =
+      i_exponent * j_exponent / pair_exponent *
+      distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
+  const double reciprocal_pair_exponent = 0.25 / pair_exponent;
+
+  const int pair_angular = i_angular + j_angular;
+
+  double fourier_factor = M_PI / pair_exponent;
+  fourier_factor *= fourier_factor * fourier_factor;
+
+  const double pair_prefactor =
+      i_coeff * j_coeff * sqrt(fourier_factor) *
+      pow(sqrt(reciprocal_pair_exponent), pair_angular + 2) *
+      pow(2, pair_angular);
+
+  const double estimated_integral_value =
+      pair_prefactor * exp(-pair_exponent_in_prefactor) *
+      gaussian_integration_values[pair_angular];
+
+  if (estimated_integral_value < pow(10.0, -log_precision)) {
+    is_valid_pair = false;
+  }
+
+  int count = is_valid_pair ? 1 : 0;
+  int sum =
+      cub::BlockReduce<int, 16, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY, 16>()
+          .Sum(count);
+  if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+    atomicAdd(n_counts, sum);
+  }
+}
+
+__global__ void
+screen_gaussian_pairs_kernel(int *shell_list, int *image_list, int *angulars,
+                             double *cutoffs, int *written_counts,
+                             const int n_primitives,
+                             const double *vectors_to_neighboring_images,
+                             const int n_images, const int *atm, const int *bas,
+                             const double *env, const int log_precision) {
+  int i_shell = threadIdx.x + blockDim.x * blockIdx.x;
+  int j_shell = threadIdx.y + blockDim.y * blockIdx.y;
+  int image_index = threadIdx.z + blockDim.z * blockIdx.z;
+  bool is_valid_pair = i_shell < n_primitives && j_shell < n_primitives &&
+                       image_index < n_images;
+
+  if (!is_valid_pair) {
+    i_shell = 0;
+    j_shell = 0;
+    image_index = 0;
+  }
+
+  const double i_exponent = env[bas(PTR_EXP, i_shell)];
+  const int i_coord_offset = atm(PTR_COORD, bas(ATOM_OF, i_shell));
+  const double i_x =
+      env[i_coord_offset] + vectors_to_neighboring_images[image_index * 3];
+  const double i_y = env[i_coord_offset + 1] +
+                     vectors_to_neighboring_images[image_index * 3 + 1];
+  const double i_z = env[i_coord_offset + 2] +
+                     vectors_to_neighboring_images[image_index * 3 + 2];
+
+  const double i_coeff = env[bas(PTR_COEFF, i_shell)];
+  const int i_angular = bas(ANG_OF, i_shell);
+
+  const double j_exponent = env[bas(PTR_EXP, j_shell)];
+  const int j_coord_offset = atm(PTR_COORD, bas(ATOM_OF, j_shell));
+  const double j_x = env[j_coord_offset];
+  const double j_y = env[j_coord_offset + 1];
+  const double j_z = env[j_coord_offset + 2];
+  const double j_coeff = env[bas(PTR_COEFF, j_shell)];
+  const int j_angular = bas(ANG_OF, j_shell);
+
+  const double pair_exponent = i_exponent + j_exponent;
+  const double pair_exponent_in_prefactor =
+      i_exponent * j_exponent / pair_exponent *
+      distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
+  const double reciprocal_pair_exponent = 0.25 / pair_exponent;
+
+  const int pair_angular = i_angular + j_angular;
+
+  double fourier_factor = M_PI / pair_exponent;
+  fourier_factor *= fourier_factor * fourier_factor;
+
+  const double pair_prefactor =
+      i_coeff * j_coeff * sqrt(fourier_factor) *
+      pow(sqrt(reciprocal_pair_exponent), pair_angular + 2) *
+      pow(2, pair_angular);
+
+  const double estimated_integral_value =
+      pair_prefactor * exp(-pair_exponent_in_prefactor) *
+      gaussian_integration_values[pair_angular];
+
+  if (estimated_integral_value < pow(10.0, -log_precision)) {
+    is_valid_pair = false;
+  }
+
+  int write_pair_index = is_valid_pair ? 1 : 0;
+  int aggregated_pairs;
+  cub::BlockScan<int, 16, cub::BLOCK_SCAN_RAKING, 16>().ExclusiveSum(
+      write_pair_index, write_pair_index, aggregated_pairs);
+  __shared__ int write_offset_for_this_block;
+  if (threadIdx.x == 0 && threadIdx.y == 0) {
+    write_offset_for_this_block = atomicAdd(written_counts, aggregated_pairs);
+  }
+  __syncthreads();
+
+  const int write_offset_for_this_thread =
+      write_offset_for_this_block + write_pair_index;
+
+  if (is_valid_pair) {
+    int equivalent_offset_for_cutoff = ceil(log10(estimated_integral_value));
+    int offset = log_precision + equivalent_offset_for_cutoff;
+    if (offset < 0)
+      offset = 0;
+    if (offset > 10)
+      offset = 10;
+
+    const double cutoff = gaussian_cutoff_table[pair_angular * 11 + offset] /
+                          sqrt(reciprocal_pair_exponent);
+    shell_list[write_offset_for_this_thread] = i_shell * n_primitives + j_shell;
+    image_list[write_offset_for_this_thread] = image_index;
+    angulars[write_offset_for_this_thread] = i_angular * 10 + j_angular;
+    cutoffs[write_offset_for_this_thread] = cutoff;
+  }
+}
+} // namespace gpu4pyscf::aft
 extern "C" {
 
-#define count_non_trivial_pairs_kernel_macro(li, lj)                           \
-  gpu4pyscf::gpbc::multi_grid::count_non_trivial_pairs_kernel<li, lj>          \
-      <<<block_grid, block_size>>>(n_counts, i_shells, n_i_shells, j_shells,   \
-                                   n_j_shells, vectors_to_neighboring_images,  \
-                                   n_images, mesh_a, mesh_b, mesh_c, atm, bas, \
-                                   env, threshold_in_log)
+void count_non_trivial_pairs(int *n_counts, const int n_primitives,
+                             const double *vectors_to_neighboring_images,
+                             const int n_images, const int *atm, const int *bas,
+                             const double *env, const int log_precision) {
 
-#define count_non_trivial_pairs_kernel_case_macro(li, lj)                      \
-  case (li * 10 + lj):                                                         \
-    count_non_trivial_pairs_kernel_macro(li, lj);                              \
-    break
+  const dim3 block_size{16, 16, 1};
+  const dim3 block_grid{(uint)ceil((double)n_primitives / block_size.x),
+                        (uint)ceil((double)n_primitives / block_size.y),
+                        (uint)ceil((double)n_images / block_size.z)};
 
-int count_non_trivial_pairs(int *n_counts, const int i_angular,
-                            const int j_angular, const int *i_shells,
-                            const int n_i_shells, const int *j_shells,
-                            const int n_j_shells,
-                            const double *vectors_to_neighboring_images,
-                            const int n_images, const int *mesh, const int *atm,
-                            const int *bas, const double *env,
-                            const double threshold_in_log) {
-  dim3 block_size(16, 16);
-  dim3 block_grid((n_i_shells * n_images + 15) / 16,
-                  (n_j_shells * n_images + 15) / 16);
-  const int mesh_a = mesh[0];
-  const int mesh_b = mesh[1];
-  const int mesh_c = mesh[2];
-  switch (i_angular * 10 + j_angular) {
-    count_non_trivial_pairs_kernel_case_macro(0, 0);
-    count_non_trivial_pairs_kernel_case_macro(0, 1);
-    count_non_trivial_pairs_kernel_case_macro(0, 2);
-    count_non_trivial_pairs_kernel_case_macro(0, 3);
-    count_non_trivial_pairs_kernel_case_macro(0, 4);
-    count_non_trivial_pairs_kernel_case_macro(1, 0);
-    count_non_trivial_pairs_kernel_case_macro(1, 1);
-    count_non_trivial_pairs_kernel_case_macro(1, 2);
-    count_non_trivial_pairs_kernel_case_macro(1, 3);
-    count_non_trivial_pairs_kernel_case_macro(1, 4);
-    count_non_trivial_pairs_kernel_case_macro(2, 0);
-    count_non_trivial_pairs_kernel_case_macro(2, 1);
-    count_non_trivial_pairs_kernel_case_macro(2, 2);
-    count_non_trivial_pairs_kernel_case_macro(2, 3);
-    count_non_trivial_pairs_kernel_case_macro(2, 4);
-    count_non_trivial_pairs_kernel_case_macro(3, 0);
-    count_non_trivial_pairs_kernel_case_macro(3, 1);
-    count_non_trivial_pairs_kernel_case_macro(3, 2);
-    count_non_trivial_pairs_kernel_case_macro(3, 3);
-    count_non_trivial_pairs_kernel_case_macro(3, 4);
-    count_non_trivial_pairs_kernel_case_macro(4, 0);
-    count_non_trivial_pairs_kernel_case_macro(4, 1);
-    count_non_trivial_pairs_kernel_case_macro(4, 2);
-    count_non_trivial_pairs_kernel_case_macro(4, 3);
-    count_non_trivial_pairs_kernel_case_macro(4, 4);
-  default:
-    fprintf(stderr,
-            "angular momentum pair %d, %d is not supported in "
-            "count_non_trivial_pairs\n",
-            i_angular, j_angular);
-  }
-
-  return checkCudaErrors(cudaPeekAtLastError());
+  gpu4pyscf::aft::count_non_trivial_pairs_kernel<<<block_grid, block_size>>>(
+      n_counts, n_primitives, vectors_to_neighboring_images, n_images, atm, bas,
+      env, log_precision);
 }
 
-#define screen_gaussian_pairs_kernel_macro(li, lj)                             \
-  gpu4pyscf::gpbc::multi_grid::screen_gaussian_pairs_kernel<li, lj>            \
-      <<<block_grid, block_size>>>(                                            \
-          shell_pair_indices, image_indices, pairs_to_blocks_begin,            \
-          pairs_to_blocks_end, written_counts, i_shells, n_i_shells, j_shells, \
-          n_j_shells, n_pairs, vectors_to_neighboring_images, n_images,        \
-          mesh_a, mesh_b, mesh_c, atm, bas, env, threshold_in_log)
+void screen_gaussian_pairs(int *shell_list, int *image_list, int *angulars,
+                           double *cutoffs, int *written_counts,
+                           const int n_primitives,
+                           const double *vectors_to_neighboring_images,
+                           const int n_images, const int *atm, const int *bas,
+                           const double *env, const int log_precision) {
 
-#define screen_gaussian_pairs_kernel_case_macro(li, lj)                        \
-  case (li * 10 + lj):                                                         \
-    screen_gaussian_pairs_kernel_macro(li, lj);                                \
-    break
+  const dim3 block_size{16, 16, 1};
+  const dim3 block_grid{(uint)ceil((double)n_primitives / block_size.x),
+                        (uint)ceil((double)n_primitives / block_size.y),
+                        (uint)ceil((double)n_images / block_size.z)};
 
-int screen_gaussian_pairs(int *shell_pair_indices, int *image_indices,
-                          int *pairs_to_blocks_begin, int *pairs_to_blocks_end,
-                          const int i_angular, const int j_angular,
-                          const int *i_shells, const int n_i_shells,
-                          const int *j_shells, const int n_j_shells,
-                          const int n_pairs,
-                          const double *vectors_to_neighboring_images,
-                          const int n_images, const int *mesh, const int *atm,
-                          const int *bas, const double *env,
-                          const double threshold_in_log) {
-  dim3 block_size(16, 16);
-  dim3 block_grid((n_i_shells * n_images + 15) / 16,
-                  (n_j_shells * n_images + 15) / 16);
-  const int mesh_a = mesh[0];
-  const int mesh_b = mesh[1];
-  const int mesh_c = mesh[2];
-  int *written_counts = nullptr;
-  checkCudaErrors(cudaMalloc(&written_counts, sizeof(int)));
-  checkCudaErrors(cudaMemset(written_counts, 0, sizeof(int)));
-  switch (i_angular * 10 + j_angular) {
-    screen_gaussian_pairs_kernel_case_macro(0, 0);
-    screen_gaussian_pairs_kernel_case_macro(0, 1);
-    screen_gaussian_pairs_kernel_case_macro(0, 2);
-    screen_gaussian_pairs_kernel_case_macro(0, 3);
-    screen_gaussian_pairs_kernel_case_macro(0, 4);
-    screen_gaussian_pairs_kernel_case_macro(1, 0);
-    screen_gaussian_pairs_kernel_case_macro(1, 1);
-    screen_gaussian_pairs_kernel_case_macro(1, 2);
-    screen_gaussian_pairs_kernel_case_macro(1, 3);
-    screen_gaussian_pairs_kernel_case_macro(1, 4);
-    screen_gaussian_pairs_kernel_case_macro(2, 0);
-    screen_gaussian_pairs_kernel_case_macro(2, 1);
-    screen_gaussian_pairs_kernel_case_macro(2, 2);
-    screen_gaussian_pairs_kernel_case_macro(2, 3);
-    screen_gaussian_pairs_kernel_case_macro(2, 4);
-    screen_gaussian_pairs_kernel_case_macro(3, 0);
-    screen_gaussian_pairs_kernel_case_macro(3, 1);
-    screen_gaussian_pairs_kernel_case_macro(3, 2);
-    screen_gaussian_pairs_kernel_case_macro(3, 3);
-    screen_gaussian_pairs_kernel_case_macro(3, 4);
-    screen_gaussian_pairs_kernel_case_macro(4, 0);
-    screen_gaussian_pairs_kernel_case_macro(4, 1);
-    screen_gaussian_pairs_kernel_case_macro(4, 2);
-    screen_gaussian_pairs_kernel_case_macro(4, 3);
-    screen_gaussian_pairs_kernel_case_macro(4, 4);
-  default:
-    fprintf(stderr,
-            "angular momentum pair %d, %d is not supported in "
-            "screen_gaussian_pairs_kernel\n",
-            i_angular, j_angular);
-  }
-  int err = checkCudaErrors(cudaPeekAtLastError());
-
-  checkCudaErrors(cudaFree(written_counts));
-  return err;
-}
-
-int count_pairs_on_blocks(int *n_pairs_per_block,
-                          int *n_unstable_pairs_per_block,
-                          const int *pairs_to_blocks_begin,
-                          const int *pairs_to_blocks_end, const int n_blocks[3],
-                          const int n_pairs, const int *non_trivial_pairs,
-                          const int *i_shells, const int *j_shells,
-                          const int n_j_shells, const int *image_indices,
-                          const double *vectors_to_neighboring_images,
-                          const int n_images, const int mesh[3], const int *atm,
-                          const int *bas, const double *env) {
-  const int n_blocks_a = n_blocks[0];
-  const int n_blocks_b = n_blocks[1];
-  const int n_blocks_c = n_blocks[2];
-  const int n_threads = 256;
-  const dim3 block_size(n_threads, 1, 1);
-  const dim3 block_grid(n_blocks_c, n_blocks_b, n_blocks_a);
-  gpu4pyscf::gpbc::multi_grid::
-      count_pairs_on_blocks_kernel<<<block_grid, block_size>>>(
-          n_pairs_per_block, n_unstable_pairs_per_block, pairs_to_blocks_begin,
-          pairs_to_blocks_end, n_pairs, non_trivial_pairs, i_shells, j_shells,
-          n_j_shells, image_indices, vectors_to_neighboring_images, n_images,
-          mesh[0], mesh[1], mesh[2], atm, bas, env);
-
-  return checkCudaErrors(cudaPeekAtLastError());
-}
-
-void put_pairs_on_blocks(
-    int *pairs_on_blocks, const int *accumulated_n_pairs_per_block,
-    const int *sorted_block_index, const int *pairs_to_blocks_begin,
-    const int *pairs_to_blocks_end, const int n_blocks[3],
-    const int n_contributing_blocks, const int n_pairs,
-    const int *non_trivial_pairs, const int *i_shells, const int *j_shells,
-    const int n_j_shells, const int *image_indices,
-    const double *vectors_to_neighboring_images, const int n_images,
-    const int mesh[3], const int *atm, const int *bas, const double *env) {
-  const int n_blocks_a = n_blocks[0];
-  const int n_blocks_b = n_blocks[1];
-  const int n_blocks_c = n_blocks[2];
-  const int n_threads = 256;
-  const dim3 block_size(n_threads);
-  const dim3 block_grid(n_contributing_blocks);
-  gpu4pyscf::gpbc::multi_grid::
-      put_pairs_on_blocks_kernel<<<block_grid, block_size>>>(
-          pairs_on_blocks, accumulated_n_pairs_per_block, sorted_block_index,
-          pairs_to_blocks_begin, pairs_to_blocks_end, n_blocks_a, n_blocks_b,
-          n_blocks_c, n_pairs, non_trivial_pairs, i_shells, j_shells,
-          n_j_shells, image_indices, vectors_to_neighboring_images, n_images,
-          mesh[0], mesh[1], mesh[2], atm, bas, env);
-
-  checkCudaErrors(cudaPeekAtLastError());
-}
-
-int tailor_gaussian_pairs(
-    int *sorted_pairs_per_local_grid, int *n_pairs_per_local_grid,
-    const int i_angular, const int j_angular, const int *non_trivial_pairs,
-    const int *i_shells, const int *j_shells, const int n_j_shells,
-    const int *shell_to_ao_indices,
-    const int *accumulated_n_pairs_per_local_grid,
-    const int *sorted_block_index, const int n_contributing_blocks,
-    const int *image_indices, const double *vectors_to_neighboring_images,
-    const int n_images, const int *mesh, const int *atm, const int *bas,
-    const double *env, const int is_non_orthogonal, const double threshold,
-    const int derivative_order) {
-  if (is_non_orthogonal) {
-    return gpu4pyscf::gpbc::multi_grid::tailor_gaussian_pairs_driver<true>(
-        sorted_pairs_per_local_grid, n_pairs_per_local_grid, i_angular,
-        j_angular, non_trivial_pairs, i_shells, j_shells, n_j_shells,
-        shell_to_ao_indices, accumulated_n_pairs_per_local_grid,
-        sorted_block_index, n_contributing_blocks, image_indices,
-        vectors_to_neighboring_images, n_images, mesh, atm, bas, env, threshold,
-        derivative_order);
-  } else {
-    return gpu4pyscf::gpbc::multi_grid::tailor_gaussian_pairs_driver<false>(
-        sorted_pairs_per_local_grid, n_pairs_per_local_grid, i_angular,
-        j_angular, non_trivial_pairs, i_shells, j_shells, n_j_shells,
-        shell_to_ao_indices, accumulated_n_pairs_per_local_grid,
-        sorted_block_index, n_contributing_blocks, image_indices,
-        vectors_to_neighboring_images, n_images, mesh, atm, bas, env, threshold,
-        derivative_order);
-  }
+  gpu4pyscf::aft::screen_gaussian_pairs_kernel<<<block_grid, block_size>>>(
+      shell_list, image_list, angulars, cutoffs, written_counts, n_primitives,
+      vectors_to_neighboring_images, n_images, atm, bas, env, log_precision);
 }
 }

@@ -2,7 +2,7 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --ptxas-options=-v -DLIBCUDACXX_ENABLE
 
 add_library(aft SHARED
         drivers.cu
-				# screen.cu
+				screen.cu
 				# eval_xc.cu
 				# eval_xc_grad.cu
 )

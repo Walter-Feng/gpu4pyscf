@@ -58,6 +58,15 @@ template <typename T, int ANG> __device__ constexpr T common_fac_sp() {
     return 1.0;
   }
 }
+__device__ constexpr double common_fac_sp(const int angular) {
+  if (angular == 0) {
+    return 0.282094791773878143;
+  } else if (angular == 1) {
+    return 0.488602511902919921;
+  } else {
+    return 1.0;
+  }
+}
 
 template <typename T, int ANG> __device__ T log_common_fac_sp() {
   if constexpr (ANG == 0) {
