@@ -124,11 +124,11 @@ count_non_trivial_pairs_kernel(int *n_counts, const int n_primitives,
   }
 
   int count = is_valid_pair ? 1 : 0;
-  int sum =
+  count =
       cub::BlockReduce<int, 16, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY, 16>()
           .Sum(count);
   if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
-    atomicAdd(n_counts, sum);
+    atomicAdd(n_counts, count);
   }
 }
 
@@ -224,7 +224,72 @@ screen_gaussian_pairs_kernel(int *shell_list, int *image_list, int *angulars,
     cutoffs[write_offset_for_this_thread] = cutoff;
   }
 }
+
+__global__ void count_pairs_on_blocks_kernel(
+    int *counts_on_blocks, const double *cutoffs, const int n_pairs,
+    const int mesh_a, const int mesh_b, const int mesh_c, const int n_a_blocks,
+    const int n_b_blocks, const int n_c_blocks) {
+
+  constexpr int n_threads = BLOCK_DIM_XYZ * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
+  const int thread_id =
+      threadIdx.x + BLOCK_DIM_XYZ * (threadIdx.y + BLOCK_DIM_XYZ * threadIdx.z);
+
+  const int block_a_index = blockIdx.x;
+  const int block_b_index = blockIdx.y;
+  const int block_c_index = blockIdx.z;
+
+  const bool reverse_a = block_a_index >= n_a_blocks / 2;
+  const bool reverse_b = block_b_index >= n_b_blocks / 2;
+  const bool reverse_c = block_c_index >= n_c_blocks / 2;
+
+  const int a_begin_index =
+      reverse_a ? (block_a_index - n_a_blocks + 1) * BLOCK_DIM_XYZ - 1
+                : block_a_index * BLOCK_DIM_XYZ;
+  const int b_begin_index =
+      reverse_b ? (block_b_index - n_b_blocks + 1) * BLOCK_DIM_XYZ - 1
+                : block_b_index * BLOCK_DIM_XYZ;
+  const int c_begin_index =
+      reverse_c ? (block_c_index - n_c_blocks + 1) * BLOCK_DIM_XYZ - 1
+                : block_c_index * BLOCK_DIM_XYZ;
+
+  const double gx_begin =
+      G[0] * a_begin_index + G[3] * b_begin_index + G[6] * c_begin_index;
+  const double gy_begin =
+      G[1] * a_begin_index + G[4] * b_begin_index + G[7] * c_begin_index;
+  const double gz_begin =
+      G[2] * a_begin_index + G[5] * b_begin_index + G[8] * c_begin_index;
+
+  const double distance = sqrt(distance_squared(gx_begin, gy_begin, gz_begin));
+
+  int count = 0;
+  const int n_batches = n_pairs / n_threads + 1;
+  for (int i = thread_id, i_batch = 0; i_batch < n_batches;
+       i_batch++, i += n_threads) {
+    if (i < n_pairs) {
+      const double cutoff = cutoffs[i];
+      if (distance > cutoff) {
+        break;
+      } else {
+        count++;
+      }
+    }
+  }
+
+  count = cub::BlockReduce<int, BLOCK_DIM_XYZ,
+                           cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY,
+                           BLOCK_DIM_XYZ, BLOCK_DIM_XYZ>()
+              .Sum(count);
+
+  if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+    counts_on_blocks[block_a_index * n_b_blocks * n_c_blocks +
+                     block_b_index * n_c_blocks + block_c_index] = count;
+    if (count > 0) {
+      atomicAdd(counts_on_blocks + n_a_blocks * n_b_blocks * n_c_blocks, 1);
+    }
+  }
+}
 } // namespace gpu4pyscf::aft
+
 extern "C" {
 
 void count_non_trivial_pairs(int *n_counts, const int n_primitives,
@@ -257,5 +322,19 @@ void screen_gaussian_pairs(int *shell_list, int *image_list, int *angulars,
   gpu4pyscf::aft::screen_gaussian_pairs_kernel<<<block_grid, block_size>>>(
       shell_list, image_list, angulars, cutoffs, written_counts, n_primitives,
       vectors_to_neighboring_images, n_images, atm, bas, env, log_precision);
+}
+
+void count_pairs_on_blocks(int *counts_on_blocks, const double *cutoffs,
+                           const int n_pairs, const int mesh_a,
+                           const int mesh_b, const int mesh_c,
+                           const int n_a_blocks, const int n_b_blocks,
+                           const int n_c_blocks) {
+
+  const dim3 block_size{BLOCK_DIM_XYZ, BLOCK_DIM_XYZ, BLOCK_DIM_XYZ};
+  const dim3 block_grid{(uint)n_a_blocks, (uint)n_b_blocks, (uint)n_c_blocks};
+
+  gpu4pyscf::aft::count_pairs_on_blocks_kernel<<<block_grid, block_size>>>(
+      counts_on_blocks, cutoffs, n_pairs, mesh_a, mesh_b, mesh_c, n_a_blocks,
+      n_b_blocks, n_c_blocks);
 }
 }

@@ -14,15 +14,12 @@
 
 
 import ctypes
-from operator import mul
-from random import gauss
 import numpy as np
 import cupy as cp
 
 import pyscf.pbc.gto as gto
 from pyscf.pbc.gto.eval_gto import get_lattice_Ls
 from pyscf.gto.moleintor import make_loc
-from pyscf.gto import ATOM_OF, ANG_OF, NPRIM_OF, PTR_EXP, PTR_COEFF, PTR_COORD
 from pyscf import lib
 
 from gpu4pyscf.dft import numint as mol_numint
@@ -33,7 +30,7 @@ from gpu4pyscf.lib import logger, utils
 from gpu4pyscf.pbc.tools import pbc as pbc_tools
 import gpu4pyscf.pbc.dft.multigrid_v2 as multigrid_v2
 import gpu4pyscf.pbc.dft.gen_grid as gen_grid
-from gpu4pyscf.lib.cupy_helper import contract, tag_array, load_library
+from gpu4pyscf.lib.cupy_helper import tag_array, load_library
 
 libaft = load_library('libaft')
 
@@ -78,9 +75,6 @@ class AFTDFNumInt(pbc_numint.NumInt):
         self.bas = cp.asarray(cell._bas, dtype=cp.int32)
         self.env = cp.asarray(cell._env, dtype=cp.float64)
 
-        self.Gv = cp.asarray(cell.get_Gv())
-
-        self.primitive_values = pbc_numint.eval_ao(cell, self.grid.coords)
         self.neighboring_images = cp.asarray(neighboring_images, dtype=cp.double)
 
         log_precision = int(np.ceil(-np.log10(self.precision)))
@@ -128,6 +122,7 @@ class AFTDFNumInt(pbc_numint.NumInt):
 
         self.screened_pairs = []
         self.n_blocks = self.mesh // 8 * 2
+
         for i, angular in enumerate(unique_angular_pairs):
             corresponding_pairs = cp.where(unique_indices == i)[0]
 
@@ -138,6 +133,22 @@ class AFTDFNumInt(pbc_numint.NumInt):
             cutoff = cutoff[sort_index]
             shells = primitive_pairs[corresponding_pairs]
             image = image_list[corresponding_pairs]
+            n_pairs_on_blocks = cp.zeros(np.prod(self.n_blocks) + 1, dtype=cp.int32)
+            libaft.count_pairs_on_blocks(
+                multigrid_v2.cast_to_pointer(n_pairs_on_blocks),
+                multigrid_v2.cast_to_pointer(cutoff),
+                ctypes.c_int(len(cutoff)),
+                ctypes.c_int(self.mesh[0]),
+                ctypes.c_int(self.mesh[1]),
+                ctypes.c_int(self.mesh[2]),
+                ctypes.c_int(self.n_blocks[0]),
+                ctypes.c_int(self.n_blocks[1]),
+                ctypes.c_int(self.n_blocks[2]),
+            )
+
+            sorted_block_indices = cp.argsort(-n_pairs_on_blocks)[: n_pairs_on_blocks[-1]]
+            n_pairs_on_blocks = n_pairs_on_blocks[:-1]
+
             self.screened_pairs.append(
                 {
                     'angular': angular,
@@ -231,11 +242,16 @@ cell = gto.Cell(
     precision=1e-8,
     verbose=0,
 )
+cell.build()
+import pyscf
+
+cell = pyscf.pbc.tools.super_cell(cell, [3, 3, 3])
 
 mf = RKS(cell, xc='pbe')
 exp_numint = AFTDFNumInt(cell)
 dm = cp.ones((cell.nao_nr(), cell.nao_nr()))
 exp_density = exp_numint.evaluate_reciprocal_density(dm)
+print(exp_density)
 ref_numint = multigrid_v2.MultiGridNumInt(cell)
 ref_density = multigrid_v2.evaluate_density_on_g_mesh(ref_numint, dm)
 print(cp.abs(exp_density - ref_density).max())
