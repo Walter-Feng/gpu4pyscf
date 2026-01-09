@@ -297,6 +297,9 @@ Compact basis functions are found in the system. It is recommended to use Becke 
     device = utils.device
     to_cpu = NotImplemented
 
+    def _finalize(self):
+        return self
+
 # Update the KohnShamDFT label in pbc.scf.hf module
 pbchf.KohnShamDFT = KohnShamDFT
 

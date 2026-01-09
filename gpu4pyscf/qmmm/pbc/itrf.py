@@ -124,14 +124,14 @@ def qmmm_for_scf(method, mm_mol):
 
 
 class QMMM:
-    __name_mixin__ = "QMMM"
+    __name_mixin__ = 'QMMM'
 
 
 _QMMM = QMMM
 
 
 class QMMMSCF(QMMM):
-    _keys = {"mm_mol", "s1r", "s1rr", "mm_ewald_pot", "qm_ewald_hess", "e_nuc"}
+    _keys = {'mm_mol', 's1r', 's1rr', 'mm_ewald_pot', 'qm_ewald_hess', 'e_nuc'}
 
     to_cpu = NotImplemented
     as_scanner = NotImplemented
@@ -147,24 +147,22 @@ class QMMMSCF(QMMM):
 
     def dump_flags(self, verbose=None):
         super().dump_flags(verbose)
-        logger.info(
-            self, "** Add background charges for %s **", self.__class__.__name__
-        )
+        logger.info(self, '** Add background charges for %s **', self.__class__.__name__)
         _a = self.mm_mol.lattice_vectors()
-        logger.info(self, "lattice vectors  a1 [%.9f, %.9f, %.9f]", *_a[0])
-        logger.info(self, "                 a2 [%.9f, %.9f, %.9f]", *_a[1])
-        logger.info(self, "                 a3 [%.9f, %.9f, %.9f]", *_a[2])
+        logger.info(self, 'lattice vectors  a1 [%.9f, %.9f, %.9f]', *_a[0])
+        logger.info(self, '                 a2 [%.9f, %.9f, %.9f]', *_a[1])
+        logger.info(self, '                 a3 [%.9f, %.9f, %.9f]', *_a[2])
         if self.verbose >= logger.DEBUG2:
-            logger.debug2(self, "Charge      Location")
+            logger.debug2(self, 'Charge      Location')
             coords = self.mm_mol.atom_coords()
             charges = self.mm_mol.atom_charges()
             for i, z in enumerate(charges):
-                logger.debug2(self, "%.9g    %s", z, coords[i])
+                logger.debug2(self, '%.9g    %s', z, coords[i])
         return self
 
     def intor(self, intor_type, **kwargs):
         if isinstance(self.mol, pyscf.pbc.gto.Cell):
-            if intor_type == "int1e_ipovlp":
+            if intor_type == 'int1e_ipovlp':
                 from gpu4pyscf.pbc.gto import int1e
 
                 return int1e.int1e_ipovlp(self.mol)[0]
@@ -195,13 +193,11 @@ class QMMMSCF(QMMM):
                     charges=mol.atom_charges(),
                     rcut_ewald=cutoff,
                     rcut_hcore=cutoff,
-                    unit="Bohr",
+                    unit='Bohr',
                 )
 
                 qm_mol.mesh = self.mm_mol.mesh
-                qm_ewald_hess_from_fake_images = qm_mol.get_ewald_potential(
-                    qm_mol.atom_coords()
-                )
+                qm_ewald_hess_from_fake_images = qm_mol.get_ewald_potential(qm_mol.atom_coords())
 
                 n_terms = len(qm_ewald_hess)
                 assert len(qm_ewald_hess_from_fake_images) == n_terms
@@ -219,12 +215,12 @@ class QMMMSCF(QMMM):
         charges = self.get_qm_charges(dm, remove_core)
         dips = self.get_qm_dipoles(dm)
         quads = self.get_qm_quadrupoles(dm)
-        ewpot0 = contract("ij,j->i", qm_ewald_hess[0], charges)
-        ewpot0 += contract("ijx,jx->i", qm_ewald_hess[1], dips)
-        ewpot0 += contract("ijxy,jxy->i", qm_ewald_hess[3], quads)
-        ewpot1 = contract("ijx,i->jx", qm_ewald_hess[1], charges)
-        ewpot1 += contract("ijxy,jy->ix", qm_ewald_hess[2], dips)
-        ewpot2 = contract("ijxy,j->ixy", qm_ewald_hess[3], charges)
+        ewpot0 = contract('ij,j->i', qm_ewald_hess[0], charges)
+        ewpot0 += contract('ijx,jx->i', qm_ewald_hess[1], dips)
+        ewpot0 += contract('ijxy,jxy->i', qm_ewald_hess[3], quads)
+        ewpot1 = contract('ijx,i->jx', qm_ewald_hess[1], charges)
+        ewpot1 += contract('ijxy,jy->ix', qm_ewald_hess[2], dips)
+        ewpot2 = contract('ijxy,j->ixy', qm_ewald_hess[3], charges)
 
         return ewpot0, ewpot1, ewpot2
 
@@ -252,52 +248,50 @@ class QMMMSCF(QMMM):
         mask = np.linalg.norm(Ls, axis=-1) < 1e-12
         Ls[mask] = [np.inf] * 3
         r_qm = (mol.atom_coords() - qm_center)[None, :, :] - Ls[:, None, :]
-        r_qm = np.einsum("Lix,Lix->Li", r_qm, r_qm)
+        r_qm = np.einsum('Lix,Lix->Li', r_qm, r_qm)
         assert rcut_hcore**2 < np.min(r_qm), (
-            "QM image is within rcut_hcore of QM center. "
-            + f"rcut_hcore = {rcut_hcore} >= min(r_qm) = {np.sqrt(np.min(r_qm))}"
+            'QM image is within rcut_hcore of QM center. '
+            + f'rcut_hcore = {rcut_hcore} >= min(r_qm) = {np.sqrt(np.min(r_qm))}'
         )
         Ls[Ls == np.inf] = 0.0
 
         r_qm = mol.atom_coords() - qm_center
-        r_qm = np.einsum("ix,ix->i", r_qm, r_qm)
+        r_qm = np.einsum('ix,ix->i', r_qm, r_qm)
         assert rcut_hcore**2 > np.max(r_qm), (
-            "Not all QM atoms are within rcut_hcore of QM center. "
-            + f"rcut_hcore = {rcut_hcore} <= max(r_qm) = {np.sqrt(np.max(r_qm))}"
+            'Not all QM atoms are within rcut_hcore of QM center. '
+            + f'rcut_hcore = {rcut_hcore} <= max(r_qm) = {np.sqrt(np.max(r_qm))}'
         )
         r_qm = None
 
         qm_center = cp.asarray(qm_center)
-        all_coords = cp.asarray(
-            (mm_mol.atom_coords()[None, :, :] + Ls[:, None, :]).reshape(-1, 3)
-        )
+        all_coords = cp.asarray((mm_mol.atom_coords()[None, :, :] + Ls[:, None, :]).reshape(-1, 3))
         all_charges = cp.hstack([mm_mol.atom_charges()] * len(Ls))
         dist2 = all_coords - qm_center
-        dist2 = contract("ix,ix->i", dist2, dist2)
+        dist2 = contract('ix,ix->i', dist2, dist2)
 
         # charges within rcut_hcore exactly go into hcore
         mask = dist2 <= rcut_hcore**2
         charges = all_charges[mask]
         coords = all_coords[mask]
-        logger.note(self, "%d MM charges see directly QM density" % charges.shape[0])
-        if mm_mol.charge_model == "gaussian" and len(coords) != 0:
+        logger.note(self, '%d MM charges see directly QM density' % charges.shape[0])
+        if mm_mol.charge_model == 'gaussian' and len(coords) != 0:
             expnts = cp.hstack([mm_mol.get_zetas()] * len(Ls))[mask]
             h1e += int1e_grids(mol, coords, charges=-charges, charge_exponents=expnts)
-        elif mm_mol.charge_model != "point" and len(coords) != 0:
+        elif mm_mol.charge_model != 'point' and len(coords) != 0:
             # TODO test this block
-            raise RuntimeError("Not tested yet")
+            raise RuntimeError('Not tested yet')
             nao = mol.nao
             max_memory = self.max_memory - lib.current_memory()[0]
             blksize = int(min(max_memory * 1e6 / 8 / nao**2, 200))
             blksize = max(blksize, 1)
             for i0, i1 in lib.prange(0, charges.size, blksize):
-                j3c = mol.intor("int1e_grids", hermi=1, grids=coords[i0:i1].get())
-                h1e += contract("kpq,k->pq", cp.asarray(j3c), -charges[i0:i1])
+                j3c = mol.intor('int1e_grids', hermi=1, grids=coords[i0:i1].get())
+                h1e += contract('kpq,k->pq', cp.asarray(j3c), -charges[i0:i1])
         else:  # no MM charges
             pass
 
         j3c = None
-        logger.timer(self, "get_hcore", *cput0)
+        logger.timer(self, 'get_hcore', *cput0)
         return h1e
 
     def get_qm_charges(self, dm, remove_core=False):
@@ -323,10 +317,8 @@ class QMMMSCF(QMMM):
                 b0, b1 = np.where(bas_atom == i)[0][[0, -1]]
                 shls_slice = (0, mol.nbas, b0, b1 + 1)
                 with mol.with_common_orig(mol.atom_coord(i)):
-                    self.s1r.append(
-                        cp.asarray(mol.intor("int1e_r", shls_slice=shls_slice))
-                    )
-            logger.timer(self, "get_s1r", *cput0)
+                    self.s1r.append(cp.asarray(mol.intor('int1e_r', shls_slice=shls_slice)))
+            logger.timer(self, 'get_s1r', *cput0)
         return self.s1r
 
     def get_qm_dipoles(self, dm, s1r=None):
@@ -337,7 +329,7 @@ class QMMMSCF(QMMM):
         qm_dipoles = list()
         for iatm in range(self.mol.natm):
             p0, p1 = aoslices[iatm, 2:]
-            qm_dipoles.append(-contract("uv,xvu->x", dm[p0:p1], s1r[iatm]))
+            qm_dipoles.append(-contract('uv,xvu->x', dm[p0:p1], s1r[iatm]))
         return cp.asarray(qm_dipoles)
 
     def get_s1rr(self):
@@ -354,14 +346,14 @@ class QMMMSCF(QMMM):
                 b0, b1 = np.where(bas_atom == i)[0][[0, -1]]
                 shls_slice = (0, mol.nbas, b0, b1 + 1)
                 with mol.with_common_orig(mol.atom_coord(i)):
-                    s1rr_ = mol.intor("int1e_rr", shls_slice=shls_slice)
+                    s1rr_ = mol.intor('int1e_rr', shls_slice=shls_slice)
                     s1rr_ = s1rr_.reshape((3, 3, nao, -1))
-                    s1rr_trace = lib.einsum("xxuv->uv", s1rr_)
+                    s1rr_trace = lib.einsum('xxuv->uv', s1rr_)
                     s1rr_ = 3 / 2 * s1rr_
                     for k in range(3):
                         s1rr_[k, k] -= 0.5 * s1rr_trace
                     self.s1rr.append(cp.asarray(s1rr_))
-            logger.timer(self, "get_s1rr", *cput0)
+            logger.timer(self, 'get_s1rr', *cput0)
         return self.s1rr
 
     def get_qm_quadrupoles(self, dm, s1rr=None):
@@ -372,7 +364,7 @@ class QMMMSCF(QMMM):
         qm_quadrupoles = list()
         for iatm in range(self.mol.natm):
             p0, p1 = aoslices[iatm, 2:]
-            qm_quadrupoles.append(-contract("uv,xyvu->xy", dm[p0:p1], s1rr[iatm]))
+            qm_quadrupoles.append(-contract('uv,xyvu->xy', dm[p0:p1], s1rr[iatm]))
         return cp.asarray(qm_quadrupoles)
 
     def get_vdiff(self, mol, ewald_pot):
@@ -392,8 +384,8 @@ class QMMMSCF(QMMM):
             v2 = cp.asarray(ewald_pot[2][iatm])
             p0, p1 = aoslices[iatm, 2:]
             vdiff[:, p0:p1] -= v0 * ovlp[:, p0:p1]
-            vdiff[:, p0:p1] -= contract("x,xuv->uv", v1, s1r[iatm])
-            vdiff[:, p0:p1] -= contract("xy,xyuv->uv", v2, s1rr[iatm])
+            vdiff[:, p0:p1] -= contract('x,xuv->uv', v1, s1r[iatm])
+            vdiff[:, p0:p1] -= contract('xy,xyuv->uv', v2, s1rr[iatm])
         vdiff = (vdiff + vdiff.T) / 2
         return vdiff
 
@@ -401,9 +393,7 @@ class QMMMSCF(QMMM):
         j_from_qm = super().get_j(mol, dm)
 
         if self.qm_ewald_hess is not None:
-            qm_ewald_pot = self.get_qm_ewald_pot(
-                mol, dm, self.qm_ewald_hess, remove_core=True
-            )
+            qm_ewald_pot = self.get_qm_ewald_pot(mol, dm, self.qm_ewald_hess, remove_core=True)
         else:
             qm_ewald_pot = self.get_qm_ewald_pot(mol, dm, remove_core=True)
 
@@ -432,14 +422,14 @@ class QMMMSCF(QMMM):
                 cput0 = (logger.process_clock(), logger.perf_counter())
                 mm_ewald_pot = self.get_mm_ewald_pot(mol, mm_mol)
                 self.mm_ewald_pot = mm_ewald_pot
-                logger.timer(self, "get_mm_ewald_pot", *cput0)
+                logger.timer(self, 'get_mm_ewald_pot', *cput0)
         if qm_ewald_pot is None:
             if self.qm_ewald_hess is not None:
                 qm_ewald_pot = self.get_qm_ewald_pot(mol, dm, self.qm_ewald_hess)
             else:
                 cput0 = (logger.process_clock(), logger.perf_counter())
                 qm_ewald_pot = self.get_qm_ewald_pot(mol, dm)
-                logger.timer(self, "get_qm_ewald_pot", *cput0)
+                logger.timer(self, 'get_qm_ewald_pot', *cput0)
 
         ewald_pot = (
             mm_ewald_pot[0] + qm_ewald_pot[0],
@@ -482,11 +472,11 @@ class QMMMSCF(QMMM):
         if qm_ewald_pot is None:
             qm_ewald_pot = self.get_qm_ewald_pot(self.mol, dm, self.qm_ewald_hess)
         ewald_pot = mm_ewald_pot[0] + qm_ewald_pot[0] / 2
-        e = contract("i,i->", cp.asarray(ewald_pot), self.get_qm_charges(dm))
+        e = contract('i,i->', cp.asarray(ewald_pot), self.get_qm_charges(dm))
         ewald_pot = mm_ewald_pot[1] + qm_ewald_pot[1] / 2
-        e += contract("ix,ix->", cp.asarray(ewald_pot), self.get_qm_dipoles(dm))
+        e += contract('ix,ix->', cp.asarray(ewald_pot), self.get_qm_dipoles(dm))
         ewald_pot = mm_ewald_pot[2] + qm_ewald_pot[2] / 2
-        e += contract("ixy,ixy->", cp.asarray(ewald_pot), self.get_qm_quadrupoles(dm))
+        e += contract('ixy,ixy->', cp.asarray(ewald_pot), self.get_qm_quadrupoles(dm))
         # TODO add energy correction if sum(charges) !=0 ?
 
         return e
@@ -502,21 +492,17 @@ class QMMMSCF(QMMM):
             if isinstance(self.mol, pyscf.pbc.gto.Cell):
                 nuc = pyscf.gto.mole.energy_nuc(self.mol)
 
-            else:
-                nuc = self.mol.energy_nuc()  # qm_nuc - qm_nuc
-            #  nuc = self.mol.energy_nuc()
+            nuc = self.mol.energy_nuc()
 
             # select mm atoms within rcut_hcore
             mol = self.mol
             Ls = self.mm_mol.get_lattice_Ls()
             qm_center = np.mean(mol.atom_coords(), axis=0)
-            all_coords = lib.direct_sum(
-                "ix+Lx->Lix", self.mm_mol.atom_coords(), Ls
-            ).reshape(-1, 3)
+            all_coords = lib.direct_sum('ix+Lx->Lix', self.mm_mol.atom_coords(), Ls).reshape(-1, 3)
             all_charges = np.hstack([self.mm_mol.atom_charges()] * len(Ls))
             all_expnts = np.hstack([np.sqrt(self.mm_mol.get_zetas())] * len(Ls))
             dist2 = all_coords - qm_center
-            dist2 = lib.einsum("ix,ix->i", dist2, dist2)
+            dist2 = lib.einsum('ix,ix->i', dist2, dist2)
             mask = dist2 <= self.mm_mol.rcut_hcore**2
             charges = all_charges[mask]
             coords = all_coords[mask]
@@ -531,20 +517,16 @@ class QMMMSCF(QMMM):
 
             nuc += modification
             self.modification = modification
-            logger.timer(self, "energy_nuc", *cput0)
+            logger.timer(self, 'energy_nuc', *cput0)
             self.e_nuc = nuc
             return nuc
 
-    def energy_tot(
-        self, dm=None, h1e=None, vhf=None, mm_ewald_pot=None, qm_ewald_pot=None
-    ):
+    def energy_tot(self, dm=None, h1e=None, vhf=None, mm_ewald_pot=None, qm_ewald_pot=None):
         nuc = self.energy_nuc()
-        ewald = self.energy_ewald(
-            dm=dm, mm_ewald_pot=mm_ewald_pot, qm_ewald_pot=qm_ewald_pot
-        )
+        ewald = self.energy_ewald(dm=dm, mm_ewald_pot=mm_ewald_pot, qm_ewald_pot=qm_ewald_pot)
         e_tot = self.energy_elec(dm, h1e, vhf)[0] + nuc + ewald
-        self.scf_summary["nuc"] = nuc.real
-        self.scf_summary["ewald"] = ewald
+        self.scf_summary['nuc'] = nuc.real
+        self.scf_summary['ewald'] = ewald
         return e_tot
 
     def nuc_grad_method(self):
@@ -553,25 +535,21 @@ class QMMMSCF(QMMM):
         return qmmm_grad_for_scf(scf_grad)
 
 
-def grad_qm_multipole(
-    Tija, Tijab, Tijabc, qm_charges, qm_dipoles, qm_quads, mm_charges
-):
-    Tc = contract("ijx,j->ix", Tija, mm_charges)
-    res = contract("i,ix->ix", qm_charges, Tc)
-    Tc = contract("ijxa,j->ixa", Tijab, mm_charges)
-    res += contract("ia,ixa->ix", qm_dipoles, Tc)
-    Tc = contract("ijxab,j->ixab", Tijabc, mm_charges)
-    res += contract("iab,ixab->ix", qm_quads, Tc) / 3
+def grad_qm_multipole(Tija, Tijab, Tijabc, qm_charges, qm_dipoles, qm_quads, mm_charges):
+    Tc = contract('ijx,j->ix', Tija, mm_charges)
+    res = contract('i,ix->ix', qm_charges, Tc)
+    Tc = contract('ijxa,j->ixa', Tijab, mm_charges)
+    res += contract('ia,ixa->ix', qm_dipoles, Tc)
+    Tc = contract('ijxab,j->ixab', Tijabc, mm_charges)
+    res += contract('iab,ixab->ix', qm_quads, Tc) / 3
     return res
 
 
-def grad_mm_multipole(
-    Tija, Tijab, Tijabc, qm_charges, qm_dipoles, qm_quads, mm_charges
-):
-    Tc = contract("i,ijx->jx", qm_charges, Tija)
-    Tc += contract("ia,ijxa->jx", qm_dipoles, Tijab)
-    Tc += contract("iab,ijxab->jx", qm_quads, Tijabc) / 3
-    return contract("jx,j->jx", Tc, mm_charges)
+def grad_mm_multipole(Tija, Tijab, Tijabc, qm_charges, qm_dipoles, qm_quads, mm_charges):
+    Tc = contract('i,ijx->jx', qm_charges, Tija)
+    Tc += contract('ia,ijxa->jx', qm_dipoles, Tijab)
+    Tc += contract('iab,ijxab->jx', qm_quads, Tijabc) / 3
+    return contract('jx,j->jx', Tc, mm_charges)
 
 
 def add_mm_charges_grad(
@@ -650,25 +628,25 @@ def contract_hcore_mm(scf_grad, mol=None):
     all_coords = (coords[None, :, :] + Ls[:, None, :]).reshape(-1, 3)
     all_charges = cp.hstack([charges] * len(Ls))
     dist2 = all_coords - qm_center
-    dist2 = contract("ix,ix->i", dist2, dist2)
+    dist2 = contract('ix,ix->i', dist2, dist2)
 
     # charges within rcut_hcore exactly go into hcore
     mask = dist2 <= rcut_hcore**2
     charges = all_charges[mask]
     coords = all_coords[mask]
     nao = mol.nao
-    if mm_mol.charge_model == "gaussian" and len(coords) != 0:
+    if mm_mol.charge_model == 'gaussian' and len(coords) != 0:
         expnts = cp.hstack([mm_mol.get_zetas()] * len(Ls))[mask]
         g_qm += int1e_grids_ip1(mol, coords, charges=charges, charge_exponents=expnts)
-    elif mm_mol.charge_model == "point" and len(coords) != 0:
-        raise RuntimeError("Not tested yet")
+    elif mm_mol.charge_model == 'point' and len(coords) != 0:
+        raise RuntimeError('Not tested yet')
         max_memory = scf_grad.max_memory - lib.current_memory()[0]
         blksize = int(min(max_memory * 1e6 / 8 / nao**2 / 3, 200))
         blksize = max(blksize, 1)
         coords = coords.get()
         for i0, i1 in lib.prange(0, len(coords), blksize):
-            j3c = cp.asarray(mol.intor("int1e_grids_ip", grids=coords[i0:i1]))
-            g_qm += contract("ikpq,k->ipq", j3c, charges[i0:i1])
+            j3c = cp.asarray(mol.intor('int1e_grids_ip', grids=coords[i0:i1]))
+            g_qm += contract('ikpq,k->ipq', j3c, charges[i0:i1])
     else:  # len(coords) == 0
         pass
     return g_qm
@@ -678,8 +656,8 @@ def qmmm_grad_for_scf(scf_grad):
     """Add the potential of MM particles to SCF (HF and DFT) object and then
     generate the corresponding QM/MM gradients method for the total system.
     """
-    if getattr(scf_grad.base, "with_x2c", None):
-        raise NotImplementedError("X2C with QM/MM charges")
+    if getattr(scf_grad.base, 'with_x2c', None):
+        raise NotImplementedError('X2C with QM/MM charges')
 
     # Avoid to initialize QMMMGrad twice
     if isinstance(scf_grad, QMMMGrad):
@@ -694,8 +672,8 @@ def qmmm_grad_for_scf(scf_grad):
 
 
 class QMMMGrad:
-    __name_mixin__ = "QMMM"
-    _keys = {"de_ewald_mm", "de_nuc_mm"}
+    __name_mixin__ = 'QMMM'
+    _keys = {'de_ewald_mm', 'de_nuc_mm'}
 
     to_cpu = NotImplemented
 
@@ -705,19 +683,17 @@ class QMMMGrad:
 
     def dump_flags(self, verbose=None):
         super().dump_flags(verbose)
-        logger.info(
-            self, "** Add background charges for %s **", self.__class__.__name__
-        )
+        logger.info(self, '** Add background charges for %s **', self.__class__.__name__)
         _a = self.base.mm_mol.lattice_vectors()
-        logger.info(self, "lattice vectors  a1 [%.9f, %.9f, %.9f]", *_a[0])
-        logger.info(self, "                 a2 [%.9f, %.9f, %.9f]", *_a[1])
-        logger.info(self, "                 a3 [%.9f, %.9f, %.9f]", *_a[2])
+        logger.info(self, 'lattice vectors  a1 [%.9f, %.9f, %.9f]', *_a[0])
+        logger.info(self, '                 a2 [%.9f, %.9f, %.9f]', *_a[1])
+        logger.info(self, '                 a3 [%.9f, %.9f, %.9f]', *_a[2])
         if self.verbose >= logger.DEBUG2:
-            logger.debug2(self, "Charge      Location")
+            logger.debug2(self, 'Charge      Location')
             coords = self.base.mm_mol.atom_coords()
             charges = self.base.mm_mol.atom_charges()
             for i, z in enumerate(charges):
-                logger.debug2(self, "%.9g    %s", z, coords[i])
+                logger.debug2(self, '%.9g    %s', z, coords[i])
         return self
 
     def grad_ewald_pulay(self, dm=None, mm_ewald_pot=None, qm_ewald_pot=None):
@@ -753,7 +729,7 @@ class QMMMGrad:
         dEdsr = cp.zeros((3, mol.nao, mol.nao))
         dEdsrr = cp.zeros((3, 3, mol.nao, mol.nao))
         # s1 = cp.asarray(self.get_ovlp(mol)) # = -mol.intor('int1e_ipovlp')
-        s1 = -self.base.intor("int1e_ipovlp")
+        s1 = -self.base.intor('int1e_ipovlp')
 
         s1r = list()
         s1rr = list()
@@ -765,28 +741,18 @@ class QMMMGrad:
             p0, p1 = aoslices[iatm, 2:]
 
             dEds[p0:p1] -= v0 * dm[p0:p1]
-            dEdsr[:, p0:p1] -= contract("x,uv->xuv", v1, dm[p0:p1])
-            dEdsrr[:, :, p0:p1] -= contract("xy,uv->xyuv", v2, dm[p0:p1])
+            dEdsr[:, p0:p1] -= contract('x,uv->xuv', v1, dm[p0:p1])
+            dEdsrr[:, :, p0:p1] -= contract('xy,uv->xyuv', v2, dm[p0:p1])
 
             b0, b1 = np.where(bas_atom == iatm)[0][[0, -1]]
             shlslc = (b0, b1 + 1, 0, mol.nbas)
             with mol.with_common_orig(qm_coords[iatm]):
                 # s1r[a,x,u,v] = \int phi_u (r_a-Ri_a) (-\nabla_x phi_v) dr
-                s1r.append(
-                    cp.asarray(
-                        -mol.intor("int1e_irp", shls_slice=shlslc).reshape(
-                            3, 3, -1, mol.nao
-                        )
-                    )
-                )
+                s1r.append(cp.asarray(-mol.intor('int1e_irp', shls_slice=shlslc).reshape(3, 3, -1, mol.nao)))
                 # s1rr[a,b,x,u,v] =
                 # \int phi_u [3/2*(r_a-Ri_a)(r_b-Ri_b)-1/2*(r-Ri)^2 delta_ab] (-\nable_x phi_v) dr
-                s1rr_ = -cp.asarray(
-                    mol.intor("int1e_irrp", shls_slice=shlslc).reshape(
-                        3, 3, 3, -1, mol.nao
-                    )
-                )
-                s1rr_trace = cp.einsum("aaxuv->xuv", s1rr_)
+                s1rr_ = -cp.asarray(mol.intor('int1e_irrp', shls_slice=shlslc).reshape(3, 3, 3, -1, mol.nao))
+                s1rr_trace = cp.einsum('aaxuv->xuv', s1rr_)
                 s1rr_ *= 3 / 2
                 for k in range(3):
                     s1rr_[k, k] -= 0.5 * s1rr_trace
@@ -796,33 +762,27 @@ class QMMMGrad:
             p0, p1 = aoslices[jatm, 2:]
 
             # d E_qm_pc / d Ri with fixed ewald_pot
-            qm_multipole_grad[jatm] += contract(
-                "uv,xuv->x", dEds[p0:p1], s1[:, p0:p1]
-            ) - contract("uv,xuv->x", dEds[:, p0:p1], s1[:, :, p0:p1])
+            qm_multipole_grad[jatm] += contract('uv,xuv->x', dEds[p0:p1], s1[:, p0:p1]) - contract(
+                'uv,xuv->x', dEds[:, p0:p1], s1[:, :, p0:p1]
+            )
 
             # d E_qm_dip / d Ri
-            qm_multipole_grad[jatm] -= contract(
-                "auv,axuv->x", dEdsr[:, p0:p1], s1r[jatm]
-            )
+            qm_multipole_grad[jatm] -= contract('auv,axuv->x', dEdsr[:, p0:p1], s1r[jatm])
             s1r_ = list()
             for iatm in range(mol.natm):
                 s1r_.append(s1r[iatm][..., p0:p1])
             s1r_ = cp.concatenate(s1r_, axis=-2)
-            qm_multipole_grad[jatm] += contract("auv,axuv->x", dEdsr[..., p0:p1], s1r_)
+            qm_multipole_grad[jatm] += contract('auv,axuv->x', dEdsr[..., p0:p1], s1r_)
 
             # d E_qm_quad / d Ri
-            qm_multipole_grad[jatm] -= contract(
-                "abuv,abxuv->x", dEdsrr[:, :, p0:p1], s1rr[jatm]
-            )
+            qm_multipole_grad[jatm] -= contract('abuv,abxuv->x', dEdsrr[:, :, p0:p1], s1rr[jatm])
             s1rr_ = list()
             for iatm in range(mol.natm):
                 s1rr_.append(s1rr[iatm][..., p0:p1])
             s1rr_ = cp.concatenate(s1rr_, axis=-2)
-            qm_multipole_grad[jatm] += contract(
-                "abuv,abxuv->x", dEdsrr[..., p0:p1], s1rr_
-            )
+            qm_multipole_grad[jatm] += contract('abuv,abxuv->x', dEdsrr[..., p0:p1], s1rr_)
 
-        cput1 = logger.timer(self, "grad_ewald pulay", *cput0)
+        cput1 = logger.timer(self, 'grad_ewald pulay', *cput0)
         s1 = s1r = s1rr = dEds = dEdsr = dEdsrr = None
 
         return qm_multipole_grad
@@ -857,7 +817,7 @@ class QMMMGrad:
         all_mm_coords = (mm_coords[None, :, :] - Lall[:, None, :]).reshape(-1, 3)
         all_mm_charges = cp.hstack([mm_charges] * len(Lall))
         dist2 = all_mm_coords - cp.mean(qm_coords, axis=0)[None]
-        dist2 = contract("jx,jx->j", dist2, dist2)
+        dist2 = contract('jx,jx->j', dist2, dist2)
 
         mm_ewovrl_grad = None
         if with_mm:
@@ -865,9 +825,7 @@ class QMMMGrad:
         mem_avail = cupy_helper.get_avail_mem()
         blksize = int(mem_avail / 64 / 3 / len(all_mm_coords))
         if blksize == 0:
-            raise RuntimeError(
-                f"Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}"
-            )
+            raise RuntimeError(f'Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}')
         for i0, i1 in lib.prange(0, self.base.mol.natm, blksize):
             R = qm_coords[i0:i1, None, :] - all_mm_coords[None, :, :]
             r = cp.linalg.norm(R, axis=-1)
@@ -901,9 +859,7 @@ class QMMMGrad:
             zetas = cp.asarray(self.base.mm_mol.get_zetas())
             min_expnt = cp.min(zetas)
 
-            max_ewrcut = pyscf.pbc.gto.cell._estimate_rcut(
-                min_expnt, 0, 1.0, cell.precision
-            )
+            max_ewrcut = pyscf.pbc.gto.cell._estimate_rcut(min_expnt, 0, 1.0, cell.precision)
             cut2 = (max_ewrcut + rmax_qm) ** 2
             mask = mask & (dist2 <= cut2)
             expnts = cp.hstack([cp.sqrt(zetas)] * len(Lall))[mask]
@@ -984,7 +940,7 @@ class QMMMGrad:
 
         # ------ qm - qm clasiical ewald energy gradient ------#
         R = qm_coords[:, None, :] - qm_coords[None, :, :]
-        r = np.sqrt(contract("ijx,ijx->ij", R, R))
+        r = np.sqrt(contract('ijx,ijx->ij', R, R))
         r[r < 1e-16] = 1e100
 
         # subtract the real-space Coulomb within rcut_hcore
@@ -995,27 +951,25 @@ class QMMMGrad:
         # qm_ewovrl_grad += cp.einsum('ia,ijxab,jb->ix', qm_dipoles, Tijabc, qm_dipoles)
         # qm_ewovrl_grad -= cp.einsum('i,ijxab,jab->ix', qm_charges, Tijabc, qm_quads) / 3
         # qm_ewovrl_grad += cp.einsum('i,ijxab,jab->jx', qm_charges, Tijabc, qm_quads) / 3 #
-        temp = contract("ijx,j->ix", Tija, qm_charges)
-        qm_ewovrl_grad -= contract("i,ix->ix", qm_charges, temp)
-        temp = contract("ijxa,ja->ix", Tijab, qm_dipoles)
-        qm_ewovrl_grad += contract("i,ix->ix", qm_charges, temp)
-        temp = contract("i,ijxa->jxa", qm_charges, Tijab)
-        qm_ewovrl_grad -= contract("jxa,ja->jx", temp, qm_dipoles)  #
-        temp = contract("ijxab,jb->ixa", Tijabc, qm_dipoles)
-        qm_ewovrl_grad += contract("ia,ixa->ix", qm_dipoles, temp)
-        temp = contract("ijxab,jab->ix", Tijabc, qm_quads)
-        qm_ewovrl_grad -= contract("i,ix->ix", qm_charges, temp) / 3
-        temp = contract("ijxab,jab->ijx", Tijabc, qm_quads)
-        qm_ewovrl_grad += contract("i,ijx->jx", qm_charges, temp) / 3  #
+        temp = contract('ijx,j->ix', Tija, qm_charges)
+        qm_ewovrl_grad -= contract('i,ix->ix', qm_charges, temp)
+        temp = contract('ijxa,ja->ix', Tijab, qm_dipoles)
+        qm_ewovrl_grad += contract('i,ix->ix', qm_charges, temp)
+        temp = contract('i,ijxa->jxa', qm_charges, Tijab)
+        qm_ewovrl_grad -= contract('jxa,ja->jx', temp, qm_dipoles)  #
+        temp = contract('ijxab,jb->ixa', Tijabc, qm_dipoles)
+        qm_ewovrl_grad += contract('ia,ixa->ix', qm_dipoles, temp)
+        temp = contract('ijxab,jab->ix', Tijabc, qm_quads)
+        qm_ewovrl_grad -= contract('i,ix->ix', qm_charges, temp) / 3
+        temp = contract('ijxab,jab->ijx', Tijabc, qm_quads)
+        qm_ewovrl_grad += contract('i,ijx->jx', qm_charges, temp) / 3  #
         temp = None
 
         # ewald real-space sum
         # NOTE here I assume ewald real-space sum is over all qm images
         # consistent with mm_mole.get_ewald_pot
-        R = (R[:, :, None, :] - Lall[None, None]).reshape(
-            len(qm_coords), len(Lall) * len(qm_coords), 3
-        )
-        r = np.sqrt(contract("ijx,ijx->ij", R, R))
+        R = (R[:, :, None, :] - Lall[None, None]).reshape(len(qm_coords), len(Lall) * len(qm_coords), 3)
+        r = np.sqrt(contract('ijx,ijx->ij', R, R))
         r[r < 1e-16] = 1e100
         Tija, Tijab, Tijabc = grad_kTij(R, r, ew_eta)
         Tija = Tija.reshape(len(qm_coords), len(qm_coords), len(Lall), 3)
@@ -1027,20 +981,20 @@ class QMMMGrad:
         # qm_ewovrl_grad -= cp.einsum('ia,ijLxab,jb->ix', qm_dipoles, Tijabc, qm_dipoles)
         # qm_ewovrl_grad += cp.einsum('i,ijLxab,jab->ix', qm_charges, Tijabc, qm_quads) / 3
         # qm_ewovrl_grad -= cp.einsum('i,ijLxab,jab->jx', qm_charges, Tijabc, qm_quads) / 3 #
-        temp = contract("ijLx,j->ix", Tija, qm_charges)
-        qm_ewovrl_grad += contract("i,ix->ix", qm_charges, temp)
-        temp = contract("ijLxa,ja->ix", Tijab, qm_dipoles)
-        qm_ewovrl_grad -= contract("i,ix->ix", qm_charges, temp)
-        temp = contract("i,ijLxa->jxa", qm_charges, Tijab)
-        qm_ewovrl_grad += contract("jxa,ja->jx", temp, qm_dipoles)  #
-        temp = contract("ijLxab,jb->ixa", Tijabc, qm_dipoles)
-        qm_ewovrl_grad -= contract("ia,ixa->ix", qm_dipoles, temp)
-        temp = contract("ijLxab,jab->ix", Tijabc, qm_quads)
-        qm_ewovrl_grad += contract("i,ix->ix", qm_charges, temp) / 3
-        temp = contract("i,ijLxab->jxab", qm_charges, Tijabc)
-        qm_ewovrl_grad -= contract("jxab,jab->jx", temp, qm_quads) / 3  #
+        temp = contract('ijLx,j->ix', Tija, qm_charges)
+        qm_ewovrl_grad += contract('i,ix->ix', qm_charges, temp)
+        temp = contract('ijLxa,ja->ix', Tijab, qm_dipoles)
+        qm_ewovrl_grad -= contract('i,ix->ix', qm_charges, temp)
+        temp = contract('i,ijLxa->jxa', qm_charges, Tijab)
+        qm_ewovrl_grad += contract('jxa,ja->jx', temp, qm_dipoles)  #
+        temp = contract('ijLxab,jb->ixa', Tijabc, qm_dipoles)
+        qm_ewovrl_grad -= contract('ia,ixa->ix', qm_dipoles, temp)
+        temp = contract('ijLxab,jab->ix', Tijabc, qm_quads)
+        qm_ewovrl_grad += contract('i,ix->ix', qm_charges, temp) / 3
+        temp = contract('i,ijLxab->jxab', qm_charges, Tijabc)
+        qm_ewovrl_grad -= contract('jxab,jab->jx', temp, qm_quads) / 3  #
 
-        cput1 = logger.timer(self, "grad_ewald real-space", *cput0)
+        cput1 = logger.timer(self, 'grad_ewald real-space', *cput0)
 
         return qm_ewovrl_grad
 
@@ -1057,7 +1011,7 @@ class QMMMGrad:
                 charges=self.base.mol.atom_charges(),
                 rcut_ewald=cutoff,
                 rcut_hcore=cutoff,
-                unit="Bohr",
+                unit='Bohr',
             )
 
             qm_to_qm -= self.grad_ewald_real_space_qm_to_qm(qm_mol, dm)
@@ -1088,37 +1042,37 @@ class QMMMGrad:
         mesh = cell.mesh
         Gv, Gvbase, weights = cell.get_Gv_weights(mesh)
         Gv = cp.asarray(Gv)
-        absG2 = contract("gi,gi->g", Gv, Gv)
+        absG2 = contract('gi,gi->g', Gv, Gv)
         absG2[absG2 == 0] = 1e200
         coulG = 4 * np.pi / absG2
         coulG *= weights
         Gpref = cp.exp(-absG2 / (4 * ew_eta**2)) * coulG
 
-        GvRmm = contract("gx,ix->ig", Gv, mm_coords)
+        GvRmm = contract('gx,ix->ig', Gv, mm_coords)
         cosGvRmm = cp.cos(GvRmm)
         sinGvRmm = cp.sin(GvRmm)
-        zcosGvRmm = contract("i,ig->g", mm_charges, cosGvRmm)
-        zsinGvRmm = contract("i,ig->g", mm_charges, sinGvRmm)
+        zcosGvRmm = contract('i,ig->g', mm_charges, cosGvRmm)
+        zsinGvRmm = contract('i,ig->g', mm_charges, sinGvRmm)
 
-        GvRqm = contract("gx,ix->ig", Gv, qm_coords)
+        GvRqm = contract('gx,ix->ig', Gv, qm_coords)
         cosGvRqm = cp.cos(GvRqm)
         sinGvRqm = cp.sin(GvRqm)
-        zcosGvRqm = contract("i,ig->g", qm_charges, cosGvRqm)
-        zsinGvRqm = contract("i,ig->g", qm_charges, sinGvRqm)
+        zcosGvRqm = contract('i,ig->g', qm_charges, cosGvRqm)
+        zsinGvRqm = contract('i,ig->g', qm_charges, sinGvRqm)
         # DGcosGvRqm = cp.einsum("ia,ga,ig->g", qm_dipoles, Gv, cosGvRqm)
         # DGsinGvRqm = cp.einsum("ia,ga,ig->g", qm_dipoles, Gv, sinGvRqm)
         # TGGcosGvRqm = cp.einsum("iab,ga,gb,ig->g", qm_quads, Gv, Gv, cosGvRqm)
         # TGGsinGvRqm = cp.einsum("iab,ga,gb,ig->g", qm_quads, Gv, Gv, sinGvRqm)
-        temp = contract("ia,ig->ag", qm_dipoles, cosGvRqm)
-        DGcosGvRqm = contract("ga,ag->g", Gv, temp)
-        temp = contract("ia,ig->ag", qm_dipoles, sinGvRqm)
-        DGsinGvRqm = contract("ga,ag->g", Gv, temp)
-        temp = contract("iab,ig->abg", qm_quads, cosGvRqm)
-        temp = contract("abg,ga->bg", temp, Gv)
-        TGGcosGvRqm = contract("gb,bg->g", Gv, temp)
-        temp = contract("iab,ig->abg", qm_quads, sinGvRqm)
-        temp = contract("abg,ga->bg", temp, Gv)
-        TGGsinGvRqm = contract("gb,bg->g", Gv, temp)
+        temp = contract('ia,ig->ag', qm_dipoles, cosGvRqm)
+        DGcosGvRqm = contract('ga,ag->g', Gv, temp)
+        temp = contract('ia,ig->ag', qm_dipoles, sinGvRqm)
+        DGsinGvRqm = contract('ga,ag->g', Gv, temp)
+        temp = contract('iab,ig->abg', qm_quads, cosGvRqm)
+        temp = contract('abg,ga->bg', temp, Gv)
+        TGGcosGvRqm = contract('gb,bg->g', Gv, temp)
+        temp = contract('iab,ig->abg', qm_quads, sinGvRqm)
+        temp = contract('abg,ga->bg', temp, Gv)
+        TGGsinGvRqm = contract('gb,bg->g', Gv, temp)
 
         qm_ewg_grad = cp.zeros_like(qm_coords)
         mm_ewg_grad = None
@@ -1129,80 +1083,80 @@ class QMMMGrad:
         # p = ['einsum_path', (3, 4), (1, 3), (1, 2), (0, 1)]
         # qm_ewg_grad -= cp.einsum('i,gx,ig,g,g->ix', qm_charges, Gv, sinGvRqm, zcosGvRmm, Gpref, optimize=p)
         # qm_ewg_grad += cp.einsum('i,gx,ig,g,g->ix', qm_charges, Gv, cosGvRqm, zsinGvRmm, Gpref, optimize=p)
-        temp = contract("g,g->g", zcosGvRmm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp = contract("ig,gx->ix", sinGvRqm, temp)
-        qm_ewg_grad -= contract("i,ix->ix", qm_charges, temp)
-        temp = contract("g,g->g", zsinGvRmm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp = contract("ig,gx->ix", cosGvRqm, temp)
-        qm_ewg_grad += contract("i,ix->ix", qm_charges, temp)
+        temp = contract('g,g->g', zcosGvRmm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp = contract('ig,gx->ix', sinGvRqm, temp)
+        qm_ewg_grad -= contract('i,ix->ix', qm_charges, temp)
+        temp = contract('g,g->g', zsinGvRmm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp = contract('ig,gx->ix', cosGvRqm, temp)
+        qm_ewg_grad += contract('i,ix->ix', qm_charges, temp)
         if with_mm:
             # p = ['einsum_path', (0, 2), (1, 2), (0, 2), (0, 1)]
             # mm_ewg_grad -= cp.einsum('i,gx,ig,g,g->ix', mm_charges, Gv, sinGvRmm, zcosGvRqm, Gpref, optimize=p)
             # mm_ewg_grad += cp.einsum('i,gx,ig,g,g->ix', mm_charges, Gv, cosGvRmm, zsinGvRqm, Gpref, optimize=p)
-            temp = contract("i,ig->gi", mm_charges, sinGvRmm)
-            temp2 = contract("g,g->g", zcosGvRqm, Gpref)
-            temp2 = contract("gx,g->gx", Gv, temp2)
-            mm_ewg_grad -= contract("gi,gx->ix", temp, temp2)
-            temp = contract("i,ig->gi", mm_charges, cosGvRmm)
-            temp2 = contract("g,g->g", zsinGvRqm, Gpref)
-            temp2 = contract("gx,g->gx", Gv, temp2)
-            mm_ewg_grad += contract("gi,gx->ix", temp, temp2)
+            temp = contract('i,ig->gi', mm_charges, sinGvRmm)
+            temp2 = contract('g,g->g', zcosGvRqm, Gpref)
+            temp2 = contract('gx,g->gx', Gv, temp2)
+            mm_ewg_grad -= contract('gi,gx->ix', temp, temp2)
+            temp = contract('i,ig->gi', mm_charges, cosGvRmm)
+            temp2 = contract('g,g->g', zsinGvRqm, Gpref)
+            temp2 = contract('gx,g->gx', Gv, temp2)
+            mm_ewg_grad += contract('gi,gx->ix', temp, temp2)
         # qm dip - mm pc
         # p = ['einsum_path', (4, 5), (1, 4), (0, 1), (0, 2), (0, 1)]
         # qm_ewg_grad -= cp.einsum('ia,gx,ga,ig,g,g->ix', qm_dipoles, Gv, Gv, sinGvRqm, zsinGvRmm, Gpref, optimize=p)
         # qm_ewg_grad -= cp.einsum('ia,gx,ga,ig,g,g->ix', qm_dipoles, Gv, Gv, cosGvRqm, zcosGvRmm, Gpref, optimize=p)
-        temp = contract("g,g->g", zsinGvRmm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp2 = contract("ia,ga->gi", qm_dipoles, Gv)
-        temp2 = contract("ig,gi->ig", sinGvRqm, temp2)
-        qm_ewg_grad -= contract("gx,ig->ix", temp, temp2)
-        temp = contract("g,g->g", zcosGvRmm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp2 = contract("ia,ga->gi", qm_dipoles, Gv)
-        temp2 = contract("ig,gi->ig", cosGvRqm, temp2)
-        qm_ewg_grad -= contract("gx,ig->ix", temp, temp2)
+        temp = contract('g,g->g', zsinGvRmm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp2 = contract('ia,ga->gi', qm_dipoles, Gv)
+        temp2 = contract('ig,gi->ig', sinGvRqm, temp2)
+        qm_ewg_grad -= contract('gx,ig->ix', temp, temp2)
+        temp = contract('g,g->g', zcosGvRmm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp2 = contract('ia,ga->gi', qm_dipoles, Gv)
+        temp2 = contract('ig,gi->ig', cosGvRqm, temp2)
+        qm_ewg_grad -= contract('gx,ig->ix', temp, temp2)
         if with_mm:
             # p = ['einsum_path', (1, 3), (0, 2), (0, 2), (0, 1)]
             # mm_ewg_grad += cp.einsum('g,j,gx,jg,g->jx', DGcosGvRqm, mm_charges, Gv, cosGvRmm, Gpref, optimize=p)
             # mm_ewg_grad += cp.einsum('g,j,gx,jg,g->jx', DGsinGvRqm, mm_charges, Gv, sinGvRmm, Gpref, optimize=p)
-            temp = contract("j,jg->gj", mm_charges, cosGvRmm)
-            temp2 = contract("g,g->g", DGcosGvRqm, Gpref)
-            temp2 = contract("gx,g->gx", Gv, temp2)
-            mm_ewg_grad += contract("gj,gx->jx", temp, temp2)
-            temp = contract("j,jg->gj", mm_charges, sinGvRmm)
-            temp2 = contract("g,g->g", DGsinGvRqm, Gpref)
-            temp2 = contract("gx,g->gx", Gv, temp2)
-            mm_ewg_grad += contract("gj,gx->jx", temp, temp2)
+            temp = contract('j,jg->gj', mm_charges, cosGvRmm)
+            temp2 = contract('g,g->g', DGcosGvRqm, Gpref)
+            temp2 = contract('gx,g->gx', Gv, temp2)
+            mm_ewg_grad += contract('gj,gx->jx', temp, temp2)
+            temp = contract('j,jg->gj', mm_charges, sinGvRmm)
+            temp2 = contract('g,g->g', DGsinGvRqm, Gpref)
+            temp2 = contract('gx,g->gx', Gv, temp2)
+            mm_ewg_grad += contract('gj,gx->jx', temp, temp2)
         # qm quad - mm pc
         # p = ['einsum_path', (5, 6), (0, 5), (0, 2), (2, 3), (1, 2), (0, 1)]
         # qm_ewg_grad += cp.einsum('ga,gb,iab,gx,ig,g,g->ix', Gv, Gv, qm_quads, Gv, sinGvRqm, zcosGvRmm, Gpref, optimize=p) / 3
         # qm_ewg_grad -= cp.einsum('ga,gb,iab,gx,ig,g,g->ix', Gv, Gv, qm_quads, Gv, cosGvRqm, zsinGvRmm, Gpref, optimize=p) / 3
-        temp = contract("g,g->g", zcosGvRmm, Gpref)
-        temp = contract("ga,g->ag", Gv, temp)
-        temp2 = contract("gb,gx->gbx", Gv, Gv)
-        temp = contract("ag,gbx->abgx", temp, temp2)
-        temp = contract("ig,abgx->iabx", sinGvRqm, temp)
-        qm_ewg_grad += contract("iab,iabx->ix", qm_quads, temp) / 3
-        temp = contract("g,g->g", zsinGvRmm, Gpref)
-        temp = contract("ga,g->ag", Gv, temp)
-        temp2 = contract("gb,gx->gbx", Gv, Gv)
-        temp = contract("ag,gbx->abgx", temp, temp2)
-        temp = contract("ig,abgx->iabx", cosGvRqm, temp)
-        qm_ewg_grad -= contract("iab,iabx->ix", qm_quads, temp) / 3
+        temp = contract('g,g->g', zcosGvRmm, Gpref)
+        temp = contract('ga,g->ag', Gv, temp)
+        temp2 = contract('gb,gx->gbx', Gv, Gv)
+        temp = contract('ag,gbx->abgx', temp, temp2)
+        temp = contract('ig,abgx->iabx', sinGvRqm, temp)
+        qm_ewg_grad += contract('iab,iabx->ix', qm_quads, temp) / 3
+        temp = contract('g,g->g', zsinGvRmm, Gpref)
+        temp = contract('ga,g->ag', Gv, temp)
+        temp2 = contract('gb,gx->gbx', Gv, Gv)
+        temp = contract('ag,gbx->abgx', temp, temp2)
+        temp = contract('ig,abgx->iabx', cosGvRqm, temp)
+        qm_ewg_grad -= contract('iab,iabx->ix', qm_quads, temp) / 3
         if with_mm:
             # p = ['einsum_path', (1, 3), (0, 2), (0, 2), (0, 1)]
             # mm_ewg_grad += cp.einsum('g,j,gx,jg,g->jx', TGGcosGvRqm, mm_charges, Gv, sinGvRmm, Gpref, optimize=p) / 3
             # mm_ewg_grad -= cp.einsum('g,j,gx,jg,g->jx', TGGsinGvRqm, mm_charges, Gv, cosGvRmm, Gpref, optimize=p) / 3
-            temp = contract("j,jg->gj", mm_charges, sinGvRmm)
-            temp2 = contract("g,g->g", TGGcosGvRqm, Gpref)
-            temp2 = contract("gx,g->gx", Gv, temp2)
-            mm_ewg_grad += contract("gj,gx->jx", temp, temp2) / 3
-            temp = contract("j,jg->gj", mm_charges, cosGvRmm)
-            temp2 = contract("g,g->g", TGGsinGvRqm, Gpref)
-            temp2 = contract("gx,g->gx", Gv, temp2)
-            mm_ewg_grad -= contract("gj,gx->jx", temp, temp2) / 3
+            temp = contract('j,jg->gj', mm_charges, sinGvRmm)
+            temp2 = contract('g,g->g', TGGcosGvRqm, Gpref)
+            temp2 = contract('gx,g->gx', Gv, temp2)
+            mm_ewg_grad += contract('gj,gx->jx', temp, temp2) / 3
+            temp = contract('j,jg->gj', mm_charges, cosGvRmm)
+            temp2 = contract('g,g->g', TGGsinGvRqm, Gpref)
+            temp2 = contract('gx,g->gx', Gv, temp2)
+            mm_ewg_grad -= contract('gj,gx->jx', temp, temp2) / 3
 
         return qm_ewg_grad, mm_ewg_grad
 
@@ -1226,110 +1180,110 @@ class QMMMGrad:
         mesh = cell.mesh
         Gv, Gvbase, weights = cell.get_Gv_weights(mesh)
         Gv = cp.asarray(Gv)
-        absG2 = contract("gi,gi->g", Gv, Gv)
+        absG2 = contract('gi,gi->g', Gv, Gv)
         absG2[absG2 == 0] = 1e200
         coulG = 4 * np.pi / absG2
         coulG *= weights
         Gpref = cp.exp(-absG2 / (4 * ew_eta**2)) * coulG
 
-        GvRqm = contract("gx,ix->ig", Gv, qm_coords)
+        GvRqm = contract('gx,ix->ig', Gv, qm_coords)
         cosGvRqm = cp.cos(GvRqm)
         sinGvRqm = cp.sin(GvRqm)
-        zcosGvRqm = contract("i,ig->g", qm_charges, cosGvRqm)
-        zsinGvRqm = contract("i,ig->g", qm_charges, sinGvRqm)
+        zcosGvRqm = contract('i,ig->g', qm_charges, cosGvRqm)
+        zsinGvRqm = contract('i,ig->g', qm_charges, sinGvRqm)
         # DGcosGvRqm = cp.einsum("ia,ga,ig->g", qm_dipoles, Gv, cosGvRqm)
         # DGsinGvRqm = cp.einsum("ia,ga,ig->g", qm_dipoles, Gv, sinGvRqm)
         # TGGcosGvRqm = cp.einsum("iab,ga,gb,ig->g", qm_quads, Gv, Gv, cosGvRqm)
         # TGGsinGvRqm = cp.einsum("iab,ga,gb,ig->g", qm_quads, Gv, Gv, sinGvRqm)
-        temp = contract("ia,ig->ag", qm_dipoles, cosGvRqm)
-        DGcosGvRqm = contract("ga,ag->g", Gv, temp)
-        temp = contract("ia,ig->ag", qm_dipoles, sinGvRqm)
-        DGsinGvRqm = contract("ga,ag->g", Gv, temp)
-        temp = contract("iab,ig->abg", qm_quads, cosGvRqm)
-        temp = contract("abg,ga->bg", temp, Gv)
-        TGGcosGvRqm = contract("gb,bg->g", Gv, temp)
-        temp = contract("iab,ig->abg", qm_quads, sinGvRqm)
-        temp = contract("abg,ga->bg", temp, Gv)
-        TGGsinGvRqm = contract("gb,bg->g", Gv, temp)
+        temp = contract('ia,ig->ag', qm_dipoles, cosGvRqm)
+        DGcosGvRqm = contract('ga,ag->g', Gv, temp)
+        temp = contract('ia,ig->ag', qm_dipoles, sinGvRqm)
+        DGsinGvRqm = contract('ga,ag->g', Gv, temp)
+        temp = contract('iab,ig->abg', qm_quads, cosGvRqm)
+        temp = contract('abg,ga->bg', temp, Gv)
+        TGGcosGvRqm = contract('gb,bg->g', Gv, temp)
+        temp = contract('iab,ig->abg', qm_quads, sinGvRqm)
+        temp = contract('abg,ga->bg', temp, Gv)
+        TGGsinGvRqm = contract('gb,bg->g', Gv, temp)
         qm_ewg_grad = cp.zeros_like(qm_coords)
 
         # qm pc - qm pc
         # p = ['einsum_path', (3, 4), (1, 3), (1, 2), (0, 1)]
         # qm_ewg_grad -= cp.einsum('i,gx,ig,g,g->ix', qm_charges, Gv, sinGvRqm, zcosGvRqm, Gpref, optimize=p)
         # qm_ewg_grad += cp.einsum('i,gx,ig,g,g->ix', qm_charges, Gv, cosGvRqm, zsinGvRqm, Gpref, optimize=p)
-        temp = contract("g,g->g", zcosGvRqm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp = contract("ig,gx->ix", sinGvRqm, temp)
-        qm_ewg_grad -= contract("i,ix->ix", qm_charges, temp)
-        temp = contract("g,g->g", zsinGvRqm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp = contract("ig,gx->ix", cosGvRqm, temp)
-        qm_ewg_grad += contract("i,ix->ix", qm_charges, temp)
+        temp = contract('g,g->g', zcosGvRqm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp = contract('ig,gx->ix', sinGvRqm, temp)
+        qm_ewg_grad -= contract('i,ix->ix', qm_charges, temp)
+        temp = contract('g,g->g', zsinGvRqm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp = contract('ig,gx->ix', cosGvRqm, temp)
+        qm_ewg_grad += contract('i,ix->ix', qm_charges, temp)
         # qm pc - qm dip
         # qm_ewg_grad += cp.einsum('i,gx,ig,g,g->ix', qm_charges, Gv, cosGvRqm, DGcosGvRqm, Gpref, optimize=p)
         # qm_ewg_grad += cp.einsum('i,gx,ig,g,g->ix', qm_charges, Gv, sinGvRqm, DGsinGvRqm, Gpref, optimize=p)
-        temp = contract("g,g->g", DGcosGvRqm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp = contract("ig,gx->ix", cosGvRqm, temp)
-        qm_ewg_grad += contract("i,ix->ix", qm_charges, temp)
-        temp = contract("g,g->g", DGsinGvRqm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp = contract("ig,gx->ix", sinGvRqm, temp)
-        qm_ewg_grad += contract("i,ix->ix", qm_charges, temp)
+        temp = contract('g,g->g', DGcosGvRqm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp = contract('ig,gx->ix', cosGvRqm, temp)
+        qm_ewg_grad += contract('i,ix->ix', qm_charges, temp)
+        temp = contract('g,g->g', DGsinGvRqm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp = contract('ig,gx->ix', sinGvRqm, temp)
+        qm_ewg_grad += contract('i,ix->ix', qm_charges, temp)
         # p = ['einsum_path', (3, 5), (1, 4), (1, 3), (1, 2), (0, 1)]
         # qm_ewg_grad -= cp.einsum('ja,ga,gx,g,jg,g->jx', qm_dipoles, Gv, Gv, zsinGvRqm, sinGvRqm, Gpref, optimize=p)
         # qm_ewg_grad -= cp.einsum('ja,ga,gx,g,jg,g->jx', qm_dipoles, Gv, Gv, zcosGvRqm, cosGvRqm, Gpref, optimize=p)
-        temp = contract("g,g->g", zsinGvRqm, Gpref)
-        temp = contract("ga,g->ag", Gv, temp)
-        temp = contract("gx,ag->axg", Gv, temp)
-        temp = contract("jg,axg->ajx", sinGvRqm, temp)
-        qm_ewg_grad -= contract("ja,ajx->jx", qm_dipoles, temp)
-        temp = contract("g,g->g", zcosGvRqm, Gpref)
-        temp = contract("ga,g->ag", Gv, temp)
-        temp = contract("gx,ag->axg", Gv, temp)
-        temp = contract("jg,axg->ajx", cosGvRqm, temp)
-        qm_ewg_grad -= contract("ja,ajx->jx", qm_dipoles, temp)
+        temp = contract('g,g->g', zsinGvRqm, Gpref)
+        temp = contract('ga,g->ag', Gv, temp)
+        temp = contract('gx,ag->axg', Gv, temp)
+        temp = contract('jg,axg->ajx', sinGvRqm, temp)
+        qm_ewg_grad -= contract('ja,ajx->jx', qm_dipoles, temp)
+        temp = contract('g,g->g', zcosGvRqm, Gpref)
+        temp = contract('ga,g->ag', Gv, temp)
+        temp = contract('gx,ag->axg', Gv, temp)
+        temp = contract('jg,axg->ajx', cosGvRqm, temp)
+        qm_ewg_grad -= contract('ja,ajx->jx', qm_dipoles, temp)
         # qm dip - qm dip
         # p = ['einsum_path', (4, 5), (1, 4), (1, 3), (1, 2), (0, 1)]
         # qm_ewg_grad -= cp.einsum('ia,ga,gx,ig,g,g->ix', qm_dipoles, Gv, Gv, sinGvRqm, DGcosGvRqm, Gpref, optimize=p)
         # qm_ewg_grad += cp.einsum('ia,ga,gx,ig,g,g->ix', qm_dipoles, Gv, Gv, cosGvRqm, DGsinGvRqm, Gpref, optimize=p)
-        temp = contract("g,g->g", DGcosGvRqm, Gpref)
-        temp = contract("ga,g->ag", Gv, temp)
-        temp = contract("gx,ag->axg", Gv, temp)
-        temp = contract("ig,axg->aix", sinGvRqm, temp)
-        qm_ewg_grad -= contract("ia,aix->ix", qm_dipoles, temp)
-        temp = contract("g,g->g", DGsinGvRqm, Gpref)
-        temp = contract("ga,g->ag", Gv, temp)
-        temp = contract("gx,ag->axg", Gv, temp)
-        temp = contract("ig,axg->aix", cosGvRqm, temp)
-        qm_ewg_grad += contract("ia,aix->ix", qm_dipoles, temp)
+        temp = contract('g,g->g', DGcosGvRqm, Gpref)
+        temp = contract('ga,g->ag', Gv, temp)
+        temp = contract('gx,ag->axg', Gv, temp)
+        temp = contract('ig,axg->aix', sinGvRqm, temp)
+        qm_ewg_grad -= contract('ia,aix->ix', qm_dipoles, temp)
+        temp = contract('g,g->g', DGsinGvRqm, Gpref)
+        temp = contract('ga,g->ag', Gv, temp)
+        temp = contract('gx,ag->axg', Gv, temp)
+        temp = contract('ig,axg->aix', cosGvRqm, temp)
+        qm_ewg_grad += contract('ia,aix->ix', qm_dipoles, temp)
         # qm pc - qm quad
         # p = ['einsum_path', (3, 4), (1, 3), (1, 2), (0, 1)]
         # qm_ewg_grad += cp.einsum('i,gx,ig,g,g->ix', qm_charges, Gv, sinGvRqm, TGGcosGvRqm, Gpref, optimize=p) / 3
         # qm_ewg_grad -= cp.einsum('i,gx,ig,g,g->ix', qm_charges, Gv, cosGvRqm, TGGsinGvRqm, Gpref, optimize=p) / 3
-        temp = contract("g,g->g", TGGcosGvRqm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp = contract("ig,gx->ix", sinGvRqm, temp)
-        qm_ewg_grad += contract("i,ix->ix", qm_charges, temp) / 3
-        temp = contract("g,g->g", TGGsinGvRqm, Gpref)
-        temp = contract("gx,g->gx", Gv, temp)
-        temp = contract("ig,gx->ix", cosGvRqm, temp)
-        qm_ewg_grad -= contract("i,ix->ix", qm_charges, temp) / 3
+        temp = contract('g,g->g', TGGcosGvRqm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp = contract('ig,gx->ix', sinGvRqm, temp)
+        qm_ewg_grad += contract('i,ix->ix', qm_charges, temp) / 3
+        temp = contract('g,g->g', TGGsinGvRqm, Gpref)
+        temp = contract('gx,g->gx', Gv, temp)
+        temp = contract('ig,gx->ix', cosGvRqm, temp)
+        qm_ewg_grad -= contract('i,ix->ix', qm_charges, temp) / 3
         # p = ['einsum_path', (4, 6), (1, 5), (1, 2), (2, 3), (1, 2), (0, 1)]
         # qm_ewg_grad += cp.einsum('jab,ga,gb,gx,g,jg,g->jx', qm_quads, Gv, Gv, Gv, zcosGvRqm, sinGvRqm, Gpref, optimize=p) / 3
         # qm_ewg_grad -= cp.einsum('jab,ga,gb,gx,g,jg,g->jx', qm_quads, Gv, Gv, Gv, zsinGvRqm, cosGvRqm, Gpref, optimize=p) / 3
-        temp = contract("g,g->g", zcosGvRqm, Gpref)
-        temp = contract("ga,g->ag", Gv, temp)
-        temp2 = contract("gb,gx->bgx", Gv, Gv)
-        temp = contract("ag,bgx->abgx", temp, temp2)
-        temp = contract("jg,abgx->abjx", sinGvRqm, temp)
-        qm_ewg_grad += contract("jab,abjx->jx", qm_quads, temp) / 3
-        temp = contract("g,g->g", zsinGvRqm, Gpref)
-        temp = contract("ga,g->ag", Gv, temp)
-        temp2 = contract("gb,gx->bgx", Gv, Gv)
-        temp = contract("ag,bgx->abgx", temp, temp2)
-        temp = contract("jg,abgx->abjx", cosGvRqm, temp)
-        qm_ewg_grad -= contract("jab,abjx->jx", qm_quads, temp) / 3
+        temp = contract('g,g->g', zcosGvRqm, Gpref)
+        temp = contract('ga,g->ag', Gv, temp)
+        temp2 = contract('gb,gx->bgx', Gv, Gv)
+        temp = contract('ag,bgx->abgx', temp, temp2)
+        temp = contract('jg,abgx->abjx', sinGvRqm, temp)
+        qm_ewg_grad += contract('jab,abjx->jx', qm_quads, temp) / 3
+        temp = contract('g,g->g', zsinGvRqm, Gpref)
+        temp = contract('ga,g->ag', Gv, temp)
+        temp2 = contract('gb,gx->bgx', Gv, Gv)
+        temp = contract('ag,bgx->abgx', temp, temp2)
+        temp = contract('jg,abgx->abjx', cosGvRqm, temp)
+        qm_ewg_grad -= contract('jab,abjx->jx', qm_quads, temp) / 3
 
         return qm_ewg_grad
 
@@ -1346,7 +1300,7 @@ class QMMMGrad:
                 charges=self.base.mol.atom_charges(),
                 rcut_ewald=cutoff,
                 rcut_hcore=cutoff,
-                unit="Bohr",
+                unit='Bohr',
             )
 
             qm_to_qm -= self.grad_ewald_k_space_qm_to_qm(qm_mol, dm)
@@ -1381,7 +1335,7 @@ class QMMMGrad:
             calculate_hs(self, g_qm_orig)
             g_qm = self.contract_hcore_mm()
 
-        logger.timer(self, "get_hcore", *cput0)
+        logger.timer(self, 'get_hcore', *cput0)
         return g_qm_orig + g_qm
 
     def grad_hcore_mm(self, dm, mol=None):
@@ -1404,7 +1358,7 @@ class QMMMGrad:
         all_charges = cp.hstack([charges] * len(Ls))
         all_expnts = cp.hstack([expnts] * len(Ls))
         dist2 = all_coords - qm_center
-        dist2 = contract("ix,ix->i", dist2, dist2)
+        dist2 = contract('ix,ix->i', dist2, dist2)
 
         # charges within rcut_hcore exactly go into hcore
         mask = dist2 <= rcut_hcore**2
@@ -1415,13 +1369,11 @@ class QMMMGrad:
         g = cp.zeros_like(all_coords)
         if len(coords) != 0:
             expnts = cp.hstack([mm_mol.get_zetas()] * len(Ls))[mask]
-            g[mask] = int1e_grids_ip2(
-                mol, coords, dm=dm, charges=charges, charge_exponents=expnts
-            ).T
+            g[mask] = int1e_grids_ip2(mol, coords, dm=dm, charges=charges, charge_exponents=expnts).T
         g = g.reshape(len(Ls), -1, 3)
         g = np.sum(g, axis=0)
 
-        logger.timer(self, "grad_hcore_mm", *cput0)
+        logger.timer(self, 'grad_hcore_mm', *cput0)
         return g.get()
 
     contract_hcore_mm = contract_hcore_mm
@@ -1440,40 +1392,30 @@ class QMMMGrad:
         all_charges = cp.hstack([charges] * len(Ls))
         all_expnts = cp.hstack([cp.sqrt(cp.asarray(mm_mol.get_zetas()))] * len(Ls))
         dist2 = all_coords - qm_center
-        dist2 = contract("ix,ix->i", dist2, dist2)
+        dist2 = contract('ix,ix->i', dist2, dist2)
         mask = dist2 <= mm_mol.rcut_hcore**2
         charges = all_charges[mask]
         coords = all_coords[mask]
         expnts = all_expnts[mask]
 
-        if isinstance(self.mol, pyscf.pbc.gto.Cell):
-            g_qm = cp.asarray(pyscf.grad.grad_nuc(self.mol, atmlst))
-        else:
-            g_qm = cp.asarray(super().grad_nuc(atmlst))
+        g_qm = cp.asarray(super().grad_nuc(atmlst))
         g_mm = cp.zeros_like(all_coords)
         for i in range(mol.natm):
             q1 = mol.atom_charge(i)
             r1 = cp.asarray(mol.atom_coord(i))
             r = cp.linalg.norm(r1 - coords, axis=1)
-            g_mm_ = q1 * contract(
-                "ix,i->ix", r1 - coords, charges * erf(expnts * r) / r**3
-            )
+            g_mm_ = q1 * contract('ix,i->ix', r1 - coords, charges * erf(expnts * r) / r**3)
             g_mm_ -= q1 * contract(
-                "ix,i->ix",
+                'ix,i->ix',
                 r1 - coords,
-                charges
-                * expnts
-                * 2
-                / np.sqrt(np.pi)
-                * cp.exp(-(expnts**2) * r**2)
-                / r**2,
+                charges * expnts * 2 / np.sqrt(np.pi) * cp.exp(-(expnts**2) * r**2) / r**2,
             )
             g_mm[mask] += g_mm_
             g_qm[i] -= cp.sum(g_mm_, axis=0)
         g_mm = g_mm.reshape(len(Ls), -1, 3)
         g_mm = np.sum(g_mm, axis=0)
         self.de_nuc_mm = g_mm.get()
-        logger.timer(self, "grad_nuc", *cput0)
+        logger.timer(self, 'grad_nuc', *cput0)
         return g_qm.get()
 
     def grad_nuc_mm(self, mol=None):
@@ -1489,13 +1431,11 @@ class QMMMGrad:
         charges = mm_mol.atom_charges()
         Ls = mm_mol.get_lattice_Ls()
         qm_center = np.mean(mol.atom_coords(), axis=0)
-        all_coords = lib.direct_sum("ix+Lx->Lix", mm_mol.atom_coords(), Ls).reshape(
-            -1, 3
-        )
+        all_coords = lib.direct_sum('ix+Lx->Lix', mm_mol.atom_coords(), Ls).reshape(-1, 3)
         all_charges = np.hstack([mm_mol.atom_charges()] * len(Ls))
         all_expnts = np.hstack([np.sqrt(mm_mol.get_zetas())] * len(Ls))
         dist2 = all_coords - qm_center
-        dist2 = lib.einsum("ix,ix->i", dist2, dist2)
+        dist2 = lib.einsum('ix,ix->i', dist2, dist2)
         mask = dist2 <= mm_mol.rcut_hcore**2
         charges = all_charges[mask]
         coords = all_coords[mask]
@@ -1506,18 +1446,16 @@ class QMMMGrad:
             q1 = mol.atom_charge(i)
             r1 = mol.atom_coord(i)
             r = lib.norm(r1 - coords, axis=1)
-            g_mm[mask] += q1 * lib.einsum(
-                "i,ix,i->ix", charges, r1 - coords, erf(expnts * r) / r**3
-            )
+            g_mm[mask] += q1 * lib.einsum('i,ix,i->ix', charges, r1 - coords, erf(expnts * r) / r**3)
             g_mm[mask] -= q1 * lib.einsum(
-                "i,ix,i->ix",
+                'i,ix,i->ix',
                 charges * expnts * 2 / np.sqrt(np.pi),
                 r1 - coords,
                 np.exp(-(expnts**2) * r**2) / r**2,
             )
         g_mm = g_mm.reshape(len(Ls), -1, 3)
         g_mm = np.sum(g_mm, axis=0)
-        logger.timer(self, "grad_nuc_mm", *cput0)
+        logger.timer(self, 'grad_nuc_mm', *cput0)
         return g_mm
 
     def _finalize(self):
@@ -1526,10 +1464,8 @@ class QMMMGrad:
 
         if isinstance(self.base.mol, pyscf.pbc.gto.Cell):
             dm = self.base.make_rdm1()
-            g_hcore_mm = 2 * cpu_rhf._contract_vhf_dm(
-                self, self.contract_hcore_mm().get(), dm.get()
-            )
+            g_hcore_mm = 2 * cpu_rhf._contract_vhf_dm(self, self.contract_hcore_mm().get(), dm.get())
 
             self.de += g_hcore_mm
 
-            super()._finalize()
+        super()._finalize()

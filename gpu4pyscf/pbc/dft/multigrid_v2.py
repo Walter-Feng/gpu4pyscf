@@ -242,6 +242,9 @@ def unique_with_multiple_keys(x):
         and (x.dtype == cp.int32 or x.dtype == cp.int64)
         and x.ndim == 2
     )
+    if len(x) == 1:
+        return x, cp.zeros(1, dtype=cp.int64)
+
     x = x.T
     n = x.shape[-1]
 
@@ -282,6 +285,7 @@ def sort_contraction_coefficients(coeff):
         cp.arange(begin, end)
         for begin, end in zip(sliced_axis[:-1, 1], sliced_axis[1:, 1])
     ]
+
 
     sorted_coeffs = [
         {"shape": shape, "coeffs": [], "left_indices": [], "right_indices": []}
@@ -1857,7 +1861,7 @@ def nr_uks(
     return n_electrons, xc_energy_sum, veff
 
 
-def get_rho(ni, dm, kpts=None):
+def get_rho(ni, cell, dm, grids, kpts=None):
     """Density in real space"""
     cell = ni.cell
     mesh = ni.mesh
@@ -1867,7 +1871,7 @@ def get_rho(ni, dm, kpts=None):
     # *(1./weight) because rhoR is scaled by weight in _eval_rhoG.  When
     # computing rhoR with IFFT, the weight factor is not needed.
     rhoR = ifft_in_place(density.reshape(-1, *mesh)).real / weight
-    return rhoR.reshape(-1, ngrids)
+    return rhoR.reshape(-1, ngrids).get()
 
 
 def get_veff_ip1(
