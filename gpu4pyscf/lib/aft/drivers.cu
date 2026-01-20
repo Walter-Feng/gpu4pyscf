@@ -37,6 +37,24 @@ void update_reciprocal_lattice_vectors(
                                      9 * sizeof(double)));
 }
 
+__global__ void check_density_contraction(cuda::std::complex<double> *density,
+                                          const double *g, const int n_points) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx >= n_points)
+    return;
+
+  const double gx = g[idx];
+  const double gy = g[idx + n_points];
+  const double gz = g[idx + 2 * n_points];
+
+  constexpr int i_angular = 0;
+  constexpr int j_angular = 0;
+
+  constexpr int n_i = (i_angular + 1) * (i_angular + 2) / 2;
+  constexpr int n_j = (j_angular + 1) * (j_angular + 2) / 2;
+}
+
 int evaluate_density(
     cuda::std::complex<double> *density, const double *density_matrices,
     const int *non_trivial_pairs, const int n_shells,

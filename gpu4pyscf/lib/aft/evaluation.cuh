@@ -69,34 +69,17 @@ __global__ static void evaluate_density_kernel(
   const int c_begin_index =
       reverse_c ? (block_c_index - n_c_blocks + 1) * BLOCK_DIM_XYZ - 1
                 : block_c_index * BLOCK_DIM_XYZ;
-  const KernelType gx_begin =
+  const KernelType gx =
       G[0] * a_begin_index + G[3] * b_begin_index + G[6] * c_begin_index;
-  const KernelType gy_begin =
+  const KernelType gy =
       G[1] * a_begin_index + G[4] * b_begin_index + G[7] * c_begin_index;
-  const KernelType gz_begin =
+  const KernelType gz =
       G[2] * a_begin_index + G[5] * b_begin_index + G[8] * c_begin_index;
-
-  const int8_t a_sign = reverse_a ? -1 : 1;
-  const int8_t b_sign = reverse_b ? -1 : 1;
-  const int8_t c_sign = reverse_c ? -1 : 1;
-
-  const KernelType a_dot_b =
-      (a_sign * b_sign) * (G[0] * G[3] + G[1] * G[4] + G[2] * G[5]);
-  const KernelType a_dot_c =
-      (a_sign * c_sign) * (G[0] * G[6] + G[1] * G[7] + G[2] * G[8]);
-  const KernelType b_dot_c =
-      (b_sign * c_sign) * (G[3] * G[6] + G[4] * G[7] + G[5] * G[8]);
 
   const int thread_id = threadIdx.x + threadIdx.y * BLOCK_DIM_XYZ +
                         threadIdx.z * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
 
-  KernelType prefactor[n_fi * n_fj];
-
-  __shared__ complex<KernelType> reduced_density_values[n_threads];
-  reduced_density_values[thread_id] = 0;
-
   const int n_pairs = n_contributing_pairs_in_blocks[block_index];
-
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
 
   for (int i_batch = 0, pair = thread_id; i_batch < n_batches;
@@ -149,12 +132,7 @@ __global__ static void evaluate_density_kernel(
     const KernelType qy = pair_y - j_y;
     const KernelType qz = pair_z - j_z;
 
-    const KernelType gaussian_exponent_at_reference =
-        reciprocal_pair_exponent *
-        distance_squared(gx_begin, gy_begin, gz_begin);
-
-    const KernelType phase_angle =
-        gx_begin * pair_x + gy_begin * pair_y + gz_begin * pair_z;
+    const KernelType phase_angle = gx * pair_x + gy * pair_y + gz * pair_z;
 
     double fourier_factor = M_PI / pair_exponent;
     fourier_factor *= fourier_factor * fourier_factor;

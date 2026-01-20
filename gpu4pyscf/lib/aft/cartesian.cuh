@@ -22,293 +22,207 @@ namespace gpu4pyscf::aft {
 template <typename T> using complex = cuda::std::complex<T>;
 
 template <typename T, int angular>
-__forceinline__ __device__ void hermite_polynomial(complex<T> hermite[],
-                                                   const T renormalized_g,
-                                                   const T sqrt_exponent) {
-
-  const complex<T> factor{0.0, -sqrt_exponent};
-  complex<T> accumulated_factor = factor;
-
-  T hermite_real_0 = 1;
-  T hermite_real_1 = 2.0 * renormalized_g;
+__forceinline__ __device__ void
+hermite_polynomial(complex<T> hermite[], const complex<T> g1, const T exponent,
+                   const T shift = 0.0) {
 
   hermite[0] = 1.0;
 
   if constexpr (angular >= 1) {
-    hermite[1] = factor * hermite_real_1;
+    hermite[1] = g1;
   }
 
 #pragma unroll
-  for (int i = 0; i < angular - 1; i++) {
-    const T hermite_real =
-        hermite_real_1 * 2.0 * renormalized_g - 2.0 * (i + 1) * hermite_real_0;
-    accumulated_factor = accumulated_factor * factor;
-    hermite[i + 2] = hermite_real * accumulated_factor;
-    hermite_real_0 = hermite_real_1;
-    hermite_real_1 = hermite_real;
-  }
-}
-
-template <typename T, int angular>
-__forceinline__ __device__ void power_series(T array[], const T x) {
-  array[0] = 1;
-#pragma unroll
-  for (int i = 1; i <= angular; i++) {
-    array[i] = array[i - 1] * x;
+  for (int i = -1; i < angular - 1; i++) {
+    hermite[i + 2] =
+        g1 * hermite[i + 1] + 2.0 * exponent * (i + 1) * hermite[i];
   }
 }
 
 template <typename T, int i_angular, int j_angular>
-__forceinline__ __device__ complex<T>
-contract_with_density(const T density[], const T exponent, const T gx,
-                      const T gy, const T gz, const T px, const T py,
-                      const T pz, const T qx, const T qy, const T qz) {
-
-  constexpr int total_angular = i_angular + j_angular;
-  complex<T> result = 0;
-  const T sqrt_exponent = sqrt(exponent);
-
-  complex<T> hx[total_angular + 1];
-  hermite_polynomial<T, total_angular>(hx, sqrt_exponent * gx, sqrt_exponent);
-  complex<T> hy[total_angular + 1];
-  hermite_polynomial<T, total_angular>(hy, sqrt_exponent * gy, sqrt_exponent);
-  complex<T> hz[total_angular + 1];
-  hermite_polynomial<T, total_angular>(hz, sqrt_exponent * gz, sqrt_exponent);
-
-  T ax[i_angular + 1];
-  power_series<T, i_angular>(ax, px);
-  T ay[i_angular + 1];
-  power_series<T, i_angular>(ay, py);
-  T az[i_angular + 1];
-  power_series<T, i_angular>(az, pz);
-
-  T bx[j_angular + 1];
-  power_series<T, j_angular>(bx, qx);
-  T by[j_angular + 1];
-  power_series<T, j_angular>(by, qy);
-  T bz[j_angular + 1];
-  power_series<T, j_angular>(bz, qz);
-
-  if constexpr (i_angular == 0 && j_angular == 0) {
-    result += density[0] * (1);
-  }
+__forceinline__ __device__ void horizontal_recursion(complex<T> table[],
+                                                     const T shift) {
   if constexpr (i_angular == 0 && j_angular == 1) {
-    result += density[0] * (bx[1] + hx[1]);
-    result += density[1] * (by[1] + hy[1]);
-    result += density[2] * (bz[1] + hz[1]);
+    table[1] = table[1] + shift * table[0];
   }
-  if constexpr (i_angular == 0 && j_angular == 2) {
-    result += density[0] * (bx[2] + 2 * bx[1] * hx[1] + hx[2]);
-    result += density[1] * ((bx[1] + hx[1]) * (by[1] + hy[1]));
-    result += density[2] * ((bx[1] + hx[1]) * (bz[1] + hz[1]));
-    result += density[3] * (by[2] + 2 * by[1] * hy[1] + hy[2]);
-    result += density[4] * ((by[1] + hy[1]) * (bz[1] + hz[1]));
-    result += density[5] * (bz[2] + 2 * bz[1] * hz[1] + hz[2]);
-  }
-  if constexpr (i_angular == 1 && j_angular == 0) {
-    result += density[0] * (ax[1] + hx[1]);
-    result += density[1] * (ay[1] + hy[1]);
-    result += density[2] * (az[1] + hz[1]);
-  }
+
   if constexpr (i_angular == 1 && j_angular == 1) {
-    result += density[0] * (bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]);
-    result += density[1] * ((ax[1] + hx[1]) * (by[1] + hy[1]));
-    result += density[2] * ((ax[1] + hx[1]) * (bz[1] + hz[1]));
-    result += density[3] * ((bx[1] + hx[1]) * (ay[1] + hy[1]));
-    result += density[4] * (by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]);
-    result += density[5] * ((ay[1] + hy[1]) * (bz[1] + hz[1]));
-    result += density[6] * ((bx[1] + hx[1]) * (az[1] + hz[1]));
-    result += density[7] * ((by[1] + hy[1]) * (az[1] + hz[1]));
-    result += density[8] * (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]);
+    table[3] = table[2] + shift * table[1];
+    table[2] = table[1] + shift * table[0];
   }
-  if constexpr (i_angular == 1 && j_angular == 2) {
-    result +=
-        density[0] * (bx[2] * hx[1] + 2 * bx[1] * hx[2] +
-                      ax[1] * (bx[2] + 2 * bx[1] * hx[1] + hx[2]) + hx[3]);
-    result += density[1] * ((bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]) *
-                            (by[1] + hy[1]));
-    result += density[2] * ((bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]) *
-                            (bz[1] + hz[1]));
-    result +=
-        density[3] * ((ax[1] + hx[1]) * (by[2] + 2 * by[1] * hy[1] + hy[2]));
-    result +=
-        density[4] * ((ax[1] + hx[1]) * (by[1] + hy[1]) * (bz[1] + hz[1]));
-    result +=
-        density[5] * ((ax[1] + hx[1]) * (bz[2] + 2 * bz[1] * hz[1] + hz[2]));
-    result +=
-        density[6] * ((bx[2] + 2 * bx[1] * hx[1] + hx[2]) * (ay[1] + hy[1]));
-    result += density[7] * ((bx[1] + hx[1]) *
-                            (by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]));
-    result +=
-        density[8] * ((bx[1] + hx[1]) * (ay[1] + hy[1]) * (bz[1] + hz[1]));
-    result +=
-        density[9] * (by[2] * hy[1] + 2 * by[1] * hy[2] +
-                      ay[1] * (by[2] + 2 * by[1] * hy[1] + hy[2]) + hy[3]);
-    result += density[10] * ((by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]) *
-                             (bz[1] + hz[1]));
-    result +=
-        density[11] * ((ay[1] + hy[1]) * (bz[2] + 2 * bz[1] * hz[1] + hz[2]));
-    result +=
-        density[12] * ((bx[2] + 2 * bx[1] * hx[1] + hx[2]) * (az[1] + hz[1]));
-    result +=
-        density[13] * ((bx[1] + hx[1]) * (by[1] + hy[1]) * (az[1] + hz[1]));
-    result += density[14] * ((bx[1] + hx[1]) *
-                             (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]));
-    result +=
-        density[15] * ((by[2] + 2 * by[1] * hy[1] + hy[2]) * (az[1] + hz[1]));
-    result += density[16] * ((by[1] + hy[1]) *
-                             (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]));
-    result +=
-        density[17] * (bz[2] * hz[1] + 2 * bz[1] * hz[2] +
-                       az[1] * (bz[2] + 2 * bz[1] * hz[1] + hz[2]) + hz[3]);
-  }
-  if constexpr (i_angular == 2 && j_angular == 0) {
-    result += density[0] * (ax[2] + 2 * ax[1] * hx[1] + hx[2]);
-    result += density[1] * ((ax[1] + hx[1]) * (ay[1] + hy[1]));
-    result += density[2] * ((ax[1] + hx[1]) * (az[1] + hz[1]));
-    result += density[3] * (ay[2] + 2 * ay[1] * hy[1] + hy[2]);
-    result += density[4] * ((ay[1] + hy[1]) * (az[1] + hz[1]));
-    result += density[5] * (az[2] + 2 * az[1] * hz[1] + hz[2]);
-  }
+
   if constexpr (i_angular == 2 && j_angular == 1) {
-    result += density[0] * (ax[2] * (bx[1] + hx[1]) + bx[1] * hx[2] +
-                            2 * ax[1] * (bx[1] * hx[1] + hx[2]) + hx[3]);
-    result +=
-        density[1] * ((ax[2] + 2 * ax[1] * hx[1] + hx[2]) * (by[1] + hy[1]));
-    result +=
-        density[2] * ((ax[2] + 2 * ax[1] * hx[1] + hx[2]) * (bz[1] + hz[1]));
-    result += density[3] * ((bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]) *
-                            (ay[1] + hy[1]));
-    result += density[4] * ((ax[1] + hx[1]) *
-                            (by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]));
-    result +=
-        density[5] * ((ax[1] + hx[1]) * (ay[1] + hy[1]) * (bz[1] + hz[1]));
-    result += density[6] * ((bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]) *
-                            (az[1] + hz[1]));
-    result +=
-        density[7] * ((ax[1] + hx[1]) * (by[1] + hy[1]) * (az[1] + hz[1]));
-    result += density[8] * ((ax[1] + hx[1]) *
-                            (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]));
-    result +=
-        density[9] * ((bx[1] + hx[1]) * (ay[2] + 2 * ay[1] * hy[1] + hy[2]));
-    result += density[10] * (ay[2] * (by[1] + hy[1]) + by[1] * hy[2] +
-                             2 * ay[1] * (by[1] * hy[1] + hy[2]) + hy[3]);
-    result +=
-        density[11] * ((ay[2] + 2 * ay[1] * hy[1] + hy[2]) * (bz[1] + hz[1]));
-    result +=
-        density[12] * ((bx[1] + hx[1]) * (ay[1] + hy[1]) * (az[1] + hz[1]));
-    result += density[13] * ((by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]) *
-                             (az[1] + hz[1]));
-    result += density[14] * ((ay[1] + hy[1]) *
-                             (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]));
-    result +=
-        density[15] * ((bx[1] + hx[1]) * (az[2] + 2 * az[1] * hz[1] + hz[2]));
-    result +=
-        density[16] * ((by[1] + hy[1]) * (az[2] + 2 * az[1] * hz[1] + hz[2]));
-    result += density[17] * (az[2] * (bz[1] + hz[1]) + bz[1] * hz[2] +
-                             2 * az[1] * (bz[1] * hz[1] + hz[2]) + hz[3]);
+    table[5] = table[3] + shift * table[2];
+    table[4] = table[2] + shift * table[1];
+    table[3] = table[1] + shift * table[0];
   }
+
+  if constexpr (i_angular == 0 && j_angular == 2) {
+    table[2] = table[2] + shift * table[1];
+    table[1] = table[1] + shift * table[0];
+    table[2] = table[2] + shift * table[1];
+  }
+
+  if constexpr (i_angular == 1 && j_angular == 2) {
+    table[4] = table[3] + shift * table[2];
+    table[3] = table[2] + shift * table[1];
+    table[2] = table[1] + shift * table[0];
+    table[5] = table[4] + shift * table[3];
+    table[4] = table[3] + shift * table[2];
+  }
+
   if constexpr (i_angular == 2 && j_angular == 2) {
-    result += density[0] *
-              (bx[2] * hx[2] + ax[2] * (bx[2] + 2 * bx[1] * hx[1] + hx[2]) +
-               2 * bx[1] * hx[3] +
-               2 * ax[1] * (bx[2] * hx[1] + 2 * bx[1] * hx[2] + hx[3]) + hx[4]);
-    result += density[1] * ((ax[2] * (bx[1] + hx[1]) + bx[1] * hx[2] +
-                             2 * ax[1] * (bx[1] * hx[1] + hx[2]) + hx[3]) *
-                            (by[1] + hy[1]));
-    result += density[2] * ((ax[2] * (bx[1] + hx[1]) + bx[1] * hx[2] +
-                             2 * ax[1] * (bx[1] * hx[1] + hx[2]) + hx[3]) *
-                            (bz[1] + hz[1]));
-    result += density[3] * ((ax[2] + 2 * ax[1] * hx[1] + hx[2]) *
-                            (by[2] + 2 * by[1] * hy[1] + hy[2]));
-    result += density[4] * ((ax[2] + 2 * ax[1] * hx[1] + hx[2]) *
-                            (by[1] + hy[1]) * (bz[1] + hz[1]));
-    result += density[5] * ((ax[2] + 2 * ax[1] * hx[1] + hx[2]) *
-                            (bz[2] + 2 * bz[1] * hz[1] + hz[2]));
-    result +=
-        density[6] * ((bx[2] * hx[1] + 2 * bx[1] * hx[2] +
-                       ax[1] * (bx[2] + 2 * bx[1] * hx[1] + hx[2]) + hx[3]) *
-                      (ay[1] + hy[1]));
-    result += density[7] * ((bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]) *
-                            (by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]));
-    result += density[8] * ((bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]) *
-                            (ay[1] + hy[1]) * (bz[1] + hz[1]));
-    result +=
-        density[9] * ((ax[1] + hx[1]) *
-                      (by[2] * hy[1] + 2 * by[1] * hy[2] +
-                       ay[1] * (by[2] + 2 * by[1] * hy[1] + hy[2]) + hy[3]));
-    result += density[10] * ((ax[1] + hx[1]) *
-                             (by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]) *
-                             (bz[1] + hz[1]));
-    result += density[11] * ((ax[1] + hx[1]) * (ay[1] + hy[1]) *
-                             (bz[2] + 2 * bz[1] * hz[1] + hz[2]));
-    result +=
-        density[12] * ((bx[2] * hx[1] + 2 * bx[1] * hx[2] +
-                        ax[1] * (bx[2] + 2 * bx[1] * hx[1] + hx[2]) + hx[3]) *
-                       (az[1] + hz[1]));
-    result += density[13] * ((bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]) *
-                             (by[1] + hy[1]) * (az[1] + hz[1]));
-    result += density[14] * ((bx[1] * hx[1] + ax[1] * (bx[1] + hx[1]) + hx[2]) *
-                             (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]));
-    result +=
-        density[15] * ((ax[1] + hx[1]) * (by[2] + 2 * by[1] * hy[1] + hy[2]) *
-                       (az[1] + hz[1]));
-    result += density[16] * ((ax[1] + hx[1]) * (by[1] + hy[1]) *
-                             (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]));
-    result +=
-        density[17] * ((ax[1] + hx[1]) *
-                       (bz[2] * hz[1] + 2 * bz[1] * hz[2] +
-                        az[1] * (bz[2] + 2 * bz[1] * hz[1] + hz[2]) + hz[3]));
-    result += density[18] * ((bx[2] + 2 * bx[1] * hx[1] + hx[2]) *
-                             (ay[2] + 2 * ay[1] * hy[1] + hy[2]));
-    result += density[19] *
-              ((bx[1] + hx[1]) * (ay[2] * (by[1] + hy[1]) + by[1] * hy[2] +
-                                  2 * ay[1] * (by[1] * hy[1] + hy[2]) + hy[3]));
-    result +=
-        density[20] * ((bx[1] + hx[1]) * (ay[2] + 2 * ay[1] * hy[1] + hy[2]) *
-                       (bz[1] + hz[1]));
-    result += density[21] *
-              (by[2] * hy[2] + ay[2] * (by[2] + 2 * by[1] * hy[1] + hy[2]) +
-               2 * by[1] * hy[3] +
-               2 * ay[1] * (by[2] * hy[1] + 2 * by[1] * hy[2] + hy[3]) + hy[4]);
-    result += density[22] * ((ay[2] * (by[1] + hy[1]) + by[1] * hy[2] +
-                              2 * ay[1] * (by[1] * hy[1] + hy[2]) + hy[3]) *
-                             (bz[1] + hz[1]));
-    result += density[23] * ((ay[2] + 2 * ay[1] * hy[1] + hy[2]) *
-                             (bz[2] + 2 * bz[1] * hz[1] + hz[2]));
-    result += density[24] * ((bx[2] + 2 * bx[1] * hx[1] + hx[2]) *
-                             (ay[1] + hy[1]) * (az[1] + hz[1]));
-    result += density[25] * ((bx[1] + hx[1]) *
-                             (by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]) *
-                             (az[1] + hz[1]));
-    result += density[26] * ((bx[1] + hx[1]) * (ay[1] + hy[1]) *
-                             (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]));
-    result +=
-        density[27] * ((by[2] * hy[1] + 2 * by[1] * hy[2] +
-                        ay[1] * (by[2] + 2 * by[1] * hy[1] + hy[2]) + hy[3]) *
-                       (az[1] + hz[1]));
-    result += density[28] * ((by[1] * hy[1] + ay[1] * (by[1] + hy[1]) + hy[2]) *
-                             (bz[1] * hz[1] + az[1] * (bz[1] + hz[1]) + hz[2]));
-    result +=
-        density[29] * ((ay[1] + hy[1]) *
-                       (bz[2] * hz[1] + 2 * bz[1] * hz[2] +
-                        az[1] * (bz[2] + 2 * bz[1] * hz[1] + hz[2]) + hz[3]));
-    result += density[30] * ((bx[2] + 2 * bx[1] * hx[1] + hx[2]) *
-                             (az[2] + 2 * az[1] * hz[1] + hz[2]));
-    result += density[31] * ((bx[1] + hx[1]) * (by[1] + hy[1]) *
-                             (az[2] + 2 * az[1] * hz[1] + hz[2]));
-    result += density[32] *
-              ((bx[1] + hx[1]) * (az[2] * (bz[1] + hz[1]) + bz[1] * hz[2] +
-                                  2 * az[1] * (bz[1] * hz[1] + hz[2]) + hz[3]));
-    result += density[33] * ((by[2] + 2 * by[1] * hy[1] + hy[2]) *
-                             (az[2] + 2 * az[1] * hz[1] + hz[2]));
-    result += density[34] *
-              ((by[1] + hy[1]) * (az[2] * (bz[1] + hz[1]) + bz[1] * hz[2] +
-                                  2 * az[1] * (bz[1] * hz[1] + hz[2]) + hz[3]));
-    result += density[35] *
-              (bz[2] * hz[2] + az[2] * (bz[2] + 2 * bz[1] * hz[1] + hz[2]) +
-               2 * bz[1] * hz[3] +
-               2 * az[1] * (bz[2] * hz[1] + 2 * bz[1] * hz[2] + hz[3]) + hz[4]);
+    table[6] = table[4] + shift * table[3];
+    table[5] = table[3] + shift * table[2];
+    table[4] = table[2] + shift * table[1];
+    table[3] = table[1] + shift * table[0];
+    table[8] = table[6] + shift * table[5];
+    table[7] = table[5] + shift * table[4];
+    table[6] = table[4] + shift * table[3];
+  }
+}
+
+template <typename T, int length>
+__forceinline__ __device__ void conjugate(complex<T> table[]) {
+#pragma unroll
+  for (int i = 0; i < length; i++) {
+    table[i].imag() *= -1;
+  }
+}
+
+template <typename T, int ai, int aj>
+__forceinline__ __device__ complex<T>
+contract_with_density(const T density[], const complex<T> xij[],
+                      const complex<T> yij[], const complex<T> zij[]) {
+
+  constexpr int total_angular = ai + aj;
+  complex<T> result = 0;
+
+  if constexpr (ai == 0 && aj == 0) {
+    result += density[0] * 1;
+  }
+
+  if constexpr (ai == 0 && aj == 1) {
+    result += density[0] * xij[1];
+    result += density[1] * yij[1];
+    result += density[2] * zij[1];
+  }
+
+  if constexpr (ai == 0 && aj == 2) {
+    result += density[0] * xij[1] * xij[1];
+    result += density[1] * xij[1] * yij[1];
+    result += density[2] * xij[1] * zij[1];
+    result += density[3] * yij[1] * yij[1];
+    result += density[4] * yij[1] * zij[1];
+    result += density[5] * zij[1] * zij[1];
+  }
+
+  if constexpr (ai == 1 && aj == 0) {
+    result += density[0] * xij[aj + 1];
+    result += density[1] * yij[aj + 1];
+    result += density[2] * zij[aj + 1];
+  }
+
+  if constexpr (ai == 1 && aj == 1) {
+    result += density[0] * xij[(aj + 1) + 1];
+    result += density[1] * xij[aj + 1] * yij[1];
+    result += density[2] * xij[aj + 1] * zij[1];
+    result += density[3] * xij[1] * yij[aj + 1];
+    result += density[4] * yij[(aj + 1) + 1];
+    result += density[5] * yij[aj + 1] * zij[1];
+    result += density[6] * xij[1] * zij[aj + 1];
+    result += density[7] * yij[1] * zij[aj + 1];
+    result += density[8] * zij[(aj + 1) + 1];
+  }
+
+  if constexpr (ai == 1 && aj == 2) {
+    result += density[0] * xij[(aj + 1) * 2 + 1];
+    result += density[1] * xij[(aj + 1) + 1] * yij[1];
+    result += density[2] * xij[(aj + 1) + 1] * zij[1];
+    result += density[3] * xij[aj + 1] * (yij[1] * yij[1]);
+    result += density[4] * xij[aj + 1] * yij[1] * zij[1];
+    result += density[5] * xij[aj + 1] * (zij[1] * zij[1]);
+    result += density[6] * xij[1] * xij[1] * yij[aj + 1];
+    result += density[7] * xij[1] * yij[(aj + 1) + 1];
+    result += density[8] * xij[1] * yij[aj + 1] * zij[1];
+    result += density[9] * yij[(aj + 1) * 2 + 1];
+    result += density[10] * yij[(aj + 1) + 1] * zij[1];
+    result += density[11] * yij[aj + 1] * (zij[1] * zij[1]);
+    result += density[12] * xij[1] * xij[1] * zij[aj + 1];
+    result += density[13] * xij[1] * yij[1] * zij[aj + 1];
+    result += density[14] * xij[1] * zij[(aj + 1) + 1];
+    result += density[15] * yij[1] * yij[1] * zij[aj + 1];
+    result += density[16] * yij[1] * zij[(aj + 1) + 1];
+    result += density[17] * zij[(aj + 1) * 2 + 1];
+  }
+
+  if constexpr (ai == 2 && aj == 0) {
+    result += density[0] * xij[aj + 1] * xij[aj + 1];
+    result += density[1] * xij[aj + 1] * yij[aj + 1];
+    result += density[2] * xij[aj + 1] * zij[aj + 1];
+    result += density[3] * yij[aj + 1] * yij[aj + 1];
+    result += density[4] * yij[aj + 1] * zij[aj + 1];
+    result += density[5] * zij[aj + 1] * zij[aj + 1];
+  }
+
+  if constexpr (ai == 2 && aj == 1) {
+    result += density[0] * xij[(aj + 1) * 1 + 2];
+    result += density[1] * xij[aj + 1] * xij[aj + 1] * yij[1];
+    result += density[2] * xij[aj + 1] * xij[aj + 1] * zij[1];
+    result += density[3] * xij[(aj + 1) + 1] * yij[aj + 1];
+    result += density[4] * xij[aj + 1] * yij[(aj + 1) + 1];
+    result += density[5] * xij[aj + 1] * yij[aj + 1] * zij[1];
+    result += density[6] * xij[(aj + 1) + 1] * zij[aj + 1];
+    result += density[7] * xij[aj + 1] * yij[1] * zij[aj + 1];
+    result += density[8] * xij[aj + 1] * zij[(aj + 1) + 1];
+    result += density[9] * xij[1] * (yij[aj + 1] * yij[aj + 1]);
+    result += density[10] * yij[(aj + 1) * 1 + 2];
+    result += density[11] * yij[aj + 1] * yij[aj + 1] * zij[1];
+    result += density[12] * xij[1] * yij[aj + 1] * zij[aj + 1];
+    result += density[13] * yij[(aj + 1) + 1] * zij[aj + 1];
+    result += density[14] * yij[aj + 1] * zij[(aj + 1) + 1];
+    result += density[15] * xij[1] * (zij[aj + 1] * zij[aj + 1]);
+    result += density[16] * yij[1] * (zij[aj + 1] * zij[aj + 1]);
+    result += density[17] * zij[(aj + 1) * 1 + 2];
+  }
+
+  if constexpr (ai == 2 && aj == 2) {
+    result += density[0] * xij[aj * 2 + 2];
+    result += density[1] * xij[(aj + 1) * 1 + 2] * yij[1];
+    result += density[2] * xij[(aj + 1) * 1 + 2] * zij[1];
+    result += density[3] * xij[aj + 1] * xij[aj + 1] * (yij[1] * yij[1]);
+    result += density[4] * xij[aj + 1] * xij[aj + 1] * yij[1] * zij[1];
+    result += density[5] * xij[aj + 1] * xij[aj + 1] * (zij[1] * zij[1]);
+    result += density[6] * xij[(aj + 1) * 2 + 1] * yij[aj + 1];
+    result += density[7] * xij[(aj + 1) + 1] * yij[(aj + 1) + 1];
+    result += density[8] * xij[(aj + 1) + 1] * yij[aj + 1] * zij[1];
+    result += density[9] * xij[aj + 1] * yij[(aj + 1) * 2 + 1];
+    result += density[10] * xij[aj + 1] * yij[(aj + 1) + 1] * zij[1];
+    result += density[11] * xij[aj + 1] * yij[aj + 1] * (zij[1] * zij[1]);
+    result += density[12] * xij[(aj + 1) * 2 + 1] * zij[aj + 1];
+    result += density[13] * xij[(aj + 1) + 1] * yij[1] * zij[aj + 1];
+    result += density[14] * xij[(aj + 1) + 1] * zij[(aj + 1) + 1];
+    result += density[15] * xij[aj + 1] * (yij[1] * yij[1]) * zij[aj + 1];
+    result += density[16] * xij[aj + 1] * yij[1] * zij[(aj + 1) + 1];
+    result += density[17] * xij[aj + 1] * zij[(aj + 1) * 2 + 1];
+    result += density[18] * xij[1] * xij[1] * (yij[aj + 1] * yij[aj + 1]);
+    result += density[19] * xij[1] * yij[(aj + 1) * 1 + 2];
+    result += density[20] * xij[1] * (yij[aj + 1] * yij[aj + 1]) * zij[1];
+    result += density[21] * yij[aj * 2 + 2];
+    result += density[22] * yij[(aj + 1) * 1 + 2] * zij[1];
+    result += density[23] * yij[aj + 1] * yij[aj + 1] * (zij[1] * zij[1]);
+    result += density[24] * xij[1] * xij[1] * yij[aj + 1] * zij[aj + 1];
+    result += density[25] * xij[1] * yij[(aj + 1) + 1] * zij[aj + 1];
+    result += density[26] * xij[1] * yij[aj + 1] * zij[(aj + 1) + 1];
+    result += density[27] * yij[(aj + 1) * 2 + 1] * zij[aj + 1];
+    result += density[28] * yij[(aj + 1) + 1] * zij[(aj + 1) + 1];
+    result += density[29] * yij[aj + 1] * zij[(aj + 1) * 2 + 1];
+    result += density[30] * xij[1] * xij[1] * (zij[aj + 1] * zij[aj + 1]);
+    result += density[31] * xij[1] * yij[1] * (zij[aj + 1] * zij[aj + 1]);
+    result += density[32] * xij[1] * zij[(aj + 1) * 1 + 2];
+    result += density[33] * yij[1] * yij[1] * (zij[aj + 1] * zij[aj + 1]);
+    result += density[34] * yij[1] * zij[(aj + 1) * 1 + 2];
+    result += density[35] * zij[aj * 2 + 2];
   }
 
   return result;
