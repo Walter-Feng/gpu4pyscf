@@ -120,6 +120,7 @@ if(BUILD_CUTLASS)
 endif()
 
 add_subdirectory(gint)
+add_subdirectory(ovlp)
 add_subdirectory(gvhf)
 add_subdirectory(gdft)
 add_subdirectory(cupy_helper)
