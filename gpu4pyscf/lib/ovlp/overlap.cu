@@ -84,10 +84,8 @@ ovlp_kernel(double *ovlp, const int *pair_indices, const int n_primitives,
   const int i_function_index = primitive_to_function[i_primitive];
   const int j_function_index = primitive_to_function[j_primitive];
 
-  ovlp += blockIdx.y * n_functions * n_functions;
-  double *ovlp_transpose =
-      ovlp + j_function_index * n_functions + i_function_index;
-  ovlp += i_function_index * n_functions + j_function_index;
+  ovlp += blockIdx.y * n_functions * n_functions +
+          i_function_index * n_functions + j_function_index;
 
   if constexpr (i_angular == 0 && j_angular == 0) {
     atomicAdd(ovlp, prefactor);
@@ -110,8 +108,8 @@ ovlp_kernel(double *ovlp, const int *pair_indices, const int n_primitives,
                                               factor_b);
     horizontal_recursion<i_angular, j_angular>(z_pairs, iz_to_jz);
 
-    write_spherical_function_pairs<i_angular, j_angular>(
-        ovlp, ovlp_transpose, x_pairs, y_pairs, z_pairs, n_functions);
+    write_spherical_function_pairs<i_angular, j_angular>(ovlp, x_pairs, y_pairs,
+                                                         z_pairs, n_functions);
   }
 }
 } // namespace ovlp

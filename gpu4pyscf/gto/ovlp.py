@@ -62,7 +62,7 @@ def unique_with_multiple_keys(x):
     return x, inverse_unique[inverse_sort]
 
 
-def get_ovlp(mol):
+def get_ovlp_for_single_mol(mol):
     n_contracted = mol._bas[:, NCTR_OF]
     n_primitives_per_shell = mol._bas[:, NPRIM_OF]
     decontracted_basis = np.repeat(mol._bas, n_contracted, axis=0)
@@ -129,17 +129,97 @@ def get_ovlp(mol):
     return result + result.T
 
 
+def get_ovlp(atms, bases, envs):
+    # This assumes that all the molecules have the same basis "structure",
+    # with each shell having the same angular momentum, n_primitives, n_contracted,
+    # and only differ in the atom assignment and the exponents / coefficients.
+    assert len(atms.shape) == len(bases.shape)
+    assert len(envs.shape) == 2
+    assert atms.shape[0] == bases.shape[0] == envs.shape[0]
+    assert np.all(bases[:, :, ANG_OF] == bases[0, :, ANG_OF])
+    assert np.all(bases[:, :, NCTR_OF] == bases[0, :, NCTR_OF])
+    assert np.all(bases[:, :, NPRIM_OF] == bases[0, :, NPRIM_OF])
+
+    n_configurations = atms.shape[0]
+    n_contracted = bases[0, :, NCTR_OF]
+    n_primitives_per_shell = bases[0, :, NPRIM_OF]
+    decontracted_basis = np.repeat(bases, n_contracted, axis=-2)
+    decontracted_basis[:, :, NCTR_OF] = 1
+    coeff_offset = np.concatenate([np.arange(i) * n for i, n in zip(n_contracted, n_primitives_per_shell)])
+    decontracted_basis[:, :, PTR_COEFF] += coeff_offset
+    shell_to_ao = make_loc(decontracted_basis[0], 'sph')
+    n_functions = shell_to_ao[-1]
+    shell_to_ao = shell_to_ao[:-1]
+
+    n_primitives_per_shell = np.repeat(n_primitives_per_shell, n_contracted)
+    decontracted_basis = np.repeat(decontracted_basis, n_primitives_per_shell, axis=-2)
+    primitive_offset = np.concatenate([np.arange(i) for i in n_primitives_per_shell])
+    decontracted_basis[:, :, NPRIM_OF] = 1
+    decontracted_basis[:, :, PTR_COEFF] += primitive_offset
+    decontracted_basis[:, :, PTR_EXP] += primitive_offset
+    shell_to_ao = np.repeat(shell_to_ao, n_primitives_per_shell)
+
+    sort_index_by_angular = np.argsort(decontracted_basis[0, :, ANG_OF])
+    decontracted_basis = decontracted_basis[:, sort_index_by_angular]
+    shell_to_ao = cp.asarray(shell_to_ao[sort_index_by_angular], dtype=cp.int32)
+
+    n_primitives = decontracted_basis.shape[-2]
+    left_shells, right_shells = np.triu_indices(n_primitives)
+    n_pairs = len(left_shells)
+    angular_pairs = np.zeros((2, n_pairs), dtype=np.int32)
+    angular_pairs[0] = decontracted_basis[0, left_shells, ANG_OF]
+    angular_pairs[1] = decontracted_basis[0, right_shells, ANG_OF]
+
+    groups, indices = unique_with_multiple_keys(angular_pairs.T)
+    sorted_pairs = []
+    for i, group in enumerate(groups):
+        pairs = np.where(indices == i)[0]
+        left_shells_in_this_group = cp.asarray(left_shells[pairs], dtype=cp.int32)
+        right_shells_in_this_group = cp.asarray(right_shells[pairs], dtype=cp.int32)
+        pairs = left_shells_in_this_group * n_primitives + right_shells_in_this_group
+        sorted_pairs.append({'angular_pairs': group, 'primitive_pairs': pairs})
+
+    atms = cp.asarray(atms, dtype=cp.int32)
+    bases = cp.asarray(decontracted_basis, dtype=cp.int32)
+    envs = cp.asarray(envs, dtype=cp.double)
+
+    result = cp.zeros((n_configurations, n_functions, n_functions))
+    for pairs in sorted_pairs:
+        i_angular, j_angular = pairs['angular_pairs']
+        libovlp.overlap(
+            cast_to_pointer(result),
+            cast_to_pointer(pairs['primitive_pairs']),
+            ctypes.c_int(len(pairs['primitive_pairs'])),
+            ctypes.c_int(n_primitives),
+            cast_to_pointer(shell_to_ao),
+            ctypes.c_int(n_functions),
+            cast_to_pointer(atms),
+            ctypes.c_int(atms[0].size),
+            cast_to_pointer(bases),
+            ctypes.c_int(bases[0].size),
+            cast_to_pointer(envs),
+            ctypes.c_int(envs[0].size),
+            ctypes.c_int(n_configurations),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+        )
+
+    return result + result.transpose(0, 2, 1)
+
+
 from pyscf.gto import Mole
 
 mol = Mole(
     atom="""O     0.      0.      0.    
-            O     0.      0.      3.    
-            O    1.      0.      0.    
-            He    2.      0.      0.    
-            He    2.      1.      0.    
          """,
-    basis='cc-pvqz',
-    verbose=5,
+    basis='sto-3g',
+    verbose=0,
 )
 mol.build()
-print(cp.linalg.norm(get_ovlp(mol) - cp.array(mol.intor('int1e_ovlp'))))
+assert cp.linalg.norm(get_ovlp_for_single_mol(mol) - cp.array(mol.intor('int1e_ovlp'))) < 1e-10
+
+atms = np.array([mol._atm for _ in range(3)])
+bases = np.array([mol._bas for _ in range(3)])
+envs = np.array([mol._env for _ in range(3)])
+
+assert cp.linalg.norm(get_ovlp(atms, bases, envs) - cp.array(mol.intor('int1e_ovlp'))) < 1e-10

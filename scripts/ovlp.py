@@ -54,10 +54,13 @@ def spherical_string(i_angular, j_angular):
 
                         expr += term
 
-            expr = 'expression = {2}; atomicAdd(output + {0} * n_functions + {1}, expression); atomicAdd(output_transpose + {1} * n_functions + {0}, expression); '.format(
-                i, j, expr
-            )
+            expr = 'expression = {2}; atomicAdd(output + {0} * n_functions + {1}, expression);'.format(i, j, expr)
             expr = expr.replace('1.0 *', '').replace('= +', '= ')
             snippet += expr
 
     return 'if constexpr(i_angular == {} && j_angular == {}){{{}}}'.format(i_angular, j_angular, snippet)
+
+
+for i in range(5):
+    for j in range(5):
+        print(spherical_string(i, j))

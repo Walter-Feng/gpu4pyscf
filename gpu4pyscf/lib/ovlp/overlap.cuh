@@ -276,9 +276,9 @@ horizontal_recursion(double result[], const double shift_to_here) {
 
 template <int i_angular, int j_angular>
 __forceinline__ __device__ void
-write_spherical_function_pairs(double *output, double *output_transpose,
-                               const double x_pairs[], const double y_pairs[],
-                               const double z_pairs[], const int n_functions) {
+write_spherical_function_pairs(double *output, const double x_pairs[],
+                               const double y_pairs[], const double z_pairs[],
+                               const int n_functions) {
 
   double expression;
 
