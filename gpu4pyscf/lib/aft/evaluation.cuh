@@ -41,8 +41,8 @@ __global__ static void evaluate_density_kernel(
     const int n_a_blocks, const int n_b_blocks, const int n_c_blocks,
     const int *atm, const int *bas, const double *env) {
 
-  constexpr int n_fi = (i_angular + 1) * (i_angular + 2) / 2;
-  constexpr int n_fj = (j_angular + 1) * (j_angular + 2) / 2;
+  constexpr int n_fi = 2 * i_angular + 1;
+  constexpr int n_fj = 2 * j_angular + 1;
   constexpr int n_threads = BLOCK_DIM_XYZ * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
 
   // will be needed if calculating over k-points
@@ -60,27 +60,14 @@ __global__ static void evaluate_density_kernel(
   const bool reverse_b = block_b_index >= n_b_blocks / 2;
   const bool reverse_c = block_c_index >= n_c_blocks / 2;
 
-  const int a_begin_index =
-      reverse_a ? (block_a_index - n_a_blocks + 1) * BLOCK_DIM_XYZ - 1
-                : block_a_index * BLOCK_DIM_XYZ;
-  const int b_begin_index =
-      reverse_b ? (block_b_index - n_b_blocks + 1) * BLOCK_DIM_XYZ - 1
-                : block_b_index * BLOCK_DIM_XYZ;
-  const int c_begin_index =
-      reverse_c ? (block_c_index - n_c_blocks + 1) * BLOCK_DIM_XYZ - 1
-                : block_c_index * BLOCK_DIM_XYZ;
-  const KernelType gx =
-      G[0] * a_begin_index + G[3] * b_begin_index + G[6] * c_begin_index;
-  const KernelType gy =
-      G[1] * a_begin_index + G[4] * b_begin_index + G[7] * c_begin_index;
-  const KernelType gz =
-      G[2] * a_begin_index + G[5] * b_begin_index + G[8] * c_begin_index;
-
-  const int thread_id = threadIdx.x + threadIdx.y * BLOCK_DIM_XYZ +
-                        threadIdx.z * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
+  const uint8_t thread_id = threadIdx.x + threadIdx.y * BLOCK_DIM_XYZ +
+                            threadIdx.z * BLOCK_DIM_XYZ * BLOCK_DIM_XYZ;
 
   const int n_pairs = n_contributing_pairs_in_blocks[block_index];
   const int n_batches = (n_pairs + n_threads - 1) / n_threads;
+
+  KernelType density_slice[(2 * i_angular + 1) * (2 * j_angular + 1)];
+  __shared__ complex<KernelType> reduced_density_values[8 * n_threads];
 
   for (int i_batch = 0, pair = thread_id; i_batch < n_batches;
        i_batch++, pair += n_threads) {
@@ -112,9 +99,6 @@ __global__ static void evaluate_density_kernel(
     const KernelType j_coeff = env[bas(PTR_COEFF, j_shell)];
 
     const KernelType pair_exponent = i_exponent + j_exponent;
-    const KernelType pair_exponent_in_prefactor =
-        i_exponent * j_exponent / pair_exponent *
-        distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
     const KernelType reciprocal_pair_exponent = 0.25 / pair_exponent;
 
     const KernelType pair_x =
@@ -124,30 +108,27 @@ __global__ static void evaluate_density_kernel(
     const KernelType pair_z =
         (i_exponent * i_z + j_exponent * j_z) / pair_exponent;
 
-    const KernelType px = pair_x - i_x;
-    const KernelType py = pair_y - i_y;
-    const KernelType pz = pair_z - i_z;
+    double prefactor = M_PI / pair_exponent;
+    prefactor *= prefactor * prefactor;
+    prefactor = sqrt(prefactor) * i_coeff * j_coeff *
+                gpbc::multi_grid::common_fac_sp<KernelType, i_angular>() *
+                gpbc::multi_grid::common_fac_sp<KernelType, j_angular>();
 
-    const KernelType qx = pair_x - j_x;
-    const KernelType qy = pair_y - j_y;
-    const KernelType qz = pair_z - j_z;
+    KernelType gx = block_a_index * BLOCK_DIM_XYZ * G[0];
+    KernelType gy = block_b_index * BLOCK_DIM_XYZ * G[4];
+    KernelType gz = block_c_index * BLOCK_DIM_XYZ * G[8];
 
     const KernelType phase_angle = gx * pair_x + gy * pair_y + gz * pair_z;
-
-    double fourier_factor = M_PI / pair_exponent;
-    fourier_factor *= fourier_factor * fourier_factor;
-
-    const KernelType pair_prefactor =
-        i_coeff * j_coeff * sqrt(fourier_factor) *
-        gpbc::multi_grid::common_fac_sp<KernelType, i_angular>() *
-        gpbc::multi_grid::common_fac_sp<KernelType, j_angular>();
-
-    const complex<KernelType> gaussian_begin =
-        is_valid_pair ? exp(-(pair_exponent_in_prefactor +
-                              gaussian_exponent_at_reference +
-                              complex<KernelType>{0.0, phase_angle}) /
-                            3.0)
-                      : 0;
+    const KernelType pair_exponent_in_prefactor =
+        i_exponent * j_exponent / pair_exponent *
+        distance_squared(i_x - j_x, i_y - j_y, i_z - j_z);
+    const complex<KernelType> gaussian_factor =
+        is_valid_pair
+            ? prefactor * exp(-complex<KernelType>{
+                              pair_exponent_in_prefactor +
+                                  pair_exponent * distance_squared(gx, gy, gz),
+                              phase_angle})
+            : 0;
 
     const double *density_matrix_pointer =
         density_matrices + i_function * n_functions + j_function;
@@ -156,15 +137,27 @@ __global__ static void evaluate_density_kernel(
     for (int f_i = 0; f_i < n_fi; f_i++) {
 #pragma unroll
       for (int f_j = 0; f_j < n_fj; f_j++) {
-        prefactor[f_i * n_fj + f_j] =
-            pair_prefactor * density_matrix_pointer[f_j];
+        density_slice[f_i * n_fj + f_j] = density_matrix_pointer[f_j];
       }
       density_matrix_pointer += n_functions;
     }
-
     const KernelType da_squared = distance_squared(G[0], G[1], G[2]);
     const KernelType db_squared = distance_squared(G[3], G[4], G[5]);
     const KernelType dc_squared = distance_squared(G[6], G[7], G[8]);
+
+    const KernelType cross_term_a = G[0] * gx + G[1] * gy + G[2] * gz;
+    const KernelType cross_term_b = G[3] * gx + G[4] * gy + G[5] * gz;
+    const KernelType cross_term_c = G[6] * gx + G[7] * gy + G[8] * gz;
+
+    const KernelType recursion_factor_a_start = exp(
+        -complex<KernelType>{pair_exponent * (2 * cross_term_a + da_squared),
+                             G[0] * pair_x + G[1] * pair_y + G[2] * pair_z});
+    const KernelType recursion_factor_b_start = exp(
+        -complex<KernelType>{pair_exponent * (2 * cross_term_b + db_squared),
+                             G[3] * pair_x + G[4] * pair_y + G[5] * pair_z});
+    const KernelType recursion_factor_c_begin = exp(
+        -complex<KernelType>{pair_exponent * (2 * cross_term_c + dc_squared),
+                             G[6] * pair_x + G[7] * pair_z + G[8] * pair_z});
 
     const KernelType exp_da_squared =
         exp(-2 * reciprocal_pair_exponent * da_squared);
@@ -173,66 +166,23 @@ __global__ static void evaluate_density_kernel(
     const KernelType exp_dc_squared =
         exp(-2 * reciprocal_pair_exponent * dc_squared);
 
-    const KernelType cross_term_a =
-        a_sign * (G[0] * gx_begin + G[1] * gy_begin + G[2] * gz_begin);
-    const KernelType cross_term_b =
-        b_sign * (G[3] * gx_begin + G[4] * gy_begin + G[5] * gz_begin);
-    const KernelType cross_term_c =
-        c_sign * (G[6] * gx_begin + G[7] * gy_begin + G[8] * gz_begin);
-
-    const KernelType a_phase_angle =
-        a_sign * (G[0] * pair_x + G[1] * pair_y + G[2] * pair_z);
-    const KernelType b_phase_angle =
-        b_sign * (G[3] * pair_x + G[4] * pair_y + G[5] * pair_z);
-    const KernelType c_phase_angle =
-        c_sign * (G[6] * pair_x + G[7] * pair_y + G[8] * pair_z);
-
-    const complex<KernelType> recursion_factor_a_begin =
-        exp(-reciprocal_pair_exponent * (2 * cross_term_a + da_squared) -
-            complex<KernelType>{0.0, a_phase_angle});
-    const complex<KernelType> recursion_factor_b_begin =
-        exp(-reciprocal_pair_exponent * (2 * cross_term_b + db_squared) -
-            complex<KernelType>{0.0, b_phase_angle});
-    const complex<KernelType> recursion_factor_c_begin =
-        exp(-reciprocal_pair_exponent * (2 * cross_term_c + dc_squared) -
-            complex<KernelType>{0.0, c_phase_angle});
-
-    const KernelType exp_dadb = exp(-2 * reciprocal_pair_exponent * a_dot_b);
-    const KernelType exp_dadc = exp(-2 * reciprocal_pair_exponent * a_dot_c);
-    const KernelType exp_dbdc = exp(-2 * reciprocal_pair_exponent * b_dot_c);
-
     int a_index, b_index, c_index;
-    KernelType gx, gy, gz;
-    complex<KernelType> gaussian_x, gaussian_y, gaussian_z, recursion_factor_a,
-        recursion_factor_b, recursion_factor_c;
-    KernelType recursion_factor_ab_pow_a = 1;
-    KernelType recursion_factor_ac_pow_a = 1;
-    KernelType recursion_factor_bc_pow_b = 1;
-    if constexpr (!is_non_orthogonal) {
-      gx = gx_begin;
-    }
-    for (a_index = 0, gaussian_x = gaussian_begin,
-        recursion_factor_a = recursion_factor_a_begin;
-         a_index < BLOCK_DIM_XYZ; a_index++, gaussian_x *= recursion_factor_a,
-        recursion_factor_a *= exp_da_squared) {
-      if constexpr (is_non_orthogonal) {
-        recursion_factor_bc_pow_b = 1;
-      } else {
-        gy = gy_begin;
-      }
-      for (b_index = 0, gaussian_y = gaussian_begin,
-          recursion_factor_b = recursion_factor_b_begin;
-           b_index < BLOCK_DIM_XYZ; b_index++,
-          gaussian_y *= recursion_factor_b * recursion_factor_ab_pow_a,
-          recursion_factor_b *= exp_db_squared) {
+    complex<KernelType> recursion_factor_a, recursion_factor_b,
+        recursion_factor_c;
+    complex<KernelType> xij[(i_angular + 1) * (j_angular + 1)],
+        yij[(i_angular + 1) * (j_angular + 1)],
+        zij[(i_angular + 1) * (j_angular + 1)];
 
-        if constexpr (is_non_orthogonal) {
-          gx = gx_begin + a_index * a_sign * G[0] + b_index * b_sign * G[3];
-          gy = gy_begin + a_index * a_sign * G[1] + b_index * b_sign * G[4];
-          gz = gz_begin + a_index * a_sign * G[2] + b_index * b_sign * G[5];
-        } else {
-          gz = gz_begin;
-        }
+    for (a_index = 0, xij[0] = gaussian_factor,
+        recursion_factor_a = recursion_factor_a_start,
+        gx = block_a_index * BLOCK_DIM_XYZ * G[0];
+         a_index < BLOCK_DIM_XYZ; a_index++, xij[0] *= recursion_factor_a,
+        recursion_factor_a *= exp_da_squared) {
+      for (b_index = 0, yij[0] = 1,
+          recursion_factor_b = recursion_factor_b_start;
+           b_index < BLOCK_DIM_XYZ;
+           b_index++, recursion_factor_b *= exp_db_squared) {
+
         for (c_index = 0, gaussian_z = gaussian_begin,
             recursion_factor_c = recursion_factor_c_begin;
              c_index < BLOCK_DIM_XYZ; c_index++,

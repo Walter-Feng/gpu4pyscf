@@ -33,6 +33,7 @@ def spherical_string(i_angular, j_angular):
     spherical_coeff_i = cart2sph(i_angular, normalized='sp').T
     j_cartesian = cartesian(j_angular)
     spherical_coeff_j = cart2sph(j_angular, normalized='sp').T
+    n_j_functions = j_angular * 2 + 1
 
     snippet = ''
     for i, i_spherical_coeff in enumerate(spherical_coeff_i):
@@ -42,7 +43,7 @@ def spherical_string(i_angular, j_angular):
                 for j_cartesian_coeff, j_function in zip(j_spherical_coeff, j_cartesian):
                     coeff = i_cartesian_coeff * j_cartesian_coeff
                     if abs(coeff) > 1e-15:
-                        term = '{} * x_pairs[{}] * y_pairs[{}] * z_pairs[{}]'.format(
+                        term = '{} * xij[{}] * yij[{}] * zij[{}]'.format(
                             coeff,
                             i_function[0] * (j_angular + 1) + j_function[0],
                             i_function[1] * (j_angular + 1) + j_function[1],
@@ -54,13 +55,15 @@ def spherical_string(i_angular, j_angular):
 
                         expr += term
 
-            expr = 'expression = {2}; atomicAdd(output + {0} * n_functions + {1}, expression);'.format(i, j, expr)
-            expr = expr.replace('1.0 *', '').replace('= +', '= ')
+            density_index = i * n_j_functions + j
+
+            expr = 'result += density[{}] * ({});'.format(density_index, expr)
+            expr = expr.replace('1.0 *', '')
             snippet += expr
 
-    return 'if constexpr(i_angular == {} && j_angular == {}){{{}}}'.format(i_angular, j_angular, snippet)
+    return 'if constexpr(ai == {} && aj == {}){{{}}}'.format(i_angular, j_angular, snippet)
 
 
-for i in range(5):
-    for j in range(5):
+for i in range(3):
+    for j in range(3):
         print(spherical_string(i, j))
