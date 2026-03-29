@@ -129,10 +129,7 @@ def get_ovlp_for_single_mol(mol):
     return result + result.T
 
 
-def get_ovlp(atms, bases, envs):
-    # This assumes that all the molecules have the same basis "structure",
-    # with each shell having the same angular momentum, n_primitives, n_contracted,
-    # and only differ in the atom assignment and the exponents / coefficients.
+def create_ovlp_plan(atms, bases, envs):
     assert len(atms.shape) == len(bases.shape)
     assert len(envs.shape) == 2
     assert atms.shape[0] == bases.shape[0] == envs.shape[0]
@@ -159,47 +156,76 @@ def get_ovlp(atms, bases, envs):
     decontracted_basis[:, :, PTR_EXP] += primitive_offset
     shell_to_ao = np.repeat(shell_to_ao, n_primitives_per_shell)
 
-    sort_index_by_angular = np.argsort(decontracted_basis[0, :, ANG_OF])
-    decontracted_basis = decontracted_basis[:, sort_index_by_angular]
-    shell_to_ao = cp.asarray(shell_to_ao[sort_index_by_angular], dtype=cp.int32)
+    angulars = decontracted_basis[0, :, ANG_OF]
 
     n_primitives = decontracted_basis.shape[-2]
-    left_shells, right_shells = np.triu_indices(n_primitives)
-    n_pairs = len(left_shells)
-    angular_pairs = np.zeros((2, n_pairs), dtype=np.int32)
-    angular_pairs[0] = decontracted_basis[0, left_shells, ANG_OF]
-    angular_pairs[1] = decontracted_basis[0, right_shells, ANG_OF]
+    sort_index_by_angular = np.argsort(angulars)
+    angulars = angulars[sort_index_by_angular]
+    spikes = angulars[1:] - angulars[:-1]
+    changed_indices = np.where(spikes)[0] + 1
+    max_angular = len(changed_indices)
 
-    groups, indices = unique_with_multiple_keys(angular_pairs.T)
-    sorted_pairs = []
-    for i, group in enumerate(groups):
-        pairs = np.where(indices == i)[0]
-        left_shells_in_this_group = cp.asarray(left_shells[pairs], dtype=cp.int32)
-        right_shells_in_this_group = cp.asarray(right_shells[pairs], dtype=cp.int32)
-        pairs = left_shells_in_this_group * n_primitives + right_shells_in_this_group
-        sorted_pairs.append({'angular_pairs': group, 'primitive_pairs': pairs})
+    grouped_primitives_ranges = np.zeros((max_angular + 1, 2), dtype=np.int32)
+    grouped_primitives_ranges[1:, 0] = changed_indices
+    grouped_primitives_ranges[:-1, 1] = changed_indices
+    grouped_primitives_ranges[-1, 1] = n_primitives
+    decontracted_basis = decontracted_basis[:, sort_index_by_angular]
 
     atms = cp.asarray(atms, dtype=cp.int32)
     bases = cp.asarray(decontracted_basis, dtype=cp.int32)
     envs = cp.asarray(envs, dtype=cp.double)
+    shell_to_ao = cp.asarray(shell_to_ao[sort_index_by_angular], dtype=cp.int32)
 
-    result = cp.zeros((n_configurations, n_functions, n_functions))
-    for pairs in sorted_pairs:
-        i_angular, j_angular = pairs['angular_pairs']
+    pairs = []
+    for i_angular in range(max_angular + 1):
+        i_range = grouped_primitives_ranges[i_angular]
+        for j_angular in range(i_angular, max_angular + 1):
+            j_range = grouped_primitives_ranges[j_angular]
+
+            if i_angular == j_angular:
+                left_pairs, right_pairs = cp.triu_indices(i_range[1] - i_range[0])
+                left_pairs += i_range[0]
+                right_pairs += j_range[0]
+                pair_indices = cp.asarray(left_pairs * n_primitives + right_pairs, dtype=cp.int32).flatten()
+            else:
+                left_pairs = cp.arange(*i_range, dtype=cp.int32)
+                right_pairs = cp.arange(*j_range, dtype=cp.int32)
+                pair_indices = cp.asarray(left_pairs[:, None] * n_primitives + right_pairs[None, :], dtype=cp.int32)
+
+            pairs.append((i_angular, j_angular, pair_indices))
+
+    plan = {
+        'atms': atms,
+        'bases': bases,
+        'envs': envs,
+        'shell_to_ao': shell_to_ao,
+        'n_configurations': n_configurations,
+        'n_functions': n_functions,
+        'n_primitives': n_primitives,
+        'pairs': pairs,
+    }
+
+    return plan
+
+
+def get_ovlp(plan):
+    result = cp.zeros((plan['n_configurations'], plan['n_functions'], plan['n_functions']))
+
+    for i_angular, j_angular, pair_indices in plan['pairs']:
         libovlp.overlap(
             cast_to_pointer(result),
-            cast_to_pointer(pairs['primitive_pairs']),
-            ctypes.c_int(len(pairs['primitive_pairs'])),
-            ctypes.c_int(n_primitives),
-            cast_to_pointer(shell_to_ao),
-            ctypes.c_int(n_functions),
-            cast_to_pointer(atms),
-            ctypes.c_int(atms[0].size),
-            cast_to_pointer(bases),
-            ctypes.c_int(bases[0].size),
-            cast_to_pointer(envs),
-            ctypes.c_int(envs[0].size),
-            ctypes.c_int(n_configurations),
+            cast_to_pointer(pair_indices),
+            ctypes.c_int(pair_indices.size),
+            ctypes.c_int(plan['n_primitives']),
+            cast_to_pointer(plan['shell_to_ao']),
+            ctypes.c_int(plan['n_functions']),
+            cast_to_pointer(plan['atms']),
+            ctypes.c_int(plan['atms'][0].size),
+            cast_to_pointer(plan['bases']),
+            ctypes.c_int(plan['bases'][0].size),
+            cast_to_pointer(plan['envs']),
+            ctypes.c_int(plan['envs'][0].size),
+            ctypes.c_int(plan['n_configurations']),
             ctypes.c_int(i_angular),
             ctypes.c_int(j_angular),
         )
@@ -207,19 +233,29 @@ def get_ovlp(atms, bases, envs):
     return result + result.transpose(0, 2, 1)
 
 
-from pyscf.gto import Mole
+def get_dipole(plan, reference_point):
+    result = cp.zeros((plan['n_configurations'], 3, plan['n_functions'], plan['n_functions']))
 
-mol = Mole(
-    atom="""O     0.      0.      0.    
-         """,
-    basis='sto-3g',
-    verbose=0,
-)
-mol.build()
-assert cp.linalg.norm(get_ovlp_for_single_mol(mol) - cp.array(mol.intor('int1e_ovlp'))) < 1e-10
+    for i_angular, j_angular, pair_indices in plan['pairs']:
+        libovlp.dipole(
+            cast_to_pointer(result),
+            cast_to_pointer(pair_indices),
+            ctypes.c_int(pair_indices.size),
+            ctypes.c_int(plan['n_primitives']),
+            cast_to_pointer(plan['shell_to_ao']),
+            ctypes.c_int(plan['n_functions']),
+            cast_to_pointer(plan['atms']),
+            ctypes.c_int(plan['atms'][0].size),
+            cast_to_pointer(plan['bases']),
+            ctypes.c_int(plan['bases'][0].size),
+            cast_to_pointer(plan['envs']),
+            ctypes.c_int(plan['envs'][0].size),
+            ctypes.c_int(plan['n_configurations']),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+            ctypes.c_double(reference_point[0]),
+            ctypes.c_double(reference_point[1]),
+            ctypes.c_double(reference_point[2]),
+        )
 
-atms = np.array([mol._atm for _ in range(3)])
-bases = np.array([mol._bas for _ in range(3)])
-envs = np.array([mol._env for _ in range(3)])
-
-assert cp.linalg.norm(get_ovlp(atms, bases, envs) - cp.array(mol.intor('int1e_ovlp'))) < 1e-10
+    return result + result.transpose(0, 1, 3, 2)

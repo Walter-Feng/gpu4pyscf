@@ -21,18 +21,18 @@
 #define atm(SLOT, I) atm[ATM_SLOTS * (I) + (SLOT)]
 #define bas(SLOT, I) bas[BAS_SLOTS * (I) + (SLOT)]
 
-#include "overlap.cuh"
+#include "recursion.cuh"
+#include "write.cuh"
 #include <math.h>
-#include <stdio.h>
 
 namespace ovlp {
 template <int i_angular, int j_angular>
-__global__ void
-ovlp_kernel(double *ovlp, const int *pair_indices, const int n_primitives,
-            const int n_pairs, const int *primitive_to_function,
-            const int n_functions, const int *atm, const int atm_stride,
-            const int *bas, const int bas_stride, const double *env,
-            const int env_stride) {
+__global__ void kernel(double *ovlp, const int *pair_indices,
+                       const int n_primitives, const int n_pairs,
+                       const int *primitive_to_function, const int n_functions,
+                       const int *atm, const int atm_stride, const int *bas,
+                       const int bas_stride, const double *env,
+                       const int env_stride) {
   atm += blockIdx.y * atm_stride;
   bas += blockIdx.y * bas_stride;
   env += blockIdx.y * env_stride;
@@ -49,9 +49,9 @@ ovlp_kernel(double *ovlp, const int *pair_indices, const int n_primitives,
   const double beta = env[bas(PTR_EXP, j_primitive)];
 
   const double c1 =
-      env[bas(PTR_COEFF, i_primitive)] * common_fac_sp<i_angular>();
+      env[bas(PTR_COEFF, i_primitive)] * rr::common_fac_sp<i_angular>();
   const double c2 =
-      env[bas(PTR_COEFF, j_primitive)] * common_fac_sp<j_angular>();
+      env[bas(PTR_COEFF, j_primitive)] * rr::common_fac_sp<j_angular>();
 
   const int i_atom = bas(ATOM_OF, i_primitive);
   const int j_atom = bas(ATOM_OF, j_primitive);
@@ -94,29 +94,29 @@ ovlp_kernel(double *ovlp, const int *pair_indices, const int n_primitives,
     const double factor_b = 0.5 / pair_exponent;
 
     double x_pairs[(i_angular + 1) * (j_angular + 1)];
-    vertical_recursion<i_angular + j_angular>(x_pairs, prefactor,
-                                              factor_a * ix_to_jx, factor_b);
-    horizontal_recursion<i_angular, j_angular>(x_pairs, ix_to_jx);
+    rr::vertical_recursion<i_angular + j_angular>(
+        x_pairs, prefactor, factor_a * ix_to_jx, factor_b);
+    rr::horizontal_recursion<i_angular, j_angular>(x_pairs, ix_to_jx);
 
     double y_pairs[(i_angular + 1) * (j_angular + 1)];
-    vertical_recursion<i_angular + j_angular>(y_pairs, 1, factor_a * iy_to_jy,
-                                              factor_b);
-    horizontal_recursion<i_angular, j_angular>(y_pairs, iy_to_jy);
+    rr::vertical_recursion<i_angular + j_angular>(
+        y_pairs, 1, factor_a * iy_to_jy, factor_b);
+    rr::horizontal_recursion<i_angular, j_angular>(y_pairs, iy_to_jy);
 
     double z_pairs[(i_angular + 1) * (j_angular + 1)];
-    vertical_recursion<i_angular + j_angular>(z_pairs, 1, factor_a * iz_to_jz,
-                                              factor_b);
-    horizontal_recursion<i_angular, j_angular>(z_pairs, iz_to_jz);
+    rr::vertical_recursion<i_angular + j_angular>(
+        z_pairs, 1, factor_a * iz_to_jz, factor_b);
+    rr::horizontal_recursion<i_angular, j_angular>(z_pairs, iz_to_jz);
 
-    write_spherical_function_pairs<i_angular, j_angular>(ovlp, x_pairs, y_pairs,
-                                                         z_pairs, n_functions);
+    write_integral<i_angular, j_angular, j_angular + 1>(ovlp, x_pairs, y_pairs,
+                                                        z_pairs, n_functions);
   }
 }
 } // namespace ovlp
 
 #define ovlp_kernel_macro(i, j)                                                \
   case i * 10 + j:                                                             \
-    ovlp::ovlp_kernel<i, j><<<block_grid, block_size>>>(                       \
+    ovlp::kernel<i, j><<<block_grid, block_size>>>(                            \
         ovlp, pair_indices, n_primitives, n_pairs, primitive_to_function,      \
         n_functions, atm, atm_stride, bas, bas_stride, env, env_stride);       \
     break;
