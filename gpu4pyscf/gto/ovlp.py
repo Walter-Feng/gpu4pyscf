@@ -233,7 +233,32 @@ def get_ovlp(plan):
     return result + result.transpose(0, 2, 1)
 
 
-def get_dipole(plan, reference_point):
+def get_ovlp_gradient(plan):
+    result = cp.zeros((plan['n_configurations'], 3, plan['n_functions'], plan['n_functions']))
+
+    for i_angular, j_angular, pair_indices in plan['pairs']:
+        libovlp.overlap_gradient(
+            cast_to_pointer(result),
+            cast_to_pointer(pair_indices),
+            ctypes.c_int(pair_indices.size),
+            ctypes.c_int(plan['n_primitives']),
+            cast_to_pointer(plan['shell_to_ao']),
+            ctypes.c_int(plan['n_functions']),
+            cast_to_pointer(plan['atms']),
+            ctypes.c_int(plan['atms'][0].size),
+            cast_to_pointer(plan['bases']),
+            ctypes.c_int(plan['bases'][0].size),
+            cast_to_pointer(plan['envs']),
+            ctypes.c_int(plan['envs'][0].size),
+            ctypes.c_int(plan['n_configurations']),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+        )
+
+    return result.transpose(0, 1, 3, 2) - result
+
+
+def get_dipole(plan, reference_point=(0, 0, 0)):
     result = cp.zeros((plan['n_configurations'], 3, plan['n_functions'], plan['n_functions']))
 
     for i_angular, j_angular, pair_indices in plan['pairs']:
@@ -259,3 +284,35 @@ def get_dipole(plan, reference_point):
         )
 
     return result + result.transpose(0, 1, 3, 2)
+
+
+def get_quadrupole(plan, reference_point=(0, 0, 0)):
+    result = cp.zeros((plan['n_configurations'], 9, plan['n_functions'], plan['n_functions']))
+
+    for i_angular, j_angular, pair_indices in plan['pairs']:
+        assert i_angular <= j_angular
+        libovlp.quadrupole(
+            cast_to_pointer(result),
+            cast_to_pointer(pair_indices),
+            ctypes.c_int(pair_indices.size),
+            ctypes.c_int(plan['n_primitives']),
+            cast_to_pointer(plan['shell_to_ao']),
+            ctypes.c_int(plan['n_functions']),
+            cast_to_pointer(plan['atms']),
+            ctypes.c_int(plan['atms'][0].size),
+            cast_to_pointer(plan['bases']),
+            ctypes.c_int(plan['bases'][0].size),
+            cast_to_pointer(plan['envs']),
+            ctypes.c_int(plan['envs'][0].size),
+            ctypes.c_int(plan['n_configurations']),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+            ctypes.c_double(reference_point[0]),
+            ctypes.c_double(reference_point[1]),
+            ctypes.c_double(reference_point[2]),
+        )
+    result += result.transpose(0, 1, 3, 2)
+
+    result[:, [3, 6, 7]] = result[:, [1, 2, 5]]
+
+    return result

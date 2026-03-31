@@ -42,16 +42,16 @@ __forceinline__ __device__ void insert_position_operator(double result[],
   }
 }
 
-template <int i_angular, int j_angular>
+template <int i_angular, int j_angular, int stride>
 __forceinline__ __device__ void
-insert_gradient_operator(double result[], const double double_pair_exponent) {
-  constexpr int stride = j_angular + 1;
+insert_gradient_operator(double result[], const double recursion_factor) {
 #pragma unroll
   for (int i = 0; i <= i_angular; i++) {
     double gradient, lower_order = 0;
+#pragma unroll
     for (int j = 0; j <= j_angular; j++) {
       gradient =
-          lower_order * j - result[i * stride + j + 1] * double_pair_exponent;
+          lower_order * j - result[i * stride + j + 1] * recursion_factor;
       lower_order = result[i * stride + j];
       result[i * stride + j] = gradient;
     }

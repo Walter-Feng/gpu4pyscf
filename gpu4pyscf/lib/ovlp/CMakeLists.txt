@@ -3,6 +3,7 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --ptxas-options=-v")
 add_library(ovlp SHARED
 				overlap.cu
 				dipole.cu
+				quadrupole.cu
 )
 
 set_target_properties(ovlp PROPERTIES
