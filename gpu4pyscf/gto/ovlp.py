@@ -85,12 +85,12 @@ def create_ovlp_plan(atms, bases, envs, screening=False):
 
     pairs = []
 
-    if screening:
-        for i_angular in range(max_angular + 1):
-            i_range = grouped_primitives_ranges[i_angular]
-            for j_angular in range(i_angular, max_angular + 1):
-                j_range = grouped_primitives_ranges[j_angular]
+    for i_angular in range(max_angular + 1):
+        i_range = grouped_primitives_ranges[i_angular]
+        for j_angular in range(i_angular, max_angular + 1):
+            j_range = grouped_primitives_ranges[j_angular]
 
+            if screening:
                 if i_angular == j_angular:
                     left_pairs, right_pairs = cp.triu_indices(i_range[1] - i_range[0])
                     left_pairs += i_range[0]
@@ -101,7 +101,22 @@ def create_ovlp_plan(atms, bases, envs, screening=False):
                     right_pairs = cp.arange(*j_range, dtype=cp.int32)
                     pair_indices = cp.asarray(left_pairs[:, None] * n_primitives + right_pairs[None, :], dtype=cp.int32)
 
-                pairs.append((i_angular, j_angular, pair_indices))
+                n_pairs = pair_indices.size
+            else:
+                n_rows = i_range[1] - i_range[0]
+                n_cols = j_range[1] - j_range[0]
+                if i_angular == j_angular:
+                    n_pairs = (n_rows + 1) * n_rows // 2
+                else:
+                    n_pairs = n_rows * n_cols
+                pair_indices = cp.array([*i_range, *j_range], dtype=cp.int32)
+
+            pairs.append((i_angular, j_angular, pair_indices, n_pairs))
+
+    if screening:
+        is_screened = 1
+    else:
+        is_screened = 0
 
     plan = {
         'atms': atms,
@@ -113,6 +128,7 @@ def create_ovlp_plan(atms, bases, envs, screening=False):
         'n_primitives': n_primitives,
         'grouped_primitive_ranges': grouped_primitives_ranges,
         'pairs': pairs,
+        'is_screened': is_screened,
     }
 
     return plan
@@ -121,51 +137,25 @@ def create_ovlp_plan(atms, bases, envs, screening=False):
 def get_ovlp(plan):
     result = cp.zeros((plan['n_configurations'], plan['n_functions'], plan['n_functions']))
 
-    if len(plan['pairs']):
-        for i_angular, j_angular, pair_indices in plan['pairs']:
-            libovlp.overlap(
-                cast_to_pointer(result),
-                cast_to_pointer(pair_indices),
-                ctypes.c_int(pair_indices.size),
-                ctypes.c_int(plan['n_primitives']),
-                cast_to_pointer(plan['shell_to_ao']),
-                ctypes.c_int(plan['n_functions']),
-                cast_to_pointer(plan['atms']),
-                ctypes.c_int(plan['atms'][0].size),
-                cast_to_pointer(plan['bases']),
-                ctypes.c_int(plan['bases'][0].size),
-                cast_to_pointer(plan['envs']),
-                ctypes.c_int(plan['envs'][0].size),
-                ctypes.c_int(plan['n_configurations']),
-                ctypes.c_int(i_angular),
-                ctypes.c_int(j_angular),
-            )
-
-    else:
-        primitive_ranges = plan['grouped_primitive_ranges']
-        for i_angular in range(len(primitive_ranges)):
-            i_range = primitive_ranges[i_angular]
-            for j_angular in range(i_angular, len(primitive_ranges)):
-                j_range = primitive_ranges[j_angular]
-
-                libovlp.overlap_without_screening(
-                    cast_to_pointer(result),
-                    ctypes.c_int(i_range[0]),
-                    ctypes.c_int(i_range[1]),
-                    ctypes.c_int(j_range[0]),
-                    ctypes.c_int(j_range[1]),
-                    cast_to_pointer(plan['shell_to_ao']),
-                    ctypes.c_int(plan['n_functions']),
-                    cast_to_pointer(plan['atms']),
-                    ctypes.c_int(plan['atms'][0].size),
-                    cast_to_pointer(plan['bases']),
-                    ctypes.c_int(plan['bases'][0].size),
-                    cast_to_pointer(plan['envs']),
-                    ctypes.c_int(plan['envs'][0].size),
-                    ctypes.c_int(plan['n_configurations']),
-                    ctypes.c_int(i_angular),
-                    ctypes.c_int(j_angular),
-                )
+    for i_angular, j_angular, pair_indices, n_pairs in plan['pairs']:
+        libovlp.overlap(
+            cast_to_pointer(result),
+            cast_to_pointer(pair_indices),
+            ctypes.c_int(n_pairs),
+            ctypes.c_int(plan['n_primitives']),
+            cast_to_pointer(plan['shell_to_ao']),
+            ctypes.c_int(plan['n_functions']),
+            cast_to_pointer(plan['atms']),
+            ctypes.c_int(plan['atms'][0].size),
+            cast_to_pointer(plan['bases']),
+            ctypes.c_int(plan['bases'][0].size),
+            cast_to_pointer(plan['envs']),
+            ctypes.c_int(plan['envs'][0].size),
+            ctypes.c_int(plan['n_configurations']),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+            ctypes.c_int(plan['is_screened']),
+        )
 
     return result + result.transpose(0, 2, 1)
 
@@ -173,51 +163,25 @@ def get_ovlp(plan):
 def get_ovlp_gradient(plan):
     result = cp.zeros((plan['n_configurations'], 3, plan['n_functions'], plan['n_functions']))
 
-    if len(plan['pairs']):
-        for i_angular, j_angular, pair_indices in plan['pairs']:
-            libovlp.overlap_gradient(
-                cast_to_pointer(result),
-                cast_to_pointer(pair_indices),
-                ctypes.c_int(pair_indices.size),
-                ctypes.c_int(plan['n_primitives']),
-                cast_to_pointer(plan['shell_to_ao']),
-                ctypes.c_int(plan['n_functions']),
-                cast_to_pointer(plan['atms']),
-                ctypes.c_int(plan['atms'][0].size),
-                cast_to_pointer(plan['bases']),
-                ctypes.c_int(plan['bases'][0].size),
-                cast_to_pointer(plan['envs']),
-                ctypes.c_int(plan['envs'][0].size),
-                ctypes.c_int(plan['n_configurations']),
-                ctypes.c_int(i_angular),
-                ctypes.c_int(j_angular),
-            )
-
-    else:
-        primitive_ranges = plan['grouped_primitive_ranges']
-        for i_angular in range(len(primitive_ranges)):
-            i_range = primitive_ranges[i_angular]
-            for j_angular in range(i_angular, len(primitive_ranges)):
-                j_range = primitive_ranges[j_angular]
-
-                libovlp.overlap_gradient_without_screening(
-                    cast_to_pointer(result),
-                    ctypes.c_int(i_range[0]),
-                    ctypes.c_int(i_range[1]),
-                    ctypes.c_int(j_range[0]),
-                    ctypes.c_int(j_range[1]),
-                    cast_to_pointer(plan['shell_to_ao']),
-                    ctypes.c_int(plan['n_functions']),
-                    cast_to_pointer(plan['atms']),
-                    ctypes.c_int(plan['atms'][0].size),
-                    cast_to_pointer(plan['bases']),
-                    ctypes.c_int(plan['bases'][0].size),
-                    cast_to_pointer(plan['envs']),
-                    ctypes.c_int(plan['envs'][0].size),
-                    ctypes.c_int(plan['n_configurations']),
-                    ctypes.c_int(i_angular),
-                    ctypes.c_int(j_angular),
-                )
+    for i_angular, j_angular, pair_indices, n_pairs in plan['pairs']:
+        libovlp.overlap_gradient(
+            cast_to_pointer(result),
+            cast_to_pointer(pair_indices),
+            ctypes.c_int(n_pairs),
+            ctypes.c_int(plan['n_primitives']),
+            cast_to_pointer(plan['shell_to_ao']),
+            ctypes.c_int(plan['n_functions']),
+            cast_to_pointer(plan['atms']),
+            ctypes.c_int(plan['atms'][0].size),
+            cast_to_pointer(plan['bases']),
+            ctypes.c_int(plan['bases'][0].size),
+            cast_to_pointer(plan['envs']),
+            ctypes.c_int(plan['envs'][0].size),
+            ctypes.c_int(plan['n_configurations']),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+            ctypes.c_int(plan['is_screened']),
+        )
 
     return result - result.transpose(0, 1, 3, 2)
 
