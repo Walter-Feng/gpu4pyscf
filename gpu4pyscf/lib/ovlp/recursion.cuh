@@ -51,7 +51,24 @@ insert_gradient_operator(double result[], const double recursion_factor) {
 #pragma unroll
     for (int j = 0; j <= j_angular; j++) {
       gradient =
-          lower_order * j - result[i * stride + j + 1] * recursion_factor;
+          result[i * stride + j + 1] * recursion_factor - lower_order * j;
+      lower_order = result[i * stride + j];
+      result[i * stride + j] = gradient;
+    }
+  }
+}
+
+template <int i_angular, int j_angular, int stride>
+__forceinline__ __device__ void
+insert_gradient_operator_to_bra(double result[],
+                                const double recursion_factor) {
+#pragma unroll
+  for (int j = 0; j <= j_angular; j++) {
+    double gradient, lower_order = 0;
+#pragma unroll
+    for (int i = 0; i <= i_angular; i++) {
+      gradient =
+          result[(i + 1) * stride + j] * recursion_factor - lower_order * i;
       lower_order = result[i * stride + j];
       result[i * stride + j] = gradient;
     }
