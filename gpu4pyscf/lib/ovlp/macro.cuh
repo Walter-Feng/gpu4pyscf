@@ -107,6 +107,18 @@
       result, x_pairs, y_pairs, z_pairs, n_functions);                         \
   result += n_functions * n_functions;
 
+#define r(axis, bra_padding, ket_padding)                                      \
+  rr::insert_position_operator<i_angular + bra_padding,                        \
+                               j_angular + ket_padding,                        \
+                               j_angular + 2 + ket_padding>(                   \
+      axis##_pairs, j_##axis - reference_point_##axis);
+
+#define p(axis, bra_padding, ket_padding)                                      \
+  rr::insert_gradient_operator_to_bra<i_angular + bra_padding,                 \
+                                      j_angular + ket_padding,                 \
+                                      j_angular + 1 + ket_padding>(            \
+      axis##_pairs, 2 * alpha);
+
 // kernel macro
 #define kernel_macro(kernel, i, j)                                             \
   case i * 10 + j:                                                             \

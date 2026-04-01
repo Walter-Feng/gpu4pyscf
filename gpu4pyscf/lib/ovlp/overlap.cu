@@ -19,7 +19,7 @@ __global__ void kernel(double *result, const int *pair_indices,
             i_function_index * n_functions + j_function_index;
 
   if constexpr (i_angular == 0 && j_angular == 0) {
-    atomicAdd(result, prefactor);
+    atomicAdd(result, prefactor * prefactor * prefactor);
   } else {
     double x_pairs[(i_angular + 1) * (j_angular + 1)];
     reset(x, 0, 0);
@@ -44,7 +44,7 @@ gradient(double *result, const int *pair_indices, const int n_primitives,
 
   OVLP_SPELL;
 
-  result += blockIdx.y * n_functions * n_functions +
+  result += blockIdx.y * 3 * n_functions * n_functions +
             i_function_index * n_functions + j_function_index;
 
   double x_pairs[(i_angular + 1) * (j_angular + 2)];

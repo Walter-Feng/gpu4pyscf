@@ -28,49 +28,40 @@ __global__ void quadrupole_kernel(
   reset(z, 0, 2);
 
   // x^2 component
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      x_pairs, j_x - reference_point_x);
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      x_pairs, j_x - reference_point_x);
+  r(x, 0, 1);
+  r(x, 0, 1);
   write(2);
   reset(x, 0, 2);
 
   // xy component
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      x_pairs, j_x - reference_point_x);
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      y_pairs, j_y - reference_point_y);
+  r(x, 0, 1);
+  r(y, 0, 1);
   write(2);
   reset(y, 0, 2);
 
   // xz component
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      z_pairs, j_z - reference_point_z);
+  r(z, 0, 1);
   write(2);
   reset(x, 0, 2);
 
   result += 2 * n_functions * n_functions;
 
   // yz component
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      y_pairs, j_y - reference_point_y);
+  r(y, 0, 1);
   write(2);
   reset(y, 0, 2);
 
   result += 2 * n_functions * n_functions;
 
   // z^2 component
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      z_pairs, j_z - reference_point_z);
+  r(z, 0, 1);
   write(2);
   reset(z, 0, 2);
   result -= 5 * n_functions * n_functions;
 
   // y^2 component
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      y_pairs, j_y - reference_point_y);
-  rr::insert_position_operator<i_angular, j_angular + 1, j_angular + 3>(
-      y_pairs, j_y - reference_point_y);
+  r(y, 0, 1);
+  r(y, 0, 1);
   write(2);
 }
 } // namespace ovlp
