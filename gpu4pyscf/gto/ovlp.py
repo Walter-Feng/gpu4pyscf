@@ -189,11 +189,11 @@ def get_ovlp_gradient(plan):
 def get_dipole(plan, reference_point=(0, 0, 0)):
     result = cp.zeros((plan['n_configurations'], 3, plan['n_functions'], plan['n_functions']))
 
-    for i_angular, j_angular, pair_indices in plan['pairs']:
+    for i_angular, j_angular, pair_indices, n_pairs in plan['pairs']:
         libovlp.dipole(
             cast_to_pointer(result),
             cast_to_pointer(pair_indices),
-            ctypes.c_int(pair_indices.size),
+            ctypes.c_int(n_pairs),
             ctypes.c_int(plan['n_primitives']),
             cast_to_pointer(plan['shell_to_ao']),
             ctypes.c_int(plan['n_functions']),
@@ -209,6 +209,7 @@ def get_dipole(plan, reference_point=(0, 0, 0)):
             ctypes.c_double(reference_point[0]),
             ctypes.c_double(reference_point[1]),
             ctypes.c_double(reference_point[2]),
+            ctypes.c_int(plan['is_screened']),
         )
 
     return result + result.transpose(0, 1, 3, 2)
@@ -217,12 +218,12 @@ def get_dipole(plan, reference_point=(0, 0, 0)):
 def get_quadrupole(plan, reference_point=(0, 0, 0)):
     result = cp.zeros((plan['n_configurations'], 9, plan['n_functions'], plan['n_functions']))
 
-    for i_angular, j_angular, pair_indices in plan['pairs']:
+    for i_angular, j_angular, pair_indices, n_pairs in plan['pairs']:
         assert i_angular <= j_angular
         libovlp.quadrupole(
             cast_to_pointer(result),
             cast_to_pointer(pair_indices),
-            ctypes.c_int(pair_indices.size),
+            ctypes.c_int(n_pairs),
             ctypes.c_int(plan['n_primitives']),
             cast_to_pointer(plan['shell_to_ao']),
             ctypes.c_int(plan['n_functions']),
@@ -238,6 +239,7 @@ def get_quadrupole(plan, reference_point=(0, 0, 0)):
             ctypes.c_double(reference_point[0]),
             ctypes.c_double(reference_point[1]),
             ctypes.c_double(reference_point[2]),
+            ctypes.c_int(plan['is_screened']),
         )
     result += result.transpose(0, 1, 3, 2)
 

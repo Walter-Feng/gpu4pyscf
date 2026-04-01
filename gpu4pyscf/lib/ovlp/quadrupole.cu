@@ -32,7 +32,8 @@ __global__ void quadrupole_kernel(
     const int n_pairs, const int *primitive_to_function, const int n_functions,
     const int *atm, const int atm_stride, const int *bas, const int bas_stride,
     const double *env, const int env_stride, const double reference_point_x,
-    const double reference_point_y, const double reference_point_z) {
+    const double reference_point_y, const double reference_point_z,
+    const int is_screened) {
   atm += blockIdx.y * atm_stride;
   bas += blockIdx.y * bas_stride;
   env += blockIdx.y * env_stride;
@@ -41,9 +42,37 @@ __global__ void quadrupole_kernel(
   if (pair_idx >= n_pairs)
     return;
 
-  const int primitive_pair = pair_indices[pair_idx];
-  const int i_primitive = primitive_pair / n_primitives;
-  const int j_primitive = primitive_pair % n_primitives;
+  int i_primitive, j_primitive;
+  if (is_screened) {
+    const int primitive_pair = pair_indices[pair_idx];
+    i_primitive = primitive_pair / n_primitives;
+    j_primitive = primitive_pair % n_primitives;
+  } else {
+    const int bra_begin = pair_indices[0];
+    const int bra_end = pair_indices[1];
+    const int ket_begin = pair_indices[2];
+    const int ket_end = pair_indices[3];
+
+    const int n_rows = bra_end - bra_begin;
+    const int n_cols = ket_end - ket_begin;
+
+    if constexpr (i_angular == j_angular) {
+      const float sqrt_target =
+          (2 * n_cols + 1) * (2 * n_cols + 1) - 8 * pair_idx;
+      i_primitive = (int)floor((2 * n_cols - 1 - sqrt(sqrt_target)) / 2) + 1;
+      j_primitive = pair_idx - (2 * n_cols - i_primitive - 1) * i_primitive / 2;
+    } else {
+      const int stride = max(n_rows, n_cols);
+      const int index_with_larger_stride = pair_idx / stride;
+      const int index_with_smaller_stride = pair_idx % stride;
+      i_primitive = n_rows >= n_cols ? index_with_smaller_stride
+                                     : index_with_larger_stride;
+      j_primitive = n_rows >= n_cols ? index_with_larger_stride
+                                     : index_with_smaller_stride;
+    }
+    i_primitive += bra_begin;
+    j_primitive += ket_begin;
+  }
 
   const double alpha = env[bas(PTR_EXP, i_primitive)];
   const double beta = env[bas(PTR_EXP, j_primitive)];
@@ -171,7 +200,7 @@ __global__ void quadrupole_kernel(
         quadrupole, pair_indices, n_primitives, n_pairs,                       \
         primitive_to_function, n_functions, atm, atm_stride, bas, bas_stride,  \
         env, env_stride, reference_point_x, reference_point_y,                 \
-        reference_point_z);                                                    \
+        reference_point_z, is_screened);                                       \
     break;
 extern "C" {
 void quadrupole(double *quadrupole, const int *pair_indices, const int n_pairs,
@@ -181,7 +210,7 @@ void quadrupole(double *quadrupole, const int *pair_indices, const int n_pairs,
                 const int env_stride, const int n_configurations,
                 const int i_angular, const int j_angular,
                 const double reference_point_x, const double reference_point_y,
-                const double reference_point_z) {
+                const double reference_point_z, const int is_screened) {
 
   const dim3 block_size{256, 1, 1};
   const dim3 block_grid{(uint)((n_pairs + 255) / 256), (uint)n_configurations,
