@@ -237,9 +237,6 @@ def get_dipole_gradient(plan, reference_point=(0, 0, 0)):
             ctypes.c_int(plan['n_configurations']),
             ctypes.c_int(i_angular),
             ctypes.c_int(j_angular),
-            ctypes.c_double(reference_point[0]),
-            ctypes.c_double(reference_point[1]),
-            ctypes.c_double(reference_point[2]),
             ctypes.c_int(plan['is_screened']),
         )
 
@@ -305,5 +302,69 @@ def get_quadrupole(plan, reference_point=(0, 0, 0)):
     result += result.transpose(0, 1, 3, 2)
 
     result[:, [3, 6, 7]] = result[:, [1, 2, 5]]
+
+    return result
+
+
+def get_quadrupole_gradient(plan, reference_point=(0, 0, 0)):
+    result = cp.zeros((plan['n_configurations'], 27, plan['n_functions'], plan['n_functions']))
+
+    dipole = cp.zeros((plan['n_configurations'], 3, plan['n_functions'], plan['n_functions']))
+
+    for i_angular, j_angular, pair_indices, n_pairs in plan['pairs']:
+        libovlp.dipole(
+            cast_to_pointer(dipole),
+            cast_to_pointer(pair_indices),
+            ctypes.c_int(n_pairs),
+            ctypes.c_int(plan['n_primitives']),
+            cast_to_pointer(plan['shell_to_ao']),
+            ctypes.c_int(plan['n_functions']),
+            cast_to_pointer(plan['atms']),
+            ctypes.c_int(plan['atms'][0].size),
+            cast_to_pointer(plan['bases']),
+            ctypes.c_int(plan['bases'][0].size),
+            cast_to_pointer(plan['envs']),
+            ctypes.c_int(plan['envs'][0].size),
+            ctypes.c_int(plan['n_configurations']),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+            ctypes.c_double(reference_point[0]),
+            ctypes.c_double(reference_point[1]),
+            ctypes.c_double(reference_point[2]),
+            ctypes.c_int(plan['is_screened']),
+        )
+
+        libovlp.quadrupole_gradient(
+            cast_to_pointer(result),
+            cast_to_pointer(pair_indices),
+            ctypes.c_int(n_pairs),
+            ctypes.c_int(plan['n_primitives']),
+            cast_to_pointer(plan['shell_to_ao']),
+            ctypes.c_int(plan['n_functions']),
+            cast_to_pointer(plan['atms']),
+            ctypes.c_int(plan['atms'][0].size),
+            cast_to_pointer(plan['bases']),
+            ctypes.c_int(plan['bases'][0].size),
+            cast_to_pointer(plan['envs']),
+            ctypes.c_int(plan['envs'][0].size),
+            ctypes.c_int(plan['n_configurations']),
+            ctypes.c_int(i_angular),
+            ctypes.c_int(j_angular),
+            ctypes.c_double(reference_point[0]),
+            ctypes.c_double(reference_point[1]),
+            ctypes.c_double(reference_point[2]),
+            ctypes.c_int(plan['is_screened']),
+        )
+
+    result -= result.transpose(0, 1, -1, -2)
+    result[:, [0, 13, 26]] -= 2 * dipole
+    result[:, [10, 1, 2]] -= dipole[:, :, :]
+    result[:, [20, 23, 14]] -= dipole[:, :, :]
+    result[:, [3, 6, 7, 12, 15, 16, 21, 24, 25]] = result[:, [1, 2, 5, 10, 11, 14, 19, 20, 23]]
+    result = (
+        result.reshape(plan['n_configurations'], 3, 9, plan['n_functions'], plan['n_functions'])
+        .transpose(0, 2, 1, 3, 4)
+        .reshape(plan['n_configurations'], 27, plan['n_functions'], plan['n_functions'])
+    )
 
     return result

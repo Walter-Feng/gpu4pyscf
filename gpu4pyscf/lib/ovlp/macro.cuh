@@ -43,7 +43,7 @@
     const int n_rows = bra_end - bra_begin;                                    \
     const int n_cols = ket_end - ket_begin;                                    \
     if constexpr (i_angular == j_angular) {                                    \
-      const float sqrt_target =                                                \
+      const double sqrt_target =                                               \
           (2 * n_cols + 1) * (2 * n_cols + 1) - 8 * pair_idx;                  \
       i_primitive = (int)floor((2 * n_cols - 1 - sqrt(sqrt_target)) / 2) + 1;  \
       j_primitive =                                                            \
