@@ -16,6 +16,9 @@ import cupy as cp
 import numpy as np
 
 import pyscf
+from pyscf import gto
+from pyscf.gto import Mole
+from pyscf.pbc.gto import Cell
 import pyscf.pbc.grad.rhf as cpu_rhf
 from pyscf import df, grad, gto, lib
 from pyscf.lib import logger
@@ -23,9 +26,12 @@ from pyscf.lib import logger
 from gpu4pyscf import scf
 from gpu4pyscf.gto.int3c1e import int1e_grids
 from gpu4pyscf.gto.int3c1e_ip import int1e_grids_ip1, int1e_grids_ip2
+from gpu4pyscf.pbc.dft.multigrid import eval_nucG
 from gpu4pyscf.lib import cupy_helper
 from gpu4pyscf.qmmm.pbc import mm_mole
-from gpu4pyscf.qmmm.pbc.tools import get_multipole_tensors_pg, get_multipole_tensors_pp
+from gpu4pyscf.qmmm.pbc.tools import get_multipole_tensors_pg, get_multipole_tensors_pp, estimate_error
+
+from gpu4pyscf.df.int3c2e_bdiv import contract_int3c2e_auxvec
 
 contract = cupy_helper.contract
 
@@ -93,7 +99,9 @@ def add_mm_charges(
         rcut_ewald=rcut_ewald,
         rcut_hcore=rcut_hcore,
         unit=unit,
+        qm_atom_charges=mol.atom_charges(),
     )
+
     return qmmm_for_scf(scf_method, mm_mol)
 
 
@@ -137,8 +145,25 @@ class QMMMSCF(QMMM):
     as_scanner = NotImplemented
 
     def __init__(self, method, mm_mol):
+        self.mol = None
         self.__dict__.update(method.__dict__)
+        self.dummy_mol = None
         self.mm_mol = mm_mol
+
+        if isinstance(self.mol, Cell):
+            lattice_vectors = self.mol.lattice_vectors()
+            cutoff = min(np.diag(lattice_vectors)) / 2
+            self.dummy_mol = mm_mole.create_mm_cell(
+                self.mol.atom_coords(),
+                self.mol.lattice_vectors(),
+                charges=self.mol.atom_charges(),
+                rcut_ewald=cutoff,
+                rcut_hcore=cutoff,
+                unit='Bohr',
+            )
+
+            self.dummy_mol.mesh = self.mm_mol.mesh
+
         self.s1r = None
         self.s1rr = None
         self.mm_ewald_pot = None
@@ -160,17 +185,6 @@ class QMMMSCF(QMMM):
                 logger.debug2(self, '%.9g    %s', z, coords[i])
         return self
 
-    def intor(self, intor_type, **kwargs):
-        if isinstance(self.mol, pyscf.pbc.gto.Cell):
-            if intor_type == 'int1e_ipovlp':
-                from gpu4pyscf.pbc.gto import int1e
-
-                return int1e.int1e_ipovlp(self.mol)[0]
-
-            return cp.asarray(self.mol.pbc_intor(intor_type, **kwargs))
-
-        return cp.asarray(self.mol.intor(intor_type, **kwargs))
-
     def get_mm_ewald_pot(self, mol, mm_mol):
         return self.mm_mol.get_ewald_potential_with_charges(
             mol.atom_coords(),
@@ -179,25 +193,15 @@ class QMMMSCF(QMMM):
             mm_mol.get_zetas(),
         )
 
-    def get_qm_ewald_pot(self, mol, dm, qm_ewald_hess=None, remove_core=False):
+    def get_qm_ewald_pot(self, mol, dm, qm_ewald_hess=None, subtract_fake_images=True):
         # hess = d^2 E / dQ_i dQ_j, d^2 E / dQ_i dD_ja, d^2 E / dDia dDjb, d^2 E/ dQ_i dO_jab
         if qm_ewald_hess is None:
             qm_ewald_hess = self.mm_mol.get_ewald_potential(mol.atom_coords())
 
-            if isinstance(mol, pyscf.pbc.gto.Cell):
-                lattice_vectors = mol.lattice_vectors()
-                cutoff = min(np.diag(lattice_vectors)) / 2
-                qm_mol = mm_mole.create_mm_cell(
-                    mol.atom_coords(),
-                    mol.lattice_vectors(),
-                    charges=mol.atom_charges(),
-                    rcut_ewald=cutoff,
-                    rcut_hcore=cutoff,
-                    unit='Bohr',
-                )
+            if self.dummy_mol and subtract_fake_images:
+                qm_ewald_hess_from_fake_images = self.dummy_mol.get_ewald_potential(self.dummy_mol.atom_coords())
 
-                qm_mol.mesh = self.mm_mol.mesh
-                qm_ewald_hess_from_fake_images = qm_mol.get_ewald_potential(qm_mol.atom_coords())
+                self.qm_eta, _ = self.dummy_mol.get_ewald_params()
 
                 n_terms = len(qm_ewald_hess)
                 assert len(qm_ewald_hess_from_fake_images) == n_terms
@@ -212,7 +216,7 @@ class QMMMSCF(QMMM):
             self.qm_ewald_hess = qm_ewald_hess
 
         dm = cp.asarray(dm)
-        charges = self.get_qm_charges(dm, remove_core)
+        charges = self.get_qm_charges(dm)
         dips = self.get_qm_dipoles(dm)
         quads = self.get_qm_quadrupoles(dm)
         ewpot0 = contract('ij,j->i', qm_ewald_hess[0], charges)
@@ -294,17 +298,23 @@ class QMMMSCF(QMMM):
         logger.timer(self, 'get_hcore', *cput0)
         return h1e
 
-    def get_qm_charges(self, dm, remove_core=False):
+    def get_ovlp(self, remove_periodicity=False):
+        if remove_periodicity:
+            return cp.asarray(self.mol.intor('int1e_ovlp'))
+        else:
+            return cp.asarray(self.mol.pbc_intor('int1e_ovlp'))
+
+    def get_qm_charges(self, dm):
         dm = cp.asarray(dm)
         aoslices = self.mol.aoslice_by_atom()
         chg = self.mol.atom_charges()
-        if remove_core:
-            chg *= 0
-        dmS = cp.dot(dm, cp.asarray(self.get_ovlp()))
+
+        dmS = cp.dot(dm, self.get_ovlp(remove_periodicity=True))
         qm_charges = list()
         for iatm in range(self.mol.natm):
             p0, p1 = aoslices[iatm, 2:]
             qm_charges.append(chg[iatm] - np.trace(dmS[p0:p1, p0:p1]))
+
         return cp.asarray(qm_charges)
 
     def get_s1r(self):
@@ -374,7 +384,7 @@ class QMMMSCF(QMMM):
                  + d O_Ixy / d dm_uv ewald_pot[2]_Ixy
         """
         vdiff = cp.zeros((mol.nao, mol.nao))
-        ovlp = self.get_ovlp()
+        ovlp = self.get_ovlp(remove_periodicity=True)
         s1r = self.get_s1r()
         s1rr = self.get_s1rr()
         aoslices = mol.aoslice_by_atom()
@@ -388,18 +398,6 @@ class QMMMSCF(QMMM):
             vdiff[:, p0:p1] -= contract('xy,xyuv->uv', v2, s1rr[iatm])
         vdiff = (vdiff + vdiff.T) / 2
         return vdiff
-
-    def get_j_simple(self, mol, dm, filter_order=None):
-        j_from_qm = super().get_j(mol, dm)
-
-        if self.qm_ewald_hess is not None:
-            qm_ewald_pot = self.get_qm_ewald_pot(mol, dm, self.qm_ewald_hess, remove_core=True)
-        else:
-            qm_ewald_pot = self.get_qm_ewald_pot(mol, dm, remove_core=True)
-
-        vdiff = self.get_vdiff(mol, qm_ewald_pot)
-
-        return j_from_qm + vdiff
 
     def get_veff(
         self,
@@ -472,14 +470,142 @@ class QMMMSCF(QMMM):
         if qm_ewald_pot is None:
             qm_ewald_pot = self.get_qm_ewald_pot(self.mol, dm, self.qm_ewald_hess)
         ewald_pot = mm_ewald_pot[0] + qm_ewald_pot[0] / 2
-        e = contract('i,i->', cp.asarray(ewald_pot), self.get_qm_charges(dm))
+        qm_charges = self.get_qm_charges(dm)
+        e = contract('i,i->', cp.asarray(ewald_pot), qm_charges)
         ewald_pot = mm_ewald_pot[1] + qm_ewald_pot[1] / 2
         e += contract('ix,ix->', cp.asarray(ewald_pot), self.get_qm_dipoles(dm))
         ewald_pot = mm_ewald_pot[2] + qm_ewald_pot[2] / 2
         e += contract('ixy,ixy->', cp.asarray(ewald_pot), self.get_qm_quadrupoles(dm))
+
+        eta, _ = self.mm_mol.get_ewald_params()
+        e += -0.5 * cp.sum(qm_charges) ** 2 * np.pi / (eta**2 * self.mm_mol.vol)
+        e += -1.0 * cp.sum(qm_charges) * np.sum(self.mm_mol.atom_charges()) * np.pi / (eta**2 * self.mm_mol.vol)
         # TODO add energy correction if sum(charges) !=0 ?
 
         return e
+
+    def qm_energy_cp2k(self, dm, n_gaussians_per_site=3, base_decay_lengths=0.5, gcut=np.sqrt(3)):
+        from gpu4pyscf.pbc.dft.multigrid_v2 import evaluate_density_on_g_mesh
+
+        cell = self.mol
+        numint = self._numint
+
+        Gv = cp.asarray(cell.get_Gv())
+        g = cp.linalg.norm(Gv, axis=-1)
+        zero_zone = g >= gcut
+        g_cutoff_squared = gcut**2
+        g_weight = 4 * cp.pi * (g**2 - g_cutoff_squared) ** 2 / (g**2 * g_cutoff_squared)
+        g_weight[zero_zone] = 0
+        g_weight[0] = 0
+
+        coords = cp.asarray(cell.atom_coords(unit='Bohr'))
+        charges = cell.atom_charges()
+        n_atoms = len(coords)
+        n_fitting_gaussians = n_atoms * n_gaussians_per_site
+
+        charge_density = evaluate_density_on_g_mesh(numint, dm).flatten()
+        for j in range(n_atoms):
+            phase = cp.exp(-1j * coords[j].dot(Gv.T))
+            charge_density -= charges[j] * phase
+
+        decay_lengths_squared = (base_decay_lengths * 1.5 ** -cp.arange(n_gaussians_per_site)) ** 2
+        exponents = 1 / decay_lengths_squared
+        coeffs = (cp.sqrt(cp.pi) * decay_lengths_squared) ** -1.5
+        gaussians = cp.exp(-(g[None, :] ** 2) / exponents[:, None] / 4)
+
+        gaussians_outer_product = gaussians[:, None, :] * gaussians[None, :, :]
+        Aij = cp.zeros((n_fitting_gaussians, n_fitting_gaussians))
+        bj = cp.zeros(n_fitting_gaussians)
+
+        for j in range(n_atoms):
+            weighted_phase = cp.exp(-1j * coords[j].dot(Gv.T)) * g_weight
+            j_begin = n_gaussians_per_site * j
+            j_end = n_gaussians_per_site * (j + 1)
+            bj[j_begin:j_end] = cp.sum(cp.real(charge_density.conj() * gaussians * weighted_phase), axis=-1)
+            for i in range(n_atoms):
+                phase_diff = weighted_phase * cp.exp(1j * coords[i].dot(Gv.T))
+                i_begin = n_gaussians_per_site * i
+                i_end = n_gaussians_per_site * (i + 1)
+                Aij[i_begin:i_end, j_begin:j_end] = cp.einsum('g, ijg -> ij', phase_diff, gaussians_outer_product).real
+
+        A_inv = cp.linalg.inv(Aij)
+        N = charge_density[0].real
+
+        qi = A_inv.dot(bj - (cp.sum(A_inv.dot(bj)) - N) / cp.sum(A_inv))
+        resolved_atom_charges = qi.reshape(n_gaussians_per_site, -1).sum(axis=0).get()
+
+        dummy_atoms = [['He', *r] for r in cell.atom_coords(unit='Bohr')]
+        dummy_basis = [[0, [exponent / 2, np.sqrt(coeff)]] for exponent, coeff in zip(exponents.get(), coeffs.get())]
+        dummy_mol = Mole(atom=dummy_atoms, basis=dummy_basis, pseudo='gth-pbe', unit='Bohr')
+        dummy_cell = Cell(atom=dummy_atoms, a=cell.lattice_vectors(), basis=dummy_basis, pseudo='gth-pbe', unit='Bohr')
+
+        def pass_atomic_charges():
+            condensed_qi = qi.reshape(-1, n_gaussians_per_site).sum(axis=1)
+            return condensed_qi.get()
+
+        dummy_cell.build()
+        e2 = -dummy_cell.energy_nuc(charges=pass_atomic_charges())
+        e3 = gto.energy_nuc(cell, charges=pass_atomic_charges())
+        stacked_decay_lengths_squared = cp.tile(decay_lengths_squared, len(coords))
+        dummy_eri = stacked_decay_lengths_squared[:, None] + stacked_decay_lengths_squared[None, :]
+        e4 = -np.pi / 2 / cell.vol * cp.einsum('i, ij, j ->', qi, dummy_eri, qi)
+        return -(e2 + e3 + e4)
+
+    def qm_energy_ewald(self, dm=None, subtract_fake_images=True):
+        # QM-QM and QM-MM pbc correction
+        if dm is None:
+            dm = self.make_rdm1()
+        else:
+            dm = cp.asarray(dm)
+
+        qm_ewald_pot = self.get_qm_ewald_pot(self.mol, dm, subtract_fake_images=subtract_fake_images)
+
+        ewald_pot = qm_ewald_pot[0] / 2
+        qm_charges = self.get_qm_charges(dm)
+        e = contract('i,i->', cp.asarray(ewald_pot), qm_charges)
+        ewald_pot = qm_ewald_pot[1] / 2
+        e += contract('ix,ix->', cp.asarray(ewald_pot), self.get_qm_dipoles(dm))
+        ewald_pot = qm_ewald_pot[2] / 2
+        e += contract('ixy,ixy->', cp.asarray(ewald_pot), self.get_qm_quadrupoles(dm))
+
+        return e
+
+    def qm_energy_bundle(self, dm=None):
+        return self.qm_energy_fft(dm), self.qm_energy_ewald(dm, subtract_fake_images=False), self.qm_energy_cp2k(dm)
+
+    def qm_energy_fft(self, dm=None):
+        if dm is None:
+            dm = self.make_rdm1()
+        else:
+            dm = cp.asarray(dm)
+
+        pbc_nuc = self._numint.get_nuc()
+        pbc_coul = self._numint.get_j(dm)
+
+        pbc_total_electrostatics = cp.einsum('kij, ij ->', (pbc_nuc + 0.5 * pbc_coul), dm) + self.mol.energy_nuc()
+
+        mol = Mole(
+            atom=self.mol._atom,
+            charge=self.mol.charge,
+            spin=self.mol.spin,
+            basis=self.mol.basis,
+            pseudo=self.mol.pseudo,
+            unit='bohr',
+        )
+        mol.build()
+
+        from gpu4pyscf.df.int3c2e_bdiv import contract_int3c2e_auxvec
+        from pyscf import gto
+        from gpu4pyscf.dft import RKS as mol_rks
+
+        mol_mf = mol_rks(mol)
+        nucmol = gto.mole.fakemol_for_charges(mol.atom_coords())
+        mol_nuc = contract_int3c2e_auxvec(mol, nucmol, -mol.atom_charges())
+        mol_coul = mol_mf.get_j(mol, dm)
+
+        mol_total_electrostatics = cp.einsum('ij, ij ->', mol_nuc + 0.5 * mol_coul, dm) + mol.energy_nuc()
+
+        return pbc_total_electrostatics - mol_total_electrostatics
 
     def energy_nuc(self):
         if self.e_nuc is not None:
@@ -487,10 +613,6 @@ class QMMMSCF(QMMM):
         else:
             cput0 = (logger.process_clock(), logger.perf_counter())
             from scipy.special import erf
-
-            # gas phase nuc energy
-            if isinstance(self.mol, pyscf.pbc.gto.Cell):
-                nuc = pyscf.gto.mole.energy_nuc(self.mol)
 
             nuc = self.mol.energy_nuc()
 
@@ -521,12 +643,25 @@ class QMMMSCF(QMMM):
             self.e_nuc = nuc
             return nuc
 
-    def energy_tot(self, dm=None, h1e=None, vhf=None, mm_ewald_pot=None, qm_ewald_pot=None):
+    def energy_tot(self, dm=None, h1e=None, vhf=None, mm_ewald_pot=None, qm_ewald_pot=None, add_estimate_error=False):
         nuc = self.energy_nuc()
         ewald = self.energy_ewald(dm=dm, mm_ewald_pot=mm_ewald_pot, qm_ewald_pot=qm_ewald_pot)
         e_tot = self.energy_elec(dm, h1e, vhf)[0] + nuc + ewald
         self.scf_summary['nuc'] = nuc.real
         self.scf_summary['ewald'] = ewald
+
+        if add_estimate_error:
+            lattice_vectors = self.mol.lattice_vectors()
+            cutoff = max(np.diag(lattice_vectors)) / 2
+            qm_charges = self.get_qm_charges(dm)
+            e_octupole = estimate_error(
+                self.mol, self.mol.atom_coords(), lattice_vectors, qm_charges, cutoff, dm, 1e-6, 'bohr'
+            )
+
+            self.estimated_octupole = e_octupole
+            print('{}  << octupole'.format(self.estimated_octupole))
+            e_tot += e_octupole
+
         return e_tot
 
     def nuc_grad_method(self):
@@ -728,8 +863,7 @@ class QMMMGrad:
         dEds = cp.zeros((mol.nao, mol.nao))
         dEdsr = cp.zeros((3, mol.nao, mol.nao))
         dEdsrr = cp.zeros((3, 3, mol.nao, mol.nao))
-        # s1 = cp.asarray(self.get_ovlp(mol)) # = -mol.intor('int1e_ipovlp')
-        s1 = -self.base.intor('int1e_ipovlp')
+        s1 = -cp.asarray(mol.intor('int1e_ipovlp'))
 
         s1r = list()
         s1rr = list()
@@ -818,7 +952,6 @@ class QMMMGrad:
         all_mm_charges = cp.hstack([mm_charges] * len(Lall))
         dist2 = all_mm_coords - cp.mean(qm_coords, axis=0)[None]
         dist2 = contract('jx,jx->j', dist2, dist2)
-
         mm_ewovrl_grad = None
         if with_mm:
             mm_ewovrl_grad = np.zeros_like(all_mm_coords)
@@ -1002,19 +1135,8 @@ class QMMMGrad:
         mm_to_qm, qm_to_mm = self.grad_ewald_real_space_mm_to_qm(dm, with_mm)
 
         qm_to_qm = self.grad_ewald_real_space_qm_to_qm(self.base.mm_mol, dm)
-        if isinstance(self.base.mol, pyscf.pbc.gto.Cell):
-            lattice_vectors = self.base.mol.lattice_vectors()
-            cutoff = min(np.diag(lattice_vectors)) / 2
-            qm_mol = mm_mole.create_mm_cell(
-                self.base.mol.atom_coords(),
-                lattice_vectors,
-                charges=self.base.mol.atom_charges(),
-                rcut_ewald=cutoff,
-                rcut_hcore=cutoff,
-                unit='Bohr',
-            )
-
-            qm_to_qm -= self.grad_ewald_real_space_qm_to_qm(qm_mol, dm)
+        if self.base.dummy_mol:
+            qm_to_qm -= self.grad_ewald_real_space_qm_to_qm(self.base.dummy_mol, dm)
 
         return qm_to_qm + mm_to_qm, qm_to_mm
 
@@ -1291,19 +1413,8 @@ class QMMMGrad:
         mm_to_qm, qm_to_mm = self.grad_ewald_k_space_mm_to_qm(dm, with_mm)
 
         qm_to_qm = self.grad_ewald_k_space_qm_to_qm(self.base.mm_mol, dm)
-        if isinstance(self.base.mol, pyscf.pbc.gto.Cell):
-            lattice_vectors = self.base.mol.lattice_vectors()
-            cutoff = min(np.diag(lattice_vectors)) / 2
-            qm_mol = mm_mole.create_mm_cell(
-                self.base.mol.atom_coords(),
-                lattice_vectors,
-                charges=self.base.mol.atom_charges(),
-                rcut_ewald=cutoff,
-                rcut_hcore=cutoff,
-                unit='Bohr',
-            )
-
-            qm_to_qm -= self.grad_ewald_k_space_qm_to_qm(qm_mol, dm)
+        if self.base.dummy_mol:
+            qm_to_qm -= self.grad_ewald_k_space_qm_to_qm(self.base.dumy_mol, dm)
 
         return qm_to_qm + mm_to_qm, qm_to_mm
 
@@ -1462,7 +1573,7 @@ class QMMMGrad:
         g_ewald_qm, self.de_ewald_mm = self.grad_ewald(with_mm=True)
         self.de += g_ewald_qm
 
-        if isinstance(self.base.mol, pyscf.pbc.gto.Cell):
+        if self.base.dummy_mol:
             dm = self.base.make_rdm1()
             g_hcore_mm = 2 * cpu_rhf._contract_vhf_dm(self, self.contract_hcore_mm().get(), dm.get())
 

@@ -23,15 +23,15 @@ from scipy.special import lambertw
 
 from gpu4pyscf.df.df import ALIGNED, MIN_BLK_SIZE
 from gpu4pyscf.lib import cupy_helper
-from gpu4pyscf.qmmm.pbc.tools import (get_multipole_tensors_pg,
-                                      get_multipole_tensors_pp)
+from gpu4pyscf.qmmm.pbc.tools import get_multipole_tensors_pg, get_multipole_tensors_pp
 from pyscf import gto, lib, pbc, qmmm
 from pyscf.lib import logger, param
 
 contract = cupy_helper.contract
 
+
 class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
-    '''Cell class for MM particles.
+    """Cell class for MM particles.
 
     Args:
         atoms : geometry of MM particles (unit Bohr).
@@ -55,12 +55,11 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
             Gaussian charge distribution parameter.
             rho(r) = charge * Norm * exp(-zeta * r^2)
 
-    '''
+    """
+
     set_geom_ = NotImplemented
 
-    def __init__(self, atoms, a,
-            rcut_ewald=None, rcut_hcore=None,
-            charges=None, zeta=None):
+    def __init__(self, atoms, a, rcut_ewald=None, rcut_hcore=None, charges=None, zeta=None, qm_atom_charges=None):
         pbc.gto.Cell.__init__(self)
         self.atom = self._atom = atoms
         self.unit = 'Bohr'
@@ -69,57 +68,66 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         self.a = a
         if rcut_ewald is None:
             rcut_ewald = min(numpy.diag(a)) * 0.5
-            logger.warn(self, "Setting rcut_ewald to be half box size")
+            # logger.warn(self, 'Setting rcut_ewald to be half box size')
         if rcut_hcore is None:
             rcut_hcore = numpy.linalg.norm(numpy.diag(a)) / 2
-            logger.warn(self, "Setting rcut_hcore to be half box diagonal")
+            # logger.warn(self, 'Setting rcut_hcore to be half box diagonal')
         # rcut_ewald has to be < box size cuz my get_lattice_Ls only considers nearest cell
-        assert rcut_ewald < min(numpy.diag(a)), "Only rcut_ewald < box size implemented"
+        assert rcut_ewald < min(numpy.diag(a)), 'Only rcut_ewald < box size implemented'
         self.rcut_ewald = rcut_ewald
         self.rcut_hcore = rcut_hcore
+
+        self.qm_atom_charges_norm_squared = 0
+        if qm_atom_charges is not None:
+            self.qm_atom_charges_norm_squared += numpy.sum(qm_atom_charges**2)
 
         # Initialize ._atm and ._env to save the coordinates and charges and
         # other info of MM particles
         natm = len(atoms)
-        _atm = numpy.zeros((natm,6), dtype=numpy.int32)
-        _atm[:,gto.CHARGE_OF] = [charge(a[0]) for a in atoms]
+        _atm = numpy.zeros((natm, 6), dtype=numpy.int32)
+        _atm[:, gto.CHARGE_OF] = [charge(a[0]) for a in atoms]
         coords = numpy.asarray([a[1] for a in atoms], dtype=numpy.double)
         if charges is None:
-            _atm[:,gto.NUC_MOD_OF] = gto.NUC_POINT
-            charges = _atm[:,gto.CHARGE_OF:gto.CHARGE_OF+1]
+            _atm[:, gto.NUC_MOD_OF] = gto.NUC_POINT
+            charges = _atm[:, gto.CHARGE_OF : gto.CHARGE_OF + 1]
         else:
-            _atm[:,gto.NUC_MOD_OF] = gto.NUC_FRAC_CHARGE
-            charges = numpy.asarray(charges)[:,numpy.newaxis]
+            _atm[:, gto.NUC_MOD_OF] = gto.NUC_FRAC_CHARGE
+            charges = numpy.asarray(charges)[:, numpy.newaxis]
 
-        self._env = numpy.append(numpy.zeros(gto.PTR_ENV_START),
-                                 numpy.hstack((coords, charges)).ravel())
-        _atm[:,gto.PTR_COORD] = gto.PTR_ENV_START + numpy.arange(natm) * 4
-        _atm[:,gto.PTR_FRAC_CHARGE] = gto.PTR_ENV_START + numpy.arange(natm) * 4 + 3
+        self._env = numpy.append(numpy.zeros(gto.PTR_ENV_START), numpy.hstack((coords, charges)).ravel())
+        _atm[:, gto.PTR_COORD] = gto.PTR_ENV_START + numpy.arange(natm) * 4
+        _atm[:, gto.PTR_FRAC_CHARGE] = gto.PTR_ENV_START + numpy.arange(natm) * 4 + 3
 
         if zeta is not None:
             self.charge_model = 'gaussian'
             zeta = numpy.asarray(zeta, dtype=float).ravel()
             self._env = numpy.append(self._env, zeta)
-            _atm[:,gto.PTR_ZETA] = gto.PTR_ENV_START + natm*4 + numpy.arange(natm)
+            _atm[:, gto.PTR_ZETA] = gto.PTR_ENV_START + natm * 4 + numpy.arange(natm)
 
         self._atm = _atm
 
         eta, _ = self.get_ewald_params()
         e = self.precision
-        Q = numpy.sum(self.atom_charges()**2)
-        L = self.vol**(1/3)
-        kmax = numpy.sqrt(3)*eta/2/numpy.pi * numpy.sqrt(lambertw( 4*Q**(2/3)/3/numpy.pi**(2/3)/L**2/eta**(2/3) / e**(4/3) ).real)
+        Q = numpy.sum(self.atom_charges() ** 2)
+        Q += self.qm_atom_charges_norm_squared
+        L = self.vol ** (1 / 3)
+        kmax = (
+            numpy.sqrt(3)
+            * eta
+            / 2
+            / numpy.pi
+            * numpy.sqrt(
+                lambertw(4 * Q ** (2 / 3) / 3 / numpy.pi ** (2 / 3) / L**2 / eta ** (2 / 3) / e ** (4 / 3)).real
+            )
+        )
         self.mesh = numpy.ceil(numpy.diag(self.lattice_vectors()) * kmax).astype(int) * 2 + 1
 
         self._built = True
 
     def get_lattice_Ls(self):
-        Ts = lib.cartesian_prod((numpy.arange(-1, 2),
-                                 numpy.arange(-1, 2),
-                                 numpy.arange(-1, 2)))
+        Ts = lib.cartesian_prod((numpy.arange(-1, 2), numpy.arange(-1, 2), numpy.arange(-1, 2)))
         Lall = numpy.dot(Ts, self.lattice_vectors())
         return Lall
-
 
     def get_ewald_params(self, precision=None, rcut=None):
         if rcut is None:
@@ -129,11 +137,13 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         if precision is None:
             precision = self.precision
         e = precision
-        Q = numpy.sum(self.atom_charges()**2)
-        ew_eta = 1 / ew_cut * numpy.sqrt(lambertw(1/e*numpy.sqrt(Q/2/self.vol)).real)
+        Q = numpy.sum(self.atom_charges() ** 2) + self.qm_atom_charges_norm_squared
+        ew_eta = (
+            1 / ew_cut * numpy.sqrt(1.5 * lambertw(2 / 3 * (4 / e * Q / ew_cut / self.vol) ** (2 / 3) * ew_cut**2).real)
+        )
         return ew_eta, ew_cut
 
-    def get_ewald_potential_with_charges(self, coords1, coords2, charges2, zetas2, remove_neighboring_charges = True):
+    def get_ewald_potential_with_charges(self, coords1, coords2, charges2, zetas2, remove_neighboring_charges=True):
         coords1 = cp.asarray(coords1)
         coords2 = cp.asarray(coords2)
 
@@ -144,12 +154,12 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         ew_eta, ew_cut = self.get_ewald_params()
         mesh = self.mesh
 
-        logger.debug(self, f"Ewald exponent {ew_eta}")
+        logger.debug(self, f'Ewald exponent {ew_eta}')
 
         # TODO Lall should respect ew_rcut
         Lall = cp.asarray(self.get_lattice_Ls())
 
-        all_coords2 = (coords2[None,:,:] - Lall[:,None,:]).reshape(-1,3)
+        all_coords2 = (coords2[None, :, :] - Lall[:, None, :]).reshape(-1, 3)
         all_coords2 = cp.asarray(all_coords2)
         all_charges2 = cp.hstack([charges2] * len(Lall))
         dist2 = all_coords2 - cp.mean(coords1, axis=0)[None]
@@ -158,21 +168,21 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         ewovrl0 = cp.zeros(len(coords1))
         ewovrl1 = cp.zeros((len(coords1), 3))
         ewovrl2 = cp.zeros((len(coords1), 3, 3))
-      
+
         mem_avail = cupy_helper.get_avail_mem()
-        blksize = int(mem_avail/64/3/len(all_coords2))
+        blksize = int(mem_avail / 64 / 3 / len(all_coords2))
         if blksize == 0:
-            raise RuntimeError(f"Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}")
+            raise RuntimeError(f'Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}')
         for i0, i1 in lib.prange(0, len(coords1), blksize):
-            R = coords1[i0:i1,None,:] - all_coords2[None,:,:]
+            R = coords1[i0:i1, None, :] - all_coords2[None, :, :]
             r = cp.linalg.norm(R, axis=-1)
-            r[r<1e-16] = 1e100
+            r[r < 1e-16] = 1e100
             rmax_qm = max(cp.linalg.norm(coords1 - cp.mean(coords1, axis=0), axis=-1))
 
             # substract the real-space Coulomb within rcut_hcore
             if remove_neighboring_charges:
                 mask = dist2 <= self.rcut_hcore**2
-                Tij, Tija, Tijab = get_multipole_tensors_pp(R[:,mask], [0,1,2], r[:,mask])
+                Tij, Tija, Tijab = get_multipole_tensors_pp(R[:, mask], [0, 1, 2], r[:, mask])
                 charges = all_charges2[mask]
                 # ew0 = -d^2 E / dQi dqj qj
                 # ew1 = -d^2 E / dDia dqj qj
@@ -185,29 +195,29 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
                 ewovrl2[i0:i1] += -contract('j,ijab->iab', charges, Tijab) / 3
                 mask = dist2 > self.rcut_hcore**2
             else:
-                mask = dist2 > 0 
+                mask = dist2 > 0
             zetas = cp.asarray(zetas2)
             min_expnt = cp.min(zetas)
-            max_ewrcut = pbc.gto.cell._estimate_rcut(min_expnt, 0, 1., self.precision)
-            cut2 = (max_ewrcut + rmax_qm)**2
+            max_ewrcut = pbc.gto.cell._estimate_rcut(min_expnt, 0, 1.0, self.precision)
+            cut2 = (max_ewrcut + rmax_qm) ** 2
             mask = mask & (dist2 <= cut2)
             expnts = cp.hstack([cp.sqrt(zetas)] * len(Lall))[mask]
-            r_ = r[:,mask]
-            R_ = R[:,mask]
+            r_ = r[:, mask]
+            R_ = R[:, mask]
             if expnts.size != 0:
-                Tij, Tija, Tijab = get_multipole_tensors_pg(R_, expnts, [0,1,2], r_)
+                Tij, Tija, Tijab = get_multipole_tensors_pg(R_, expnts, [0, 1, 2], r_)
                 ewovrl0[i0:i1] -= contract('ij,j->i', Tij, all_charges2[mask])
                 ewovrl1[i0:i1] -= contract('j,ija->ia', all_charges2[mask], Tija)
                 ewovrl2[i0:i1] -= contract('j,ijab->iab', all_charges2[mask], Tijab) / 3
 
             # ewald real-space sum
-            cut2 = (ew_cut + rmax_qm)**2
+            cut2 = (ew_cut + rmax_qm) ** 2
             mask = dist2 <= cut2
-            r_ = r[:,mask]
-            R_ = R[:,mask]
+            r_ = r[:, mask]
+            R_ = R[:, mask]
             all_charges2_ = all_charges2[mask]
-            
-            Tij, Tija, Tijab = get_multipole_tensors_pg(R_, ew_eta, [0,1,2], r_)
+
+            Tij, Tija, Tijab = get_multipole_tensors_pg(R_, ew_eta, [0, 1, 2], r_)
 
             ewovrl0[i0:i1] += contract('ij,j->i', Tij, all_charges2_)
             ewovrl1[i0:i1] += contract('j,ija->ia', all_charges2_, Tija)
@@ -220,17 +230,17 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         R = r = dist2 = all_charges2 = mask = None
 
         # g-space sum (using g grid)
-        logger.debug(self, f"Ewald mesh {mesh}")
+        logger.debug(self, f'Ewald mesh {mesh}')
 
         Gv, Gvbase, weights = self.get_Gv_weights(mesh)
         Gv = cp.asarray(Gv)
         absG2 = contract('gx,gx->g', Gv, Gv)
-        absG2[absG2==0] = 1e200
+        absG2[absG2 == 0] = 1e200
 
-        coulG = 4*cp.pi / absG2
+        coulG = 4 * cp.pi / absG2
         coulG *= weights
         # NOTE Gpref is actually Gpref*2
-        Gpref = cp.exp(-absG2/(4*ew_eta**2)) * coulG
+        Gpref = cp.exp(-absG2 / (4 * ew_eta**2)) * coulG
 
         GvR2 = contract('gx,ix->ig', Gv, coords2)
         cosGvR2 = cp.cos(GvR2)
@@ -239,44 +249,43 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         GvR1 = contract('gx,ix->ig', Gv, coords1)
         cosGvR1 = cp.cos(GvR1)
         sinGvR1 = cp.sin(GvR1)
-        zcosGvR2 = contract("i,ig->g", charges2, cosGvR2)
-        zsinGvR2 = contract("i,ig->g", charges2, sinGvR2)
+        zcosGvR2 = contract('i,ig->g', charges2, cosGvR2)
+        zsinGvR2 = contract('i,ig->g', charges2, sinGvR2)
         # qm pc - mm pc
-        ewg0  = contract('ig,g->i', cosGvR1, zcosGvR2 * Gpref)
+        ewg0 = contract('ig,g->i', cosGvR1, zcosGvR2 * Gpref)
         ewg0 += contract('ig,g->i', sinGvR1, zsinGvR2 * Gpref)
         # qm dip - mm pc
-        #p = ['einsum_path', (2, 3), (0, 2), (0, 1)]
-        #ewg1  = contract('gx,ig,g,g->ix', Gv, cosGvR1, zsinGvR2, Gpref, optimize=p)
-        #ewg1 -= contract('gx,ig,g,g->ix', Gv, sinGvR1, zcosGvR2, Gpref, optimize=p)
-        tempGsR2  = contract('gx,g->gx', Gv, zsinGvR2 * Gpref)
-        ewg1  = contract('gx,ig->ix', tempGsR2, cosGvR1)
-        tempGcR2  = contract('gx,g->gx', Gv, zcosGvR2 * Gpref)
+        # p = ['einsum_path', (2, 3), (0, 2), (0, 1)]
+        # ewg1  = contract('gx,ig,g,g->ix', Gv, cosGvR1, zsinGvR2, Gpref, optimize=p)
+        # ewg1 -= contract('gx,ig,g,g->ix', Gv, sinGvR1, zcosGvR2, Gpref, optimize=p)
+        tempGsR2 = contract('gx,g->gx', Gv, zsinGvR2 * Gpref)
+        ewg1 = contract('gx,ig->ix', tempGsR2, cosGvR1)
+        tempGcR2 = contract('gx,g->gx', Gv, zcosGvR2 * Gpref)
         ewg1 -= contract('gx,ig->ix', tempGcR2, sinGvR1)
         # qm quad - mm pc
-        #p = ['einsum_path', (3, 4), (0, 3), (0, 2), (0, 1)]
-        #ewg2  = -contract('gx,gy,ig,g,g->ixy', Gv, Gv, cosGvR1, zcosGvR2, Gpref, optimize=p)
-        #ewg2 += -contract('gx,gy,ig,g,g->ixy', Gv, Gv, sinGvR1, zsinGvR2, Gpref, optimize=p)
-        temp  =  contract('gx,gy->gxy', tempGcR2, Gv)
-        ewg2  = -contract('gxy,ig->ixy', temp, cosGvR1)
-        temp  =  contract('gx,gy->gxy', tempGsR2, Gv)
+        # p = ['einsum_path', (3, 4), (0, 3), (0, 2), (0, 1)]
+        # ewg2  = -contract('gx,gy,ig,g,g->ixy', Gv, Gv, cosGvR1, zcosGvR2, Gpref, optimize=p)
+        # ewg2 += -contract('gx,gy,ig,g,g->ixy', Gv, Gv, sinGvR1, zsinGvR2, Gpref, optimize=p)
+        temp = contract('gx,gy->gxy', tempGcR2, Gv)
+        ewg2 = -contract('gxy,ig->ixy', temp, cosGvR1)
+        temp = contract('gx,gy->gxy', tempGsR2, Gv)
         ewg2 += -contract('gxy,ig->ixy', temp, sinGvR1)
         ewg2 /= 3
-        
+
         temp = tempGcR2 = tempGsR2 = temp1 = temp2 = None
 
         return ewovrl0 + ewg0, ewovrl1 + ewg1, ewovrl2 + ewg2
 
-    def get_ewald_potential(self, coords, images = None):
-
-        #TODO: adapt to inputs of two sets of coordinates, but without charges.
-        #original code kind of mixed coords1 and coords2.
+    def get_ewald_potential(self, coords, images=None):
+        # TODO: adapt to inputs of two sets of coordinates, but without charges.
+        # original code kind of mixed coords1 and coords2.
         assert self.dimension == 3
         coords1 = cp.asarray(coords)
 
         ew_eta, ew_cut = self.get_ewald_params()
         mesh = self.mesh
 
-        logger.debug(self, f"Ewald exponent {ew_eta}")
+        logger.debug(self, f'Ewald exponent {ew_eta}')
 
         if images is None:
             images = self.get_lattice_Ls()
@@ -284,7 +293,7 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         images = cp.asarray(images)
         n_images = len(images)
 
-        coords_in_images = (coords1[None,:,:] - images[:,None,:]).reshape(-1,3)
+        coords_in_images = (coords1[None, :, :] - images[:, None, :]).reshape(-1, 3)
         all_coords2 = cp.asarray(coords_in_images)
 
         dist2 = all_coords2 - cp.mean(coords1, axis=0)[None]
@@ -302,46 +311,43 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         ewself02 = cp.zeros(matrix_shape + (3, 3))
 
         mem_avail = cupy_helper.get_avail_mem()
-        blksize = int(mem_avail/64/3/len(all_coords2))
+        blksize = int(mem_avail / 64 / 3 / len(all_coords2))
         if blksize == 0:
-            raise RuntimeError(f"Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}")
+            raise RuntimeError(f'Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}')
         for i0, i1 in lib.prange(0, len(coords1), blksize):
-
-            # substract the real-space Coulombwithin reference cell 
+            # substract the real-space Coulombwithin reference cell
             displacement_within_reference = coords1[i0:i1, None, :] - coords1[None, :, :]
             distance_within_reference = cp.linalg.norm(displacement_within_reference, axis=-1)
             zeros = distance_within_reference < 1e-16
             distance_within_reference[zeros] = 1e100
 
-            Tij, Tija, Tijab = get_multipole_tensors_pp(displacement_within_reference, 
-                                                        [0,1,2], 
-                                                        distance_within_reference)
+            Tij, Tija, Tijab = get_multipole_tensors_pp(
+                displacement_within_reference, [0, 1, 2], distance_within_reference
+            )
 
-        
             # NOTE a too small rcut_hcore truncates QM atoms, while this correction
             # should be applied to all QM pairs regardless of rcut_hcore
             # NOTE this is now checked in get_hcore
-            #assert r[:,mask].shape[0] == r[:,mask].shape[1]   # real-space should not see qm images
+            # assert r[:,mask].shape[0] == r[:,mask].shape[1]   # real-space should not see qm images
             # ew00 = -d^2 E / dQi dQj
             # ew01 = -d^2 E / dQi dDja
             # ew11 = -d^2 E / dDia dDjb
             # ew02 = -d^2 E / dQi dOjab
             ewovrl00[i0:i1] += -Tij
-            ewovrl01[i0:i1] +=  Tija
-            ewovrl11[i0:i1] +=  Tijab
+            ewovrl01[i0:i1] += Tija
+            ewovrl11[i0:i1] += Tijab
             ewovrl02[i0:i1] += -Tijab / 3
 
             # difference between MM gaussain charges and MM point charges
-            R = coords1[i0:i1,None,:] - all_coords2[None,:,:]
+            R = coords1[i0:i1, None, :] - all_coords2[None, :, :]
             r = cp.linalg.norm(R, axis=-1)
-            r[r<1e-16] = 1e100
+            r[r < 1e-16] = 1e100
 
-            Tij, Tija, Tijab = get_multipole_tensors_pg(R, ew_eta, [0,1,2], r)
+            Tij, Tija, Tijab = get_multipole_tensors_pg(R, ew_eta, [0, 1, 2], r)
 
-        
-            Tij = cp.sum(Tij.reshape(i1-i0, n_images, n_atoms), axis=1)
-            Tija = cp.sum(Tija.reshape(i1-i0, n_images, n_atoms, 3), axis=1)
-            Tijab = cp.sum(Tijab.reshape(i1-i0, n_images, n_atoms, 3, 3), axis=1)
+            Tij = cp.sum(Tij.reshape(i1 - i0, n_images, n_atoms), axis=1)
+            Tija = cp.sum(Tija.reshape(i1 - i0, n_images, n_atoms, 3), axis=1)
+            Tijab = cp.sum(Tijab.reshape(i1 - i0, n_images, n_atoms, 3, 3), axis=1)
             ewovrl00[i0:i1] += Tij
             ewovrl01[i0:i1] -= Tija
             ewovrl11[i0:i1] -= Tijab
@@ -353,69 +359,71 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
             # -d^2 Eself / dQi dQj
             ewself00[i0:i1] += -cp.eye(len(coords1))[i0:i1] * 2 * ew_eta / cp.sqrt(cp.pi)
             # -d^2 Eself / dDia dDjb
-            ewself11[i0:i1] += -contract('ij,ab->ijab', cp.eye(len(coords1))[i0:i1], cp.eye(3)) \
-                    * 4 * ew_eta**3 / 3 / cp.sqrt(cp.pi)
-
+            ewself11[i0:i1] += (
+                -contract('ij,ab->ijab', cp.eye(len(coords1))[i0:i1], cp.eye(3)) * 4 * ew_eta**3 / 3 / cp.sqrt(cp.pi)
+            )
 
         R = r = dist2 = all_charges2 = mask = None
 
         # g-space sum (using g grid)
-        logger.debug(self, f"Ewald mesh {mesh}")
+        logger.debug(self, f'Ewald mesh {mesh}')
 
         Gv, Gvbase, weights = self.get_Gv_weights(mesh)
         Gv = cp.asarray(Gv)
         absG2 = contract('gx,gx->g', Gv, Gv)
-        absG2[absG2==0] = 1e200
+        absG2[absG2 == 0] = 1e200
 
-        coulG = 4*cp.pi / absG2
+        coulG = 4 * cp.pi / absG2
         coulG *= weights
         # NOTE Gpref is actually Gpref*2
-        Gpref = cp.exp(-absG2/(4*ew_eta**2)) * coulG
+        Gpref = cp.exp(-absG2 / (4 * ew_eta**2)) * coulG
 
         GvR2 = contract('gx,ix->ig', Gv, coords1)
         cosGvR2 = cp.cos(GvR2)
         sinGvR2 = cp.sin(GvR2)
 
-       
         # qm pc - qm pc
-        #ewg00  = contract('ig,jg,g->ij', cosGvR2, cosGvR2, Gpref)
-        #ewg00 += contract('ig,jg,g->ij', sinGvR2, sinGvR2, Gpref)
-        temp   = contract('ig,g->ig', cosGvR2, Gpref)
-        ewg00  = contract('ig,jg->ij', temp, cosGvR2)
-        temp   = contract('ig,g->ig', sinGvR2, Gpref)
+        # ewg00  = contract('ig,jg,g->ij', cosGvR2, cosGvR2, Gpref)
+        # ewg00 += contract('ig,jg,g->ij', sinGvR2, sinGvR2, Gpref)
+        temp = contract('ig,g->ig', cosGvR2, Gpref)
+        ewg00 = contract('ig,jg->ij', temp, cosGvR2)
+        temp = contract('ig,g->ig', sinGvR2, Gpref)
         ewg00 += contract('ig,jg->ij', temp, sinGvR2)
         # qm pc - qm dip
-        #ewg01  = contract('gx,ig,jg,g->ijx', Gv, sinGvR2, cosGvR2, Gpref)
-        #ewg01 -= contract('gx,ig,jg,g->ijx', Gv, cosGvR2, sinGvR2, Gpref)
-        temp1   = contract('gx,g->gx', Gv, Gpref)
-        temp   = contract('gx,ig->igx', temp1, sinGvR2)
-        ewg01  = contract('igx,jg->ijx', temp, cosGvR2)
-        temp   = contract('gx,ig->igx', temp1, cosGvR2)
+        # ewg01  = contract('gx,ig,jg,g->ijx', Gv, sinGvR2, cosGvR2, Gpref)
+        # ewg01 -= contract('gx,ig,jg,g->ijx', Gv, cosGvR2, sinGvR2, Gpref)
+        temp1 = contract('gx,g->gx', Gv, Gpref)
+        temp = contract('gx,ig->igx', temp1, sinGvR2)
+        ewg01 = contract('igx,jg->ijx', temp, cosGvR2)
+        temp = contract('gx,ig->igx', temp1, cosGvR2)
         ewg01 -= contract('igx,jg->ijx', temp, sinGvR2)
         # qm dip - qm dip
-        #ewg11  = contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, cosGvR2, cosGvR2, Gpref)
-        #ewg11 += contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, sinGvR2, sinGvR2, Gpref)
-        temp2   = contract('gx,gy->gxy', temp1, Gv)
-        temp   = contract('gxy,ig->igxy', temp2, cosGvR2)
-        ewg11  = contract('igxy,jg->ijxy', temp, cosGvR2)
-        temp   = contract('gxy,ig->igxy', temp2, sinGvR2)
+        # ewg11  = contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, cosGvR2, cosGvR2, Gpref)
+        # ewg11 += contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, sinGvR2, sinGvR2, Gpref)
+        temp2 = contract('gx,gy->gxy', temp1, Gv)
+        temp = contract('gxy,ig->igxy', temp2, cosGvR2)
+        ewg11 = contract('igxy,jg->ijxy', temp, cosGvR2)
+        temp = contract('gxy,ig->igxy', temp2, sinGvR2)
         ewg11 += contract('igxy,jg->ijxy', temp, sinGvR2)
         # qm pc - qm quad
-        #ewg02  = -contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, cosGvR2, cosGvR2, Gpref)
-        #ewg02 += -contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, sinGvR2, sinGvR2, Gpref)
+        # ewg02  = -contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, cosGvR2, cosGvR2, Gpref)
+        # ewg02 += -contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, sinGvR2, sinGvR2, Gpref)
         ewg02 = -ewg11 / 3
 
         temp = tempGcR2 = tempGsR2 = temp1 = temp2 = None
 
-        return ewovrl00 + ewself00 + ewg00, \
-               ewovrl01 + ewself01 + ewg01, \
-               ewovrl11 + ewself11 + ewg11, \
-               ewovrl02 + ewself02 + ewg02
+        return (
+            ewovrl00 + ewself00 + ewg00,
+            ewovrl01 + ewself01 + ewg01,
+            ewovrl11 + ewself11 + ewg11,
+            ewovrl02 + ewself02 + ewg02,
+        )
 
     def get_ewald_pot(self, coords1, coords2=None, charges2=None, zetas2=None):
         assert self.dimension == 3
-        assert (coords2 is None and charges2 is None) or \
-            (coords2 is not None and charges2 is not None and zetas2 is not None)
+        assert (coords2 is None and charges2 is None) or (
+            coords2 is not None and charges2 is not None and zetas2 is not None
+        )
         coords1 = cp.asarray(coords1)
         if coords2 is not None:
             coords2 = cp.asarray(coords2)
@@ -430,12 +438,12 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         ew_eta, ew_cut = self.get_ewald_params()
         mesh = self.mesh
 
-        logger.debug(self, f"Ewald exponent {ew_eta}")
+        logger.debug(self, f'Ewald exponent {ew_eta}')
 
         # TODO Lall should respect ew_rcut
         Lall = cp.asarray(self.get_lattice_Ls())
 
-        all_coords2 = (coords2[None,:,:] - Lall[:,None,:]).reshape(-1,3)
+        all_coords2 = (coords2[None, :, :] - Lall[:, None, :]).reshape(-1, 3)
         all_coords2 = cp.asarray(all_coords2)
         if charges2 is not None:
             all_charges2 = cp.hstack([charges2] * len(Lall))
@@ -459,18 +467,18 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
             ewself02 = cp.zeros((len(coords1), len(coords1), 3, 3))
 
         mem_avail = cupy_helper.get_avail_mem()
-        blksize = int(mem_avail/64/3/len(all_coords2))
+        blksize = int(mem_avail / 64 / 3 / len(all_coords2))
         if blksize == 0:
-            raise RuntimeError(f"Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}")
+            raise RuntimeError(f'Not enough GPU memory, mem_avail = {mem_avail}, blkszie = {blksize}')
         for i0, i1 in lib.prange(0, len(coords1), blksize):
-            R = coords1[i0:i1,None,:] - all_coords2[None,:,:]
+            R = coords1[i0:i1, None, :] - all_coords2[None, :, :]
             r = cp.linalg.norm(R, axis=-1)
-            r[r<1e-16] = 1e100
+            r[r < 1e-16] = 1e100
             rmax_qm = max(cp.linalg.norm(coords1 - cp.mean(coords1, axis=0), axis=-1))
 
             # substract the real-space Coulomb within rcut_hcore
             mask = dist2 <= self.rcut_hcore**2
-            Tij, Tija, Tijab = get_multipole_tensors_pp(R[:,mask], [0,1,2], r[:,mask])
+            Tij, Tija, Tijab = get_multipole_tensors_pp(R[:, mask], [0, 1, 2], r[:, mask])
             if all_charges2 is not None:
                 charges = all_charges2[mask]
                 # ew0 = -d^2 E / dQi dqj qj
@@ -486,14 +494,14 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
                 # NOTE a too small rcut_hcore truncates QM atoms, while this correction
                 # should be applied to all QM pairs regardless of rcut_hcore
                 # NOTE this is now checked in get_hcore
-                #assert r[:,mask].shape[0] == r[:,mask].shape[1]   # real-space should not see qm images
+                # assert r[:,mask].shape[0] == r[:,mask].shape[1]   # real-space should not see qm images
                 # ew00 = -d^2 E / dQi dQj
                 # ew01 = -d^2 E / dQi dDja
                 # ew11 = -d^2 E / dDia dDjb
                 # ew02 = -d^2 E / dQi dOjab
                 ewovrl00[i0:i1] += -Tij
-                ewovrl01[i0:i1] +=  Tija
-                ewovrl11[i0:i1] +=  Tijab
+                ewovrl01[i0:i1] += Tija
+                ewovrl11[i0:i1] += Tijab
                 ewovrl02[i0:i1] += -Tijab / 3
 
             # difference between MM gaussain charges and MM point charges
@@ -501,40 +509,40 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
                 zetas = cp.asarray(zetas2)
                 mask = dist2 > self.rcut_hcore**2
                 min_expnt = cp.min(zetas)
-                max_ewrcut = pbc.gto.cell._estimate_rcut(min_expnt, 0, 1., self.precision)
-                cut2 = (max_ewrcut + rmax_qm)**2
+                max_ewrcut = pbc.gto.cell._estimate_rcut(min_expnt, 0, 1.0, self.precision)
+                cut2 = (max_ewrcut + rmax_qm) ** 2
                 mask = mask & (dist2 <= cut2)
                 expnts = cp.hstack([cp.sqrt(zetas)] * len(Lall))[mask]
-                r_ = r[:,mask]
-                R_ = R[:,mask]
+                r_ = r[:, mask]
+                R_ = R[:, mask]
                 if expnts.size != 0:
-                    Tij, Tija, Tijab = get_multipole_tensors_pg(R_, expnts, [0,1,2], r_)
+                    Tij, Tija, Tijab = get_multipole_tensors_pg(R_, expnts, [0, 1, 2], r_)
                     ewovrl0[i0:i1] -= contract('ij,j->i', Tij, all_charges2[mask])
                     ewovrl1[i0:i1] -= contract('j,ija->ia', all_charges2[mask], Tija)
                     ewovrl2[i0:i1] -= contract('j,ijab->iab', all_charges2[mask], Tijab) / 3
 
             # ewald real-space sum
             if all_charges2 is not None:
-                cut2 = (ew_cut + rmax_qm)**2
+                cut2 = (ew_cut + rmax_qm) ** 2
                 mask = dist2 <= cut2
-                r_ = r[:,mask]
-                R_ = R[:,mask]
+                r_ = r[:, mask]
+                R_ = R[:, mask]
                 all_charges2_ = all_charges2[mask]
             else:
                 # ewald sum will run over all qm images regardless of ew_cut
                 # this is to ensure r and R will always have the shape of (i1-i0, L*num_qm)
                 r_ = r
                 R_ = R
-            Tij, Tija, Tijab = get_multipole_tensors_pg(R_, ew_eta, [0,1,2], r_)
+            Tij, Tija, Tijab = get_multipole_tensors_pg(R_, ew_eta, [0, 1, 2], r_)
 
             if all_charges2 is not None:
                 ewovrl0[i0:i1] += contract('ij,j->i', Tij, all_charges2_)
                 ewovrl1[i0:i1] += contract('j,ija->ia', all_charges2_, Tija)
                 ewovrl2[i0:i1] += contract('j,ijab->iab', all_charges2_, Tijab) / 3
             else:
-                Tij = cp.sum(Tij.reshape(i1-i0, len(Lall), len(coords1)), axis=1)
-                Tija = cp.sum(Tija.reshape(i1-i0, len(Lall), len(coords1), 3), axis=1)
-                Tijab = cp.sum(Tijab.reshape(i1-i0, len(Lall), len(coords1), 3, 3), axis=1)
+                Tij = cp.sum(Tij.reshape(i1 - i0, len(Lall), len(coords1)), axis=1)
+                Tija = cp.sum(Tija.reshape(i1 - i0, len(Lall), len(coords1), 3), axis=1)
+                Tijab = cp.sum(Tijab.reshape(i1 - i0, len(Lall), len(coords1), 3, 3), axis=1)
                 ewovrl00[i0:i1] += Tij
                 ewovrl01[i0:i1] -= Tija
                 ewovrl11[i0:i1] -= Tijab
@@ -549,25 +557,30 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
                 # -d^2 Eself / dQi dQj
                 ewself00[i0:i1] += -cp.eye(len(coords1))[i0:i1] * 2 * ew_eta / cp.sqrt(cp.pi)
                 # -d^2 Eself / dDia dDjb
-                ewself11[i0:i1] += -contract('ij,ab->ijab', cp.eye(len(coords1))[i0:i1], cp.eye(3)) \
-                        * 4 * ew_eta**3 / 3 / cp.sqrt(cp.pi)
+                ewself11[i0:i1] += (
+                    -contract('ij,ab->ijab', cp.eye(len(coords1))[i0:i1], cp.eye(3))
+                    * 4
+                    * ew_eta**3
+                    / 3
+                    / cp.sqrt(cp.pi)
+                )
 
             r_ = R_ = all_charges2_ = None
 
         R = r = dist2 = all_charges2 = mask = None
 
         # g-space sum (using g grid)
-        logger.debug(self, f"Ewald mesh {mesh}")
+        logger.debug(self, f'Ewald mesh {mesh}')
 
         Gv, Gvbase, weights = self.get_Gv_weights(mesh)
         Gv = cp.asarray(Gv)
         absG2 = contract('gx,gx->g', Gv, Gv)
-        absG2[absG2==0] = 1e200
+        absG2[absG2 == 0] = 1e200
 
-        coulG = 4*cp.pi / absG2
+        coulG = 4 * cp.pi / absG2
         coulG *= weights
         # NOTE Gpref is actually Gpref*2
-        Gpref = cp.exp(-absG2/(4*ew_eta**2)) * coulG
+        Gpref = cp.exp(-absG2 / (4 * ew_eta**2)) * coulG
 
         GvR2 = contract('gx,ix->ig', Gv, coords2)
         cosGvR2 = cp.cos(GvR2)
@@ -577,55 +590,55 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
             GvR1 = contract('gx,ix->ig', Gv, coords1)
             cosGvR1 = cp.cos(GvR1)
             sinGvR1 = cp.sin(GvR1)
-            zcosGvR2 = contract("i,ig->g", charges2, cosGvR2)
-            zsinGvR2 = contract("i,ig->g", charges2, sinGvR2)
+            zcosGvR2 = contract('i,ig->g', charges2, cosGvR2)
+            zsinGvR2 = contract('i,ig->g', charges2, sinGvR2)
             # qm pc - mm pc
-            ewg0  = contract('ig,g->i', cosGvR1, zcosGvR2 * Gpref)
+            ewg0 = contract('ig,g->i', cosGvR1, zcosGvR2 * Gpref)
             ewg0 += contract('ig,g->i', sinGvR1, zsinGvR2 * Gpref)
             # qm dip - mm pc
-            #p = ['einsum_path', (2, 3), (0, 2), (0, 1)]
-            #ewg1  = contract('gx,ig,g,g->ix', Gv, cosGvR1, zsinGvR2, Gpref, optimize=p)
-            #ewg1 -= contract('gx,ig,g,g->ix', Gv, sinGvR1, zcosGvR2, Gpref, optimize=p)
-            tempGsR2  = contract('gx,g->gx', Gv, zsinGvR2 * Gpref)
-            ewg1  = contract('gx,ig->ix', tempGsR2, cosGvR1)
-            tempGcR2  = contract('gx,g->gx', Gv, zcosGvR2 * Gpref)
+            # p = ['einsum_path', (2, 3), (0, 2), (0, 1)]
+            # ewg1  = contract('gx,ig,g,g->ix', Gv, cosGvR1, zsinGvR2, Gpref, optimize=p)
+            # ewg1 -= contract('gx,ig,g,g->ix', Gv, sinGvR1, zcosGvR2, Gpref, optimize=p)
+            tempGsR2 = contract('gx,g->gx', Gv, zsinGvR2 * Gpref)
+            ewg1 = contract('gx,ig->ix', tempGsR2, cosGvR1)
+            tempGcR2 = contract('gx,g->gx', Gv, zcosGvR2 * Gpref)
             ewg1 -= contract('gx,ig->ix', tempGcR2, sinGvR1)
             # qm quad - mm pc
-            #p = ['einsum_path', (3, 4), (0, 3), (0, 2), (0, 1)]
-            #ewg2  = -contract('gx,gy,ig,g,g->ixy', Gv, Gv, cosGvR1, zcosGvR2, Gpref, optimize=p)
-            #ewg2 += -contract('gx,gy,ig,g,g->ixy', Gv, Gv, sinGvR1, zsinGvR2, Gpref, optimize=p)
-            temp  =  contract('gx,gy->gxy', tempGcR2, Gv)
-            ewg2  = -contract('gxy,ig->ixy', temp, cosGvR1)
-            temp  =  contract('gx,gy->gxy', tempGsR2, Gv)
+            # p = ['einsum_path', (3, 4), (0, 3), (0, 2), (0, 1)]
+            # ewg2  = -contract('gx,gy,ig,g,g->ixy', Gv, Gv, cosGvR1, zcosGvR2, Gpref, optimize=p)
+            # ewg2 += -contract('gx,gy,ig,g,g->ixy', Gv, Gv, sinGvR1, zsinGvR2, Gpref, optimize=p)
+            temp = contract('gx,gy->gxy', tempGcR2, Gv)
+            ewg2 = -contract('gxy,ig->ixy', temp, cosGvR1)
+            temp = contract('gx,gy->gxy', tempGsR2, Gv)
             ewg2 += -contract('gxy,ig->ixy', temp, sinGvR1)
             ewg2 /= 3
         else:
             # qm pc - qm pc
-            #ewg00  = contract('ig,jg,g->ij', cosGvR2, cosGvR2, Gpref)
-            #ewg00 += contract('ig,jg,g->ij', sinGvR2, sinGvR2, Gpref)
-            temp   = contract('ig,g->ig', cosGvR2, Gpref)
-            ewg00  = contract('ig,jg->ij', temp, cosGvR2)
-            temp   = contract('ig,g->ig', sinGvR2, Gpref)
+            # ewg00  = contract('ig,jg,g->ij', cosGvR2, cosGvR2, Gpref)
+            # ewg00 += contract('ig,jg,g->ij', sinGvR2, sinGvR2, Gpref)
+            temp = contract('ig,g->ig', cosGvR2, Gpref)
+            ewg00 = contract('ig,jg->ij', temp, cosGvR2)
+            temp = contract('ig,g->ig', sinGvR2, Gpref)
             ewg00 += contract('ig,jg->ij', temp, sinGvR2)
             # qm pc - qm dip
-            #ewg01  = contract('gx,ig,jg,g->ijx', Gv, sinGvR2, cosGvR2, Gpref)
-            #ewg01 -= contract('gx,ig,jg,g->ijx', Gv, cosGvR2, sinGvR2, Gpref)
-            temp1   = contract('gx,g->gx', Gv, Gpref)
-            temp   = contract('gx,ig->igx', temp1, sinGvR2)
-            ewg01  = contract('igx,jg->ijx', temp, cosGvR2)
-            temp   = contract('gx,ig->igx', temp1, cosGvR2)
+            # ewg01  = contract('gx,ig,jg,g->ijx', Gv, sinGvR2, cosGvR2, Gpref)
+            # ewg01 -= contract('gx,ig,jg,g->ijx', Gv, cosGvR2, sinGvR2, Gpref)
+            temp1 = contract('gx,g->gx', Gv, Gpref)
+            temp = contract('gx,ig->igx', temp1, sinGvR2)
+            ewg01 = contract('igx,jg->ijx', temp, cosGvR2)
+            temp = contract('gx,ig->igx', temp1, cosGvR2)
             ewg01 -= contract('igx,jg->ijx', temp, sinGvR2)
             # qm dip - qm dip
-            #ewg11  = contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, cosGvR2, cosGvR2, Gpref)
-            #ewg11 += contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, sinGvR2, sinGvR2, Gpref)
-            temp2   = contract('gx,gy->gxy', temp1, Gv)
-            temp   = contract('gxy,ig->igxy', temp2, cosGvR2)
-            ewg11  = contract('igxy,jg->ijxy', temp, cosGvR2)
-            temp   = contract('gxy,ig->igxy', temp2, sinGvR2)
+            # ewg11  = contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, cosGvR2, cosGvR2, Gpref)
+            # ewg11 += contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, sinGvR2, sinGvR2, Gpref)
+            temp2 = contract('gx,gy->gxy', temp1, Gv)
+            temp = contract('gxy,ig->igxy', temp2, cosGvR2)
+            ewg11 = contract('igxy,jg->ijxy', temp, cosGvR2)
+            temp = contract('gxy,ig->igxy', temp2, sinGvR2)
             ewg11 += contract('igxy,jg->ijxy', temp, sinGvR2)
             # qm pc - qm quad
-            #ewg02  = -contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, cosGvR2, cosGvR2, Gpref)
-            #ewg02 += -contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, sinGvR2, sinGvR2, Gpref)
+            # ewg02  = -contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, cosGvR2, cosGvR2, Gpref)
+            # ewg02 += -contract('gx,gy,ig,jg,g->ijxy', Gv, Gv, sinGvR2, sinGvR2, Gpref)
             ewg02 = -ewg11 / 3
 
         temp = tempGcR2 = tempGsR2 = temp1 = temp2 = None
@@ -633,14 +646,25 @@ class Cell(qmmm.mm_mole.Mole, pbc.gto.Cell):
         if charges2 is not None:
             return ewovrl0 + ewg0, ewovrl1 + ewg1, ewovrl2 + ewg2
         else:
-            return ewovrl00 + ewself00 + ewg00, \
-                   ewovrl01 + ewself01 + ewg01, \
-                   ewovrl11 + ewself11 + ewg11, \
-                   ewovrl02 + ewself02 + ewg02
+            return (
+                ewovrl00 + ewself00 + ewg00,
+                ewovrl01 + ewself01 + ewg01,
+                ewovrl11 + ewself11 + ewg11,
+                ewovrl02 + ewself02 + ewg02,
+            )
 
-def create_mm_mol(atoms_or_coords, a, charges=None, radii=None,
-        rcut_ewald=None, rcut_hcore=None, unit='Angstrom'):
-    '''Create an MM object based on the given coordinates and charges of MM
+
+def create_mm_mol(
+    atoms_or_coords,
+    a,
+    charges=None,
+    radii=None,
+    rcut_ewald=None,
+    rcut_hcore=None,
+    unit='Angstrom',
+    qm_atom_charges=None,
+):
+    """Create an MM object based on the given coordinates and charges of MM
     particles.
 
     Args:
@@ -662,14 +686,16 @@ def create_mm_mol(atoms_or_coords, a, charges=None, radii=None,
             The cutoff for exact MM potential whne computing hcore.
         unit : string
             The unit of the input. Default is 'Angstrom'.
-    '''
+    """
     if isinstance(atoms_or_coords, numpy.ndarray):
         # atoms_or_coords == np.array([(xx, xx, xx)])
         # Patch ghost atoms
         atoms = [(0, c) for c in atoms_or_coords]
-    elif (isinstance(atoms_or_coords, (list, tuple)) and
-          atoms_or_coords and
-          isinstance(atoms_or_coords[0][1], (int, float))):
+    elif (
+        isinstance(atoms_or_coords, (list, tuple))
+        and atoms_or_coords
+        and isinstance(atoms_or_coords[0][1], (int, float))
+    ):
         # atoms_or_coords == [(xx, xx, xx)]
         # Patch ghost atoms
         atoms = [(0, c) for c in atoms_or_coords]
@@ -685,7 +711,7 @@ def create_mm_mol(atoms_or_coords, a, charges=None, radii=None,
             radii = radii / param.BOHR
         zeta = 1 / radii**2
 
-    kwargs = {'charges': charges, 'zeta': zeta}
+    kwargs = {'charges': charges, 'zeta': zeta, 'qm_atom_charges': qm_atom_charges}
 
     if not is_au(unit):
         a = a / param.BOHR
@@ -700,5 +726,6 @@ def create_mm_mol(atoms_or_coords, a, charges=None, radii=None,
         kwargs['rcut_hcore'] = rcut_hcore
 
     return Cell(atoms, a, **kwargs)
+
 
 create_mm_cell = create_mm_mol
